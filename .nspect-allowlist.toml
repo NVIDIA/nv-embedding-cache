@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Packages list: https://nspect.nvidia.com/reports/opensource?id=NSPECT-0FQ1-4XQA&type=packageDetails
+
+version = "1.0.0"
+
+# if you are not adding excluded directories then remove [oss.excluded] and [[oss.excluded.directories]] both tag from file.
+[oss.excluded]
+
+# cuembed/third_party
+[[oss.excluded.directories]]
+paths = ['third_party/cuembed/third_party/.*/'] 
+comment = 'Unused code in cuEmbed third_party (we only use headers)'
+nspect_ids = ['NSPECT-0FQ1-4XQA']
+
+# openjdk-17
+[[oss.excluded.directories]]
+paths = ['third_party/nvhashmap/third_party/googletest/',
+         'third_party/googletest/',
+         'third_party/cuembed/third_party/gtest/']
+comment = 'False positive of openjdk in gtest'
+nspect_ids = ['NSPECT-0FQ1-4XQA']
+
+# MW absl + phmap
+[[oss.excluded.directories]]
+paths = ['third_party/nvhashmap/third_party/abseil-cpp/',
+         'third_party/nvhashmap/third_party/parallel-hashmap/']
+comment = 'Unused code in nvHashMap (dependencies for MW benchmark)'
+nspect_ids = ['NSPECT-0FQ1-4XQA']
+
+# libspatialindex
+[[oss.excluded.directories]]
+paths = ['third_party/nvhashmap/third_party/googletest/googletest/cmake/',
+         'third_party/cuembed/third_party/gtest/googletest/cmake/']
+comment = 'False positive of libspatialindex'
+nspect_ids = ['NSPECT-0FQ1-4XQA']
+
+# ghex
+[[oss.excluded.directories]]
+paths = ['third_party/googletest/googletest/']
+comment = 'False positive of ghex'
+nspect_ids = ['NSPECT-0FQ1-4XQA']
+
+# JOpt Simple, JMH Core, JMH Generators: Annotation Processors, Apache Commons Math, RocketMQ RocksDB JNI
+[[oss.excluded.directories]]
+paths = ['third_party/rocksdb/java/.*',
+         'third_party/rocksdb/tools/.*',
+         'third_party/rocksdb/fuzz/.*',
+         'third_party/rocksdb/cmake/.*',
+         'third_party/rocksdb/docs/.*']
+comment = 'Unused code (only using C++ code from rocksdb)'
+nspect_ids = ['NSPECT-0FQ1-4XQA']

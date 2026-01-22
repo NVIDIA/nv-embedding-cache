@@ -1,0 +1,34 @@
+[submodule "third_party/googletest"]
+	path = third_party/googletest
+	url = https://github.com/google/googletest.git
+[submodule "third_party/json"]
+	path = third_party/json
+	url = https://github.com/nlohmann/json.git
+[submodule "third_party/argparse"]
+	path = third_party/argparse
+	url = https://github.com/p-ranav/argparse.git
+[submodule "third_party/pybind11"]
+	path = third_party/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "third_party/cuembed"]
+	path = third_party/cuembed
+	url = https://github.com/NVIDIA/cuEmbed.git
+[submodule "third_party/dlpack"]
+	path = third_party/dlpack
+	url = https://github.com/dmlc/dlpack.git
+[submodule "third_party/abseil-cpp"]
+	path = third_party/abseil-cpp
+	url = https://github.com/abseil/abseil-cpp.git
+[submodule "third_party/parallel-hashmap"]
+	path = third_party/parallel-hashmap
+	url = https://github.com/greg7mdp/parallel-hashmap.git
+[submodule "third_party/rocksdb"]
+	path = third_party/rocksdb
+	url = https://github.com/facebook/rocksdb.git
+[submodule "third_party/hiredis"]
+	path = third_party/hiredis
+	url = https://github.com/redis/hiredis.git
+[submodule "third_party/redis++"]
+	path = third_party/redis++
+	url = https://github.com/sewenew/redis-plus-plus.git
+	ignore = dirty # needed since this repo writes out 'src/sw/redis++/hiredis_features.h' during cmake

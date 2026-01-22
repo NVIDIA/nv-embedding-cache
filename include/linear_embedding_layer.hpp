@@ -1,0 +1,77 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+#include <embedding_layer.hpp>
+#include "layer_utils.hpp"
+
+namespace nve {
+
+template <typename KeyType> class GpuTable;
+class InsertHeuristic;
+
+/**
+ * An embedding layer with a gpu cache that is backed by a linear table in UVM.
+ * This allows the GPU kernel to resolve all indices without returning to the host during lookup.
+ */
+template <typename KeyType>
+class LinearUVMEmbeddingLayer : public EmbeddingLayerBase {
+ public:
+  struct Config {
+    std::string layer_name;
+    std::shared_ptr<InsertHeuristic> insert_heuristic = nullptr;
+    int64_t min_insert_freq_gpu = 0; // increase this to throttle down auto inserts
+    int64_t min_insert_size_gpu = 1 << 16;
+  };
+
+  NVE_PREVENT_COPY_AND_MOVE_(LinearUVMEmbeddingLayer);
+  using gpu_table_ptr_t = std::shared_ptr<GpuTable<KeyType>>;
+  using key_type = KeyType;
+
+  LinearUVMEmbeddingLayer(const Config& cfg, gpu_table_ptr_t gpu_table,
+                          allocator_ptr_t allocator = {});
+
+  ~LinearUVMEmbeddingLayer() override;
+
+  void lookup(context_ptr_t& ctx, const int64_t num_keys, const void* keys, void* output,
+              const int64_t output_stride, max_bitmask_repr_t* hitmask,
+              const PoolingParams* pool_params, float* hitrates) override;
+  void insert(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
+              const int64_t value_stride, const int64_t value_size, const void* values,
+              const int64_t table_id) override;
+  void update(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
+              const int64_t value_stride, const int64_t value_size,
+              const void* values) override;
+  void accumulate(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
+                  const int64_t value_stride, const int64_t value_size, const void* values,
+                  DataType_t value_type) override;
+  void clear(context_ptr_t& ctx) override;
+  void erase(context_ptr_t& ctx, const int64_t num_keys, const void* keys, const int64_t table_id) override;
+  context_ptr_t create_execution_context(
+    cudaStream_t lookup_stream, cudaStream_t modify_stream, thread_pool_ptr_t thread_pool, allocator_ptr_t allocator) override;
+
+  inline const Config& get_config() const { return config_; }
+
+ private:
+  const Config config_;
+  allocator_ptr_t allocator_;
+  gpu_table_ptr_t gpu_table_;
+
+  std::shared_ptr<AutoInsertHandler> auto_insert_handler_;
+};
+
+}  // namespace nve

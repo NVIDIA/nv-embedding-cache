@@ -1,6 +1,8 @@
 # NV Embedding Cache
 
 NV Embedding Cache is a domain-specific SDK for high performance recommender system embeddings.
+We accelerate embedding lookups with a combination of SW caches in GPU/Host memory and customized CUDA kernels.
+The main target usage is recommender systems inference with embeddings that exceed the local GPU's memory capacity.
 
 ## Getting Started 
 

@@ -1,0 +1,15 @@
+FROM nvcr.io/nvidia/pytorch:25.06-py3
+RUN apt-get update
+RUN apt-get -y install sudo redis
+RUN sed -i '/^torch==/c\torch>=2.7' /etc/pip/constraint.txt
+
+ARG UID
+ARG UNAME
+ARG GID
+ARG GNAME
+RUN if [ -n "$UID" -a -n "$UNAME" -a -n "$GID" -a -n "$GNAME" ]; then \
+    (groupadd -g $GID $GNAME || true) && useradd --uid $UID -g $GID --no-log-init --create-home $UNAME && (echo "${UNAME}:password" | chpasswd) && (echo "${UNAME} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers); \
+    fi
+USER $UNAME
+ARG START_DIR=/home/${UNAME}
+WORKDIR $START_DIR

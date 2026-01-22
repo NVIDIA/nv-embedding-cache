@@ -1,0 +1,21 @@
+# build dirs
+build*/
+
+# vscode ws
+.vscode/
+
+# linked scripts
+scripts/.vscode-server/
+scripts/.cursor-server/
+scripts/.claude/
+scripts/.bash_history
+
+# py
+__pycache__/
+.pytest_cache/
+python/pynve.egg-info/
+.venv*
+
+# misc
+.devcontainer/.env
+.cache/

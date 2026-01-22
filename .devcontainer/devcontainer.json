@@ -1,0 +1,41 @@
+{
+    "name": "NVE Dev Container",
+
+    // Generate .env file with UID/GID before docker-compose runs
+    "initializeCommand": "cd .devcontainer && echo \"UID=$(id -u)\nGID=$(id -g)\nNVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}\" > .env",
+
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "devcontainer",
+    "workspaceFolder": "${localWorkspaceFolder}",
+
+    // Run as the local user
+    "remoteUser": "${localEnv:USER}",
+
+    // Mount the workspace at the same path as on host, and .ssh for git auth
+    "mounts": [
+        "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+        "source=${localEnv:HOME}/.ssh,target=${localEnv:HOME}/.ssh,type=bind,readonly"
+    ],
+
+    // Add ~/.local/bin to PATH (needed for torchx)
+    "remoteEnv": {
+        "PATH": "${containerEnv:PATH}:${localEnv:HOME}/.local/bin"
+    },
+
+    // VS Code / Cursor extensions
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-python.python",
+                "mhutchie.git-graph",
+                "eamodio.gitlens"
+            ],
+            "settings": {
+            }
+        }
+    },
+
+    // Run commands after container is created
+    "postCreateCommand": "echo 'Dev container ready!'"
+}
