@@ -278,7 +278,7 @@ static std::random_device random_device;
 
 using table_id_t = int64_t;
 
-Logger* getGlobalLogger();
+Logger* GetGlobalLogger();
 
 }  // namespace nve
 
@@ -294,7 +294,7 @@ Logger* getGlobalLogger();
     } else {                                                              \
       _msg_ = to_string(__VA_ARGS__);                                     \
     }                                                                     \
-    nve::getGlobalLogger()->log((_level_), (_msg_));                      \
+    nve::GetGlobalLogger()->log((_level_), (_msg_));                      \
   } while (0)
 
 // Logging macros

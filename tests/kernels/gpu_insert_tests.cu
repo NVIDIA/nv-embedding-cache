@@ -72,7 +72,7 @@ class SortAndInsertTest : public ::testing::Test {
 
         unique_keys->HtoD(0);
         priorities->HtoD(0);
-        replace_list->ph[0].nEntries = 0;
+        replace_list->ph[0].num_entries = 0;
         replace_list->HtoD(0);
 
         CHECK_CUDA_ERROR((ComputeSetReplaceData<KeyType, TagType, CounterType, NUM_WAYS, true>(
@@ -94,7 +94,7 @@ class SortAndInsertTest : public ::testing::Test {
 
         replace_list->DtoH(0);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-        return replace_list->ph[0].nEntries;
+        return replace_list->ph[0].num_entries;
     }
 
     void AllocateExtraMem(uint32_t num_sets, uint32_t num_keys, size_t embedding_size, size_t& extra_mem_size, int8_t** extra_mem_buf) {
@@ -239,7 +239,7 @@ class SortAndInsertTest : public ::testing::Test {
         // initializing tags to a value that will not be used in the tests
         CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(tags->pd, 0x40, num_sets * sizeof(TagType) * NUM_WAYS, 0));
 
-        replace_list->ph[0].pEntries = replace_entries->pd;
+        replace_list->ph[0].entries = replace_entries->pd;
 
         uint32_t tags_per_set = 3;
         uint32_t tags_offset = 0;
@@ -415,8 +415,8 @@ class SortAndInsertTest : public ::testing::Test {
                 if (replace_tags[j] != -1) {
                     uint32_t key_loc = replace_locations[j];
                     replace_entries_ref.push_back(ModifyEntry{
-                            .pSrc = reinterpret_cast<const int8_t*>(data_ptrs->ph[key_loc]),
-                            .pDst = reinterpret_cast<int8_t*>((i * NUM_WAYS + j) * embedding_size),
+                            .src = reinterpret_cast<const int8_t*>(data_ptrs->ph[key_loc]),
+                            .dst = reinterpret_cast<int8_t*>((i * NUM_WAYS + j) * embedding_size),
                             .set = i,
                             .way = j,
                             .tag = replace_tags[j]
@@ -432,8 +432,8 @@ class SortAndInsertTest : public ::testing::Test {
 
         CHECK_CUDA_ERROR(cudaMalloc(&extra_mem_buf, extra_mem_size));
 
-        replace_list->ph[0].pEntries = replace_entries->pd;
-        replace_list->ph[0].nEntries = 0; // for atomic
+        replace_list->ph[0].entries = replace_entries->pd;
+        replace_list->ph[0].num_entries = 0; // for atomic
         replace_list->HtoD(0);
         
         CHECK_CUDA_ERROR((ComputeSetReplaceData<KeyType, TagType, CounterType, NUM_WAYS, true>(
@@ -463,7 +463,7 @@ class SortAndInsertTest : public ::testing::Test {
         // num of replacements should match
         // replacements themselves should match, but not necessarily in the same order
 
-        uint32_t num_replacements_device = replace_list->ph[0].nEntries;
+        uint32_t num_replacements_device = replace_list->ph[0].num_entries;
         EXPECT_TRUE(num_replacements_device == replace_entries_ref.size());
 
         std::sort(replace_entries->ph, replace_entries->ph + num_replacements_device,
@@ -481,8 +481,8 @@ class SortAndInsertTest : public ::testing::Test {
             EXPECT_TRUE (rep_ref.set == rep_dev.set);
             EXPECT_TRUE (rep_ref.way == rep_dev.way);
             EXPECT_TRUE (rep_ref.tag == rep_dev.tag);
-            EXPECT_TRUE (rep_ref.pSrc == rep_dev.pSrc);
-            EXPECT_TRUE (rep_ref.pDst == rep_dev.pDst);
+            EXPECT_TRUE (rep_ref.src == rep_dev.src);
+            EXPECT_TRUE (rep_ref.dst == rep_dev.dst);
         }
     }
 };

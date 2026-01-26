@@ -40,17 +40,17 @@ constexpr __host__ __device__ uint32_t calc_pipe_buffer_size(uint32_t row_size)
 }
 
 template<typename IndexT, typename TagT>
-static __device__ inline uint32_t EmbedCacheGetWayMask(IndexT laneIdx, uint32_t currTable, const typename EmbedCacheSA<IndexT, TagT>::CacheData data)
+static __device__ inline uint32_t embed_cache_get_way_mask(IndexT lane_idx, uint32_t curr_table, const typename EmbedCacheSA<IndexT, TagT>::CacheData data)
 {
-    uint64_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-    uint64_t setIdx = laneIdx % data.nSets;
-    const TagT* pWays = (const TagT*)(data.pTags + (cacheOffset + setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS) * sizeof(TagT));
+    uint64_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+    uint64_t set_idx = lane_idx % data.num_sets;
+    const TagT* ways = (const TagT*)(data.tags_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS) * sizeof(TagT));
     uint32_t out = 0;
     for (uint32_t i = 0; i < EmbedCacheSA<IndexT, TagT>::NUM_WAYS; i++)
     {
-        TagT way = pWays[i];
-        IndexT key = way * data.nSets + setIdx;
-        uint32_t b = key == laneIdx;
+        TagT way = ways[i];
+        IndexT key = way * data.num_sets + set_idx;
+        uint32_t b = key == lane_idx;
         out |= (b << i); 
     }
 
@@ -58,52 +58,52 @@ static __device__ inline uint32_t EmbedCacheGetWayMask(IndexT laneIdx, uint32_t 
 }
 
 template<typename IndexT, typename TagT>
-static __device__ inline uint64_t EmbedCacheGetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename EmbedCacheSA<IndexT, TagT>::CacheData data)
+static __device__ inline uint64_t embed_cache_get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, TagT>::CacheData data)
 {
-    uint64_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-    uint64_t setIdx = laneIdx % data.nSets;
-    uint32_t out = EmbedCacheGetWayMask<IndexT, TagT>(laneIdx, currTable, data);
+    uint64_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+    uint64_t set_idx = lane_idx % data.num_sets;
+    uint32_t out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
     uint32_t way = __ffs(out) - 1;
-    uint64_t lanePtr = (out == 0) ? ((pTable == nullptr) ? 0 : (uint64_t)pTable + (laneIdx)*(uint64_t)data.rowSizeInBytes) : 
-        (uint64_t)data.pCache + (cacheOffset + setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes;
+    uint64_t lane_ptr = (out == 0) ? ((table == nullptr) ? 0 : (uint64_t)table + (lane_idx)*(uint64_t)data.row_size_in_bytes) : 
+        (uint64_t)data.cache_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes;
 
-    if (out == 0 && data.bCountMisses)
+    if (out == 0 && data.count_misses)
     {
         atomicAdd((unsigned long long*)data.misses, 1);
     }
 
-    return lanePtr;
+    return lane_ptr;
 }
 
 template<typename IndexT>
 class AddressFunctor<IndexT, typename EmbedCacheSA<IndexT, uint16_t>::CacheData>
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename EmbedCacheSA<IndexT, uint16_t>::CacheData data)
+    static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, uint16_t>::CacheData data)
     {
-        uint32_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS;
-        uint32_t setIdx = laneIdx % data.nSets;
-        uint4 ways = *(uint4*)(data.pTags + (cacheOffset + setIdx * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS) * sizeof(uint16_t));
-        uint16_t* pWays = (uint16_t*)(&ways);
+        uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS;
+        uint32_t set_idx = lane_idx % data.num_sets;
+        uint4 ways_vec = *(uint4*)(data.tags_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS) * sizeof(uint16_t));
+        uint16_t* ways = (uint16_t*)(&ways_vec);
         uint32_t out = 0;
         for (uint32_t i = 0; i < EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS; i++)
         {
-            uint32_t way = pWays[i];
-            uint32_t key = way * data.nSets + setIdx;
-            uint32_t b = key == laneIdx;
+            uint32_t way = ways[i];
+            uint32_t key = way * data.num_sets + set_idx;
+            uint32_t b = key == lane_idx;
             out |= (b << i); 
         }
         uint32_t way = __ffs(out) - 1;
-        uint64_t lanePtr = (out == 0) ? 
-                           ((pTable == nullptr) ? 0 : ((uint64_t)pTable + (laneIdx)*(uint64_t)data.rowSizeInBytes)) : 
-            (uint64_t)data.pCache + (cacheOffset + setIdx * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes;
+        uint64_t lane_ptr = (out == 0) ? 
+                           ((table == nullptr) ? 0 : ((uint64_t)table + (lane_idx)*(uint64_t)data.row_size_in_bytes)) : 
+            (uint64_t)data.cache_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes;
 
-        if (out == 0 && data.bCountMisses)
+        if (out == 0 && data.count_misses)
         {
             atomicAdd((unsigned long long*)data.misses, 1llu);
         }
 
-        return lanePtr;
+        return lane_ptr;
     }
 };
 
@@ -114,9 +114,9 @@ template<typename IndexT>
 class AddressFunctor<IndexT, typename EmbedCacheSA<IndexT, uint32_t>::CacheData>
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename EmbedCacheSA<IndexT, uint32_t>::CacheData data)
+    static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, uint32_t>::CacheData data)
     {
-        return EmbedCacheGetAddress<IndexT, uint32_t>(laneIdx, pTable, currTable, data);
+        return embed_cache_get_address<IndexT, uint32_t>(lane_idx, table, curr_table, data);
     }
 };
 
@@ -124,9 +124,9 @@ template<typename IndexT>
 class AddressFunctor<IndexT, typename EmbedCacheSA<IndexT, uint64_t>::CacheData>
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename EmbedCacheSA<IndexT, uint64_t>::CacheData data)
+    static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, uint64_t>::CacheData data)
     {
-        return EmbedCacheGetAddress<IndexT, uint64_t>(laneIdx, pTable, currTable, data);
+        return embed_cache_get_address<IndexT, uint64_t>(lane_idx, table, curr_table, data);
     }
 };
 
@@ -134,9 +134,9 @@ template<typename IndexT>
 class AddressFunctor<IndexT, typename EmbedCacheSA<IndexT, int64_t>::CacheData>
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename EmbedCacheSA<IndexT, int64_t>::CacheData data)
+    static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, int64_t>::CacheData data)
     {
-        return EmbedCacheGetAddress<IndexT, int64_t>(laneIdx, pTable, currTable, data);
+        return embed_cache_get_address<IndexT, int64_t>(lane_idx, table, curr_table, data);
     }
 };
 
@@ -144,26 +144,26 @@ template<typename IndexT>
 class AddressFunctor<IndexT, typename EmbedCacheSA<IndexT, int32_t>::CacheData>
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename EmbedCacheSA<IndexT, int32_t>::CacheData data)
+    static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, int32_t>::CacheData data)
     {
-        return EmbedCacheGetAddress<IndexT, int32_t>(laneIdx, pTable, currTable, data);
+        return embed_cache_get_address<IndexT, int32_t>(lane_idx, table, curr_table, data);
     }
 };
 
 template<typename IndexT, typename TagT, typename DataType>
-__global__ void MemUpdateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t sz)
+__global__ void mem_update_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t sz)
 {
-    if (blockIdx.x < pList->nEntries) {
-        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = pList->pEntries[blockIdx.x];
-        MemcpyWarp<32, DataType>(e.pDst, e.pSrc, sz);
+    if (blockIdx.x < list->num_entries) {
+        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = list->entries[blockIdx.x];
+        memcpy_warp<32, DataType>(e.dst, e.src, sz);
     }
 }
 
 template<typename IndexT, typename TagT, typename DataType>
-__global__ void MemUpdateAccumulateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t sz)
+__global__ void mem_update_accumulate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t sz)
 {
-    if (blockIdx.x < pList->nEntries) {
-        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = pList->pEntries[blockIdx.x];
+    if (blockIdx.x < list->num_entries) {
+        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = list->entries[blockIdx.x];
         constexpr uint32_t ELEMENT_SIZE = sizeof(DataType);
         constexpr uint32_t SUBWARP_WIDTH = 32;
         for (uint32_t k = 0; k < sz; k += ELEMENT_SIZE*SUBWARP_WIDTH)
@@ -171,8 +171,8 @@ __global__ void MemUpdateAccumulateKernel(typename EmbedCacheSA<IndexT, TagT>::M
             uint32_t offset = k + threadIdx.x * ELEMENT_SIZE;
             if (offset < sz)
             {
-                DataType d = *(DataType*)((int8_t*)e.pSrc + offset);
-                DataType* dst_ptr = (DataType*)((int8_t*)e.pDst + offset);
+                DataType d = *(DataType*)((int8_t*)e.src + offset);
+                DataType* dst_ptr = (DataType*)((int8_t*)e.dst + offset);
                 atomicAdd(dst_ptr, d);
             }
         }
@@ -180,29 +180,29 @@ __global__ void MemUpdateAccumulateKernel(typename EmbedCacheSA<IndexT, TagT>::M
 }
 
 template <typename InputDataT, typename LoadDataT>
-static __device__ inline  void unpack(LoadDataT inputVec, InputDataT* outputArray);
+static __device__ inline  void unpack(LoadDataT input_vec, InputDataT* output_array);
 
 template <>
-__device__ inline  void unpack<int8_t, char4>(char4 inputVec, int8_t* outputArray)
+__device__ inline  void unpack<int8_t, char4>(char4 input_vec, int8_t* output_array)
 {
-    outputArray[0] = inputVec.x;
-    outputArray[1] = inputVec.y;
-    outputArray[2] = inputVec.z;
-    outputArray[3] = inputVec.w;
+    output_array[0] = input_vec.x;
+    output_array[1] = input_vec.y;
+    output_array[2] = input_vec.z;
+    output_array[3] = input_vec.w;
 }
 
 template <>
-__device__ inline  void unpack<int8_t, char2>(char2 inputVec, int8_t* outputArray)
+__device__ inline  void unpack<int8_t, char2>(char2 input_vec, int8_t* output_array)
 {
-    outputArray[0] = inputVec.x;
-    outputArray[1] = inputVec.y;
+    output_array[0] = input_vec.x;
+    output_array[1] = input_vec.y;
 }
 
 template<typename IndexT, typename TagT, typename InputDataT, typename LoadDataT, typename ScaleT, typename CacheDataT>
-__global__ void MemUpdateAccumulateQuantizedKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t sz)
+__global__ void mem_update_accumulate_quantized_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t sz)
 {
-    if (blockIdx.x < pList->nEntries) {
-        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = pList->pEntries[blockIdx.x];
+    if (blockIdx.x < list->num_entries) {
+        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = list->entries[blockIdx.x];
         // assume alignment is a multiple of sizeof(ScaleT), should be checked before calling the kernel
         constexpr uint32_t ELEMENT_SIZE = sizeof(CacheDataT);
         constexpr uint32_t INPUT_ELEMENT_SIZE = sizeof(InputDataT);
@@ -210,7 +210,7 @@ __global__ void MemUpdateAccumulateQuantizedKernel(typename EmbedCacheSA<IndexT,
         constexpr uint32_t VECTOR_WIDTH = LOAD_ELEMENT_SIZE / INPUT_ELEMENT_SIZE;
         auto num_elements = sz / sizeof(ELEMENT_SIZE);
         auto input_sz = num_elements * INPUT_ELEMENT_SIZE;
-        ScaleT scale = *((ScaleT*) (e.pSrc + input_sz));
+        ScaleT scale = *((ScaleT*) (e.src + input_sz));
 
         constexpr uint32_t SUBWARP_WIDTH = 32;
         for (uint32_t k = 0; k < input_sz; k += LOAD_ELEMENT_SIZE*SUBWARP_WIDTH)
@@ -219,8 +219,8 @@ __global__ void MemUpdateAccumulateQuantizedKernel(typename EmbedCacheSA<IndexT,
             uint32_t dst_offset = k + threadIdx.x * ELEMENT_SIZE * VECTOR_WIDTH;
             if (src_offset < input_sz)
             {
-                LoadDataT d = *(LoadDataT*)((int8_t*)e.pSrc + src_offset);
-                CacheDataT* dst_ptr = (CacheDataT*)((int8_t*)e.pDst + dst_offset);
+                LoadDataT d = *(LoadDataT*)((int8_t*)e.src + src_offset);
+                CacheDataT* dst_ptr = (CacheDataT*)((int8_t*)e.dst + dst_offset);
                 InputDataT d_unpacked[VECTOR_WIDTH];
                 unpack<InputDataT, LoadDataT>(d, d_unpacked);
                 for (uint32_t e = 0; e < VECTOR_WIDTH; e++) {
@@ -233,84 +233,84 @@ __global__ void MemUpdateAccumulateQuantizedKernel(typename EmbedCacheSA<IndexT,
 }
 
 template<typename IndexT, typename TagT>
-__global__ void InvalidateTagKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, TagT* pTags)
+__global__ void invalidate_tag_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, TagT* tags)
 {
     auto tid = blockIdx.x*blockDim.x + threadIdx.x;
-    if (tid < pList->nEntries)
+    if (tid < list->num_entries)
     {
-        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = pList->pEntries[tid];
-        TagT* pToModTag = pTags + e.set * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + e.way;
-        *pToModTag = static_cast<TagT>(-1);
+        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = list->entries[tid];
+        TagT* to_mod_tag = tags + e.set * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + e.way;
+        *to_mod_tag = static_cast<TagT>(-1);
     }
 }
 
 template<typename IndexT, typename TagT>
-__global__ void TagUpdateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, TagT* pTags)
+__global__ void tag_update_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, TagT* tags)
 {
     auto tid = blockIdx.x*blockDim.x + threadIdx.x;
-    if (tid < pList->nEntries)
+    if (tid < list->num_entries)
     {
-        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = pList->pEntries[tid];
-        TagT* pToModTag = pTags + e.set * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + e.way;
-        *pToModTag = e.tag;
+        typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = list->entries[tid];
+        TagT* to_mod_tag = tags + e.set * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + e.way;
+        *to_mod_tag = e.tag;
     }
 }
 
 template<typename IndexT, typename TagT, uint32_t SUBWARP_WIDTH, typename DataType>
-__global__ void Query(const IndexT* d_keys, const size_t len,
+__global__ void query(const IndexT* d_keys, const size_t len,
     int8_t* d_values, uint64_t* d_missing_index,
     IndexT* d_missing_keys, size_t* d_missing_len,
-    typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t currTable, size_t stride)
+    typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t curr_table, size_t stride)
 {
-    const uint32_t blockDims = blockDim.x * blockDim.y;
-    uint32_t block_ptr = blockIdx.x * blockDims;
+    const uint32_t block_dims = blockDim.x * blockDim.y;
+    uint32_t block_ptr = blockIdx.x * block_dims;
     uint32_t tid = block_ptr + threadIdx.x; // each tid search for one index, and then we do a "transpose" and copy them out if needed
     const uint32_t subwarp_idx = threadIdx.x / SUBWARP_WIDTH;
     const uint32_t subwarp_ptr = block_ptr + subwarp_idx * SUBWARP_WIDTH;
     const uint32_t intra_subwarp_idx = threadIdx.x % SUBWARP_WIDTH;
 
-    uint64_t laneptr;
+    uint64_t lane_ptr;
     if (tid >= len)
     {
-        laneptr = 0;
+        lane_ptr = 0;
     }
     else
     {
-        IndexT laneIdx = d_keys[tid];
-        uint32_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-        uint32_t setIdx = laneIdx % data.nSets;
-        uint32_t laneout = EmbedCacheGetWayMask<IndexT, TagT>(laneIdx, currTable, data);
-        uint32_t laneway = __ffs(laneout) - 1;
-        if (laneout == 0)
+        IndexT lane_idx = d_keys[tid];
+        uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
+        uint32_t lane_way = __ffs(lane_out) - 1;
+        if (lane_out == 0)
         {
             unsigned long long old = atomicAdd((unsigned long long*)d_missing_len, 1llu);
-            if (data.bCountMisses)
+            if (data.count_misses)
             {
                 atomicAdd((unsigned long long*)data.misses, 1);
             }
             d_missing_index[old] = tid;
-            d_missing_keys[old] = laneIdx;
-            laneptr = 0;
+            d_missing_keys[old] = lane_idx;
+            lane_ptr = 0;
         }
         else
         {
-            auto way = laneway;
-            laneptr = (uint64_t)(data.pCache + (cacheOffset + setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes);
+            auto way = lane_way;
+            lane_ptr = (uint64_t)(data.cache_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes);
         }
     }
 
     for (uint32_t s = 0; s < SUBWARP_WIDTH; s++)
     {
         const uint32_t ELEMENT_SIZE = sizeof(DataType);
-        uint64_t src_ptr = __shfl_sync(0xffffffff, laneptr, s, SUBWARP_WIDTH);
+        uint64_t src_ptr = __shfl_sync(0xffffffff, lane_ptr, s, SUBWARP_WIDTH);
         if (src_ptr == 0)
         {
             continue;
         }
-        for (uint32_t k = 0; k < data.rowSizeInBytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
+        for (uint32_t k = 0; k < data.row_size_in_bytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
         {
             uint32_t offset = k + intra_subwarp_idx * ELEMENT_SIZE;
-            if (offset < data.rowSizeInBytes)
+            if (offset < data.row_size_in_bytes)
             {
                 DataType d = *(DataType*)(src_ptr + offset);
                 DataType* dst_ptr = (DataType*)(d_values + (subwarp_ptr + s) * stride + offset);
@@ -322,11 +322,11 @@ __global__ void Query(const IndexT* d_keys, const size_t len,
 }
 
 template<typename IndexT, typename TagT, uint32_t SUBWARP_WIDTH, typename DataType>
-__global__ void UpdateAccumulateNoSync(const IndexT* d_keys, const size_t len,
-    const int8_t* d_values, typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t currTable, size_t stride)
+__global__ void update_accumulate_no_sync(const IndexT* d_keys, const size_t len,
+    const int8_t* d_values, typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t curr_table, size_t stride)
 {
-    const uint32_t blockDims = blockDim.x * blockDim.y;
-    uint32_t block_ptr = blockIdx.x * blockDims;
+    const uint32_t block_dims = blockDim.x * blockDim.y;
+    uint32_t block_ptr = blockIdx.x * block_dims;
     uint32_t tid = block_ptr + threadIdx.x; // each tid search for one index, and then we do a "transpose" and copy them out if needed
     const uint32_t intra_subwarp_idx = threadIdx.x % SUBWARP_WIDTH;
 
@@ -339,20 +339,20 @@ __global__ void UpdateAccumulateNoSync(const IndexT* d_keys, const size_t len,
     }
     else
     {
-        IndexT laneIdx = d_keys[tid];
-        uint32_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-        uint32_t setIdx = laneIdx % data.nSets;
-        uint32_t laneout = EmbedCacheGetWayMask<IndexT, TagT>(laneIdx, currTable, data);
-        uint32_t laneway = __ffs(laneout) - 1;
-        if (laneout == 0)
+        IndexT lane_idx = d_keys[tid];
+        uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
+        uint32_t lane_way = __ffs(lane_out) - 1;
+        if (lane_out == 0)
         {
             lane_dst_ptr = 0;
             lane_src_ptr = 0;
         }
         else
         {
-            auto way = laneway;
-            lane_dst_ptr = (uint64_t)(data.pCache + (cacheOffset + setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes);
+            auto way = lane_way;
+            lane_dst_ptr = (uint64_t)(data.cache_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes);
             lane_src_ptr = (uint64_t)(d_values + (tid * stride));
         }
     }
@@ -367,10 +367,10 @@ __global__ void UpdateAccumulateNoSync(const IndexT* d_keys, const size_t len,
             continue;
         }
         
-        for (uint32_t k = 0; k < data.rowSizeInBytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
+        for (uint32_t k = 0; k < data.row_size_in_bytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
         {
             uint32_t offset = k + intra_subwarp_idx * ELEMENT_SIZE;
-            if (offset < data.rowSizeInBytes)
+            if (offset < data.row_size_in_bytes)
             {
                 DataType d = *(DataType*)(src_ptr + offset);
                 atomicAdd((DataType*)(dst_ptr + offset), d);
@@ -382,17 +382,17 @@ __global__ void UpdateAccumulateNoSync(const IndexT* d_keys, const size_t len,
 
 
 template<typename IndexT, typename TagT, uint32_t SUBWARP_WIDTH, typename DataType>
-__global__ void Query(const IndexT* d_keys, const size_t len,
+__global__ void query(const IndexT* d_keys, const size_t len,
     int8_t* d_values, uint32_t* d_hit_mask,
-    typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t currTable, size_t stride)
+    typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t curr_table, size_t stride)
 {
-    const uint32_t blockDims = blockDim.x * blockDim.y;
-    const uint32_t warp_ptr = blockIdx.x * blockDims + threadIdx.y*blockDim.x;
+    const uint32_t block_dims = blockDim.x * blockDim.y;
+    const uint32_t warp_ptr = blockIdx.x * block_dims + threadIdx.y*blockDim.x;
     const uint32_t tid = warp_ptr + threadIdx.x; // each tid search for one index, and then we do a "transpose" and copy them out if needed
     const uint32_t subwarp_idx = threadIdx.x / SUBWARP_WIDTH;
     const uint32_t subwarp_ptr = warp_ptr + subwarp_idx * SUBWARP_WIDTH;
     const uint32_t intra_subwarp_idx = threadIdx.x % SUBWARP_WIDTH;
-    uint64_t laneptr;
+    uint64_t lane_ptr;
 
     if (subwarp_ptr >= len) {
         return;
@@ -400,7 +400,7 @@ __global__ void Query(const IndexT* d_keys, const size_t len,
 
     if (tid >= len)
     {
-        laneptr = 0;
+        lane_ptr = 0;
     }
     else
     {
@@ -408,96 +408,96 @@ __global__ void Query(const IndexT* d_keys, const size_t len,
         const uint32_t bit = 1ul << (threadIdx.x);
         const bool hit = (d_hit_mask[subwarp_ptr / 32] & bit) == bit;
         if (hit) {
-            laneptr = 0; //as data already in place
+            lane_ptr = 0; //as data already in place
         }
         else {
-            const IndexT laneIdx = d_keys[tid];
-            const uint32_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-            const uint32_t setIdx = laneIdx % data.nSets;
-            const uint32_t laneout = EmbedCacheGetWayMask<IndexT, TagT>(laneIdx, currTable, data);
-            const uint32_t laneway = __ffs(laneout) - 1;
+            const IndexT lane_idx = d_keys[tid];
+            const uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+            const uint32_t set_idx = lane_idx % data.num_sets;
+            const uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
+            const uint32_t lane_way = __ffs(lane_out) - 1;
 
-            if (laneout == 0)
+            if (lane_out == 0)
             {
-                if (data.bCountMisses)
+                if (data.count_misses)
                 {
                     atomicAdd((unsigned long long*)data.misses, 1);
                 }
-                laneptr = 0;
+                lane_ptr = 0;
             }
             else
             {
-                auto way = laneway;
-                laneptr = (uint64_t)(data.pCache + (cacheOffset + setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes);
+                auto way = lane_way;
+                lane_ptr = (uint64_t)(data.cache_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes);
             }
         }
     }
-    uint32_t localHitMask = 0;
+    uint32_t local_hit_mask = 0;
     for (uint32_t s = 0; s < SUBWARP_WIDTH; s++)
     {
         const uint32_t ELEMENT_SIZE = sizeof(DataType);
-        uint64_t src_ptr = __shfl_sync(__activemask(), laneptr, s, SUBWARP_WIDTH);
-        uint32_t outputIdx = subwarp_ptr + s;
+        uint64_t src_ptr = __shfl_sync(__activemask(), lane_ptr, s, SUBWARP_WIDTH);
+        uint32_t output_idx = subwarp_ptr + s;
         if (src_ptr == 0)
         {
             continue;
         }
         // hit 
-        localHitMask |= 1 << s;
-        for (uint32_t k = 0; k < data.rowSizeInBytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
+        local_hit_mask |= 1 << s;
+        for (uint32_t k = 0; k < data.row_size_in_bytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
         {
             uint32_t offset = k + intra_subwarp_idx * ELEMENT_SIZE;
-            if (offset < data.rowSizeInBytes)
+            if (offset < data.row_size_in_bytes)
             {
                 DataType d = *(DataType*)(src_ptr + offset);
-                DataType* dst_ptr = (DataType*)(d_values + outputIdx * stride + offset);
+                DataType* dst_ptr = (DataType*)(d_values + output_idx * stride + offset);
                 *dst_ptr = d;
             }
         }
     }
     if (threadIdx.x == 0)
     {
-        d_hit_mask[subwarp_ptr / 32] |= localHitMask;
+        d_hit_mask[subwarp_ptr / 32] |= local_hit_mask;
     }
 }
 
 // need to have an argument explicity depend on IndexT type or the compiler gets confused
 template<typename IndexT, typename TagT>
-cudaError_t callTagInvalidateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t nEntries, TagT* pTags, cudaStream_t stream)
+cudaError_t call_tag_invalidate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, TagT* tags, cudaStream_t stream)
 {
-    dim3 gridSize((nEntries + 32 - 1)/32,1);
-    dim3 blockSize(32, 1); 
-    InvalidateTagKernel<IndexT, TagT><<<gridSize, blockSize, 0, stream>>>(pList, pTags);
+    dim3 grid_size((num_entries + 32 - 1)/32,1);
+    dim3 block_size(32, 1); 
+    invalidate_tag_kernel<IndexT, TagT><<<grid_size, block_size, 0, stream>>>(list, tags);
     return cudaGetLastError();
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callMemUpdateAccumulateQuantizedKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t nEntries, uint32_t rowSizeInBytes, DataTypeFormat inputFormat, DataTypeFormat outputFormat, cudaStream_t stream)
+cudaError_t call_mem_update_accumulate_quantized_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, uint32_t row_size_in_bytes, DataTypeFormat input_format, DataTypeFormat output_format, cudaStream_t stream)
 {
-    dim3 gridSize(nEntries,1);
-    dim3 blockSize(32, 1);
+    dim3 grid_size(num_entries,1);
+    dim3 block_size(32, 1);
 
-    if (inputFormat != DATATYPE_INT8_SCALED) {
+    if (input_format != DATATYPE_INT8_SCALED) {
         //not implemented
         return cudaErrorNotSupported;
     }
-    switch (outputFormat) {
+    switch (output_format) {
       case DATATYPE_FP16:
         {
-            auto srcRowSizeInBytes = rowSizeInBytes/sizeof(__half) + 2;
-            assert((srcRowSizeInBytes % sizeof(__half)) == 0);
-            if ((srcRowSizeInBytes % 4) == 0) {
-                MemUpdateAccumulateQuantizedKernel<IndexT, TagT, int8_t, char4, __half, __half><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+            auto src_row_size_in_bytes = row_size_in_bytes/sizeof(__half) + 2;
+            assert((src_row_size_in_bytes % sizeof(__half)) == 0);
+            if ((src_row_size_in_bytes % 4) == 0) {
+                mem_update_accumulate_quantized_kernel<IndexT, TagT, int8_t, char4, __half, __half><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
             } else {
-                MemUpdateAccumulateQuantizedKernel<IndexT, TagT, int8_t, char2, __half, __half><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+                mem_update_accumulate_quantized_kernel<IndexT, TagT, int8_t, char2, __half, __half><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
             }
         }
         break;
       case DATATYPE_FP32:
         {
-            [[maybe_unused]] auto srcRowSizeInBytes = rowSizeInBytes/sizeof(float);
-            assert((srcRowSizeInBytes % sizeof(float)) == 0);
-            MemUpdateAccumulateQuantizedKernel<IndexT, TagT, int8_t, char4, float,  float><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+            [[maybe_unused]] auto src_row_size_in_bytes = row_size_in_bytes/sizeof(float);
+            assert((src_row_size_in_bytes % sizeof(float)) == 0);
+            mem_update_accumulate_quantized_kernel<IndexT, TagT, int8_t, char4, float,  float><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
         }
         break;
       default:
@@ -508,38 +508,38 @@ cudaError_t callMemUpdateAccumulateQuantizedKernel(typename EmbedCacheSA<IndexT,
 
 // need to have an argument explicity depend on IndexT type or the compiler gets confused
 template<typename IndexT, typename TagT>
-cudaError_t callMemUpdateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t nEntries, uint32_t rowSizeInBytes, cudaStream_t stream)
+cudaError_t call_mem_update_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, uint32_t row_size_in_bytes, cudaStream_t stream)
 {
-    dim3 gridSize(nEntries,1);
-    dim3 blockSize(32, 1); 
-    if (rowSizeInBytes % sizeof(uint4) == 0)
+    dim3 grid_size(num_entries,1);
+    dim3 block_size(32, 1); 
+    if (row_size_in_bytes % sizeof(uint4) == 0)
     {
-        MemUpdateKernel<IndexT, TagT, uint4><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+        mem_update_kernel<IndexT, TagT, uint4><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
     }
-    else if (rowSizeInBytes % sizeof(uint32_t) == 0)
+    else if (row_size_in_bytes % sizeof(uint32_t) == 0)
     {
-        MemUpdateKernel<IndexT, TagT, uint32_t><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+        mem_update_kernel<IndexT, TagT, uint32_t><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
     }
     else
     {
-        MemUpdateKernel<IndexT, TagT, int8_t><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+        mem_update_kernel<IndexT, TagT, int8_t><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
     }
     return cudaGetLastError();
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callMemUpdateAccumulateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t nEntries, uint32_t rowSizeInBytes, DataTypeFormat inputFormat, [[maybe_unused]] DataTypeFormat outputFormat, cudaStream_t stream)
+cudaError_t call_mem_update_accumulate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, uint32_t row_size_in_bytes, DataTypeFormat input_format, [[maybe_unused]] DataTypeFormat output_format, cudaStream_t stream)
 {
-    assert(inputFormat == outputFormat);
-    dim3 gridSize(nEntries,1);
-    dim3 blockSize(32, 1); 
-    switch (inputFormat)
+    assert(input_format == output_format);
+    dim3 grid_size(num_entries,1);
+    dim3 block_size(32, 1); 
+    switch (input_format)
     {
     case DATATYPE_FP16:
-        MemUpdateAccumulateKernel<IndexT, TagT, __half><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+        mem_update_accumulate_kernel<IndexT, TagT, __half><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
         break;
     case DATATYPE_FP32:
-        MemUpdateAccumulateKernel<IndexT, TagT, float><<<gridSize, blockSize, 0, stream>>>(pList, rowSizeInBytes);
+        mem_update_accumulate_kernel<IndexT, TagT, float><<<grid_size, block_size, 0, stream>>>(list, row_size_in_bytes);
         break;
     default:
         //not implemented
@@ -549,22 +549,22 @@ cudaError_t callMemUpdateAccumulateKernel(typename EmbedCacheSA<IndexT, TagT>::M
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callMemUpdateAccumulateNoSyncKernel(const IndexT* d_keys, const size_t len, const int8_t* d_values, typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t currTable, size_t stride, DataTypeFormat inputFormat, [[maybe_unused]] DataTypeFormat outputFormat, cudaStream_t stream)
+cudaError_t call_mem_update_accumulate_no_sync_kernel(const IndexT* d_keys, const size_t len, const int8_t* d_values, typename EmbedCacheSA<IndexT, TagT>::CacheData data, uint32_t curr_table, size_t stride, DataTypeFormat input_format, [[maybe_unused]] DataTypeFormat output_format, cudaStream_t stream)
 {
-    assert(inputFormat == outputFormat);
+    assert(input_format == output_format);
     const uint32_t blockX = 32;
     const uint32_t blockY = 4;
-    const uint32_t blockSize = blockX * blockY;
-    const uint32_t nBlock = static_cast<uint32_t>(len / blockSize + std::min(len % blockSize, (size_t)1));
-    dim3 gridDims(nBlock);
-    dim3 blockDims(blockSize);
-    switch (inputFormat)
+    const uint32_t block_size = blockX * blockY;
+    const uint32_t n_block = static_cast<uint32_t>(len / block_size + std::min(len % block_size, (size_t)1));
+    dim3 grid_dims(n_block);
+    dim3 block_dims(block_size);
+    switch (input_format)
     {
     case DATATYPE_FP16:
-        UpdateAccumulateNoSync<IndexT, TagT, 32, __half><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, data, currTable, stride);
+        update_accumulate_no_sync<IndexT, TagT, 32, __half><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, data, curr_table, stride);
         break;
     case DATATYPE_FP32:
-        UpdateAccumulateNoSync<IndexT, TagT, 32, float><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, data, currTable, stride);
+        update_accumulate_no_sync<IndexT, TagT, 32, float><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, data, curr_table, stride);
         break;
     default:
         //not implemented
@@ -575,75 +575,75 @@ cudaError_t callMemUpdateAccumulateNoSyncKernel(const IndexT* d_keys, const size
 
 // need to have an argument explicity depend on IndexT type or the compiler gets confused
 template<typename IndexT, typename TagT>
-cudaError_t callTagUpdateKernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* pList, uint32_t nEntries, TagT* pTags, cudaStream_t stream)
+cudaError_t call_tag_update_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, TagT* tags, cudaStream_t stream)
 {
-    dim3 gridSize((nEntries + 32 - 1)/32,1);
-    dim3 blockSize(32, 1); 
-    TagUpdateKernel<IndexT, TagT><<<gridSize, blockSize, 0, stream>>>(pList, pTags);
+    dim3 grid_size((num_entries + 32 - 1)/32,1);
+    dim3 block_size(32, 1); 
+    tag_update_kernel<IndexT, TagT><<<grid_size, block_size, 0, stream>>>(list, tags);
     return cudaGetLastError();
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callCacheQuery(const IndexT* d_keys, const size_t len,
+cudaError_t call_cache_query(const IndexT* d_keys, const size_t len,
     int8_t* d_values, uint64_t* d_missing_index,
     IndexT* d_missing_keys, size_t* d_missing_len,
     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
-    cudaStream_t stream, uint32_t currTable, size_t stride)
+    cudaStream_t stream, uint32_t curr_table, size_t stride)
 {
     const uint32_t blockX = 32;
     const uint32_t blockY = 4;
-    const uint32_t blockSize = blockX * blockY;
-    const uint32_t nBlock = static_cast<uint32_t>(len / blockSize + std::min(len % blockSize, (size_t)1));
-    dim3 gridDims(nBlock);
-    dim3 blockDims(blockSize);
-    if (data.rowSizeInBytes % (sizeof(uint4)*32) == 0)
+    const uint32_t block_size = blockX * blockY;
+    const uint32_t n_block = static_cast<uint32_t>(len / block_size + std::min(len % block_size, (size_t)1));
+    dim3 grid_dims(n_block);
+    dim3 block_dims(block_size);
+    if (data.row_size_in_bytes % (sizeof(uint4)*32) == 0)
     {
-        Query<IndexT, TagT, 32, uint4><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, currTable, stride);
+        query<IndexT, TagT, 32, uint4><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, curr_table, stride);
     }
-    else if (data.rowSizeInBytes % (sizeof(uint32_t)*32) == 0)
+    else if (data.row_size_in_bytes % (sizeof(uint32_t)*32) == 0)
     {
-        Query<IndexT, TagT, 32, uint32_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, currTable, stride);
+        query<IndexT, TagT, 32, uint32_t><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, curr_table, stride);
     }
-    else if (data.rowSizeInBytes % (sizeof(uint4)*4) == 0)
+    else if (data.row_size_in_bytes % (sizeof(uint4)*4) == 0)
     {
-        Query<IndexT, TagT, 4, uint4><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, currTable, stride);
+        query<IndexT, TagT, 4, uint4><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, curr_table, stride);
     }
     else
     {
-        Query<IndexT, TagT, blockX, uint8_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, currTable, stride);
+        query<IndexT, TagT, blockX, uint8_t><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_missing_index, d_missing_keys, d_missing_len, data, curr_table, stride);
     }
     return cudaGetLastError();
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callCacheQueryHitMask(const IndexT* d_keys, const size_t len,
+cudaError_t call_cache_query_hit_mask(const IndexT* d_keys, const size_t len,
     int8_t* d_values, uint32_t* d_hit_mask,
     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
-    cudaStream_t stream, uint32_t currTable, size_t stride)
+    cudaStream_t stream, uint32_t curr_table, size_t stride)
 {
     const uint32_t blockX = 32;
     const uint32_t blockY = 4;
-    const uint32_t blockSize = blockX * blockY;
-    const uint32_t nBlock = static_cast<uint32_t>(len / blockSize + std::min(len % blockSize, (size_t)1));
-    dim3 gridDims(nBlock);
-    dim3 blockDims(blockX, blockY);
-    if (data.rowSizeInBytes % sizeof(uint4) == 0)
+    const uint32_t block_size = blockX * blockY;
+    const uint32_t n_block = static_cast<uint32_t>(len / block_size + std::min(len % block_size, (size_t)1));
+    dim3 grid_dims(n_block);
+    dim3 block_dims(blockX, blockY);
+    if (data.row_size_in_bytes % sizeof(uint4) == 0)
     {
-        Query<IndexT, TagT, 32, uint4><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_hit_mask, data, currTable, stride);
+        query<IndexT, TagT, 32, uint4><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_hit_mask, data, curr_table, stride);
     }
-    else if (data.rowSizeInBytes % sizeof(uint32_t) == 0)
+    else if (data.row_size_in_bytes % sizeof(uint32_t) == 0)
     {
-        Query<IndexT, TagT, 32, uint32_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_hit_mask, data, currTable, stride);
+        query<IndexT, TagT, 32, uint32_t><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_hit_mask, data, curr_table, stride);
     }
     else
     {
-        Query<IndexT, TagT, 32, uint8_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_hit_mask, data, currTable, stride);
+        query<IndexT, TagT, 32, uint8_t><<<grid_dims, block_dims, 0, stream>>>(d_keys, len, d_values, d_hit_mask, data, curr_table, stride);
     }
     return cudaGetLastError();
 }
 
 template<uint32_t ROW_SIZE, typename IndexT, int NUM_PRODUCER, uint stages_count, typename DataType, typename TagT>
-void __global__ UpdateAccumalateNoSyncFusedWithPipeline(int8_t* global0, int8_t* global1, int8_t* dst, 
+void __global__ update_accumulate_no_sync_fused_with_pipeline(int8_t* global0, int8_t* global1, int8_t* dst, 
                                     const IndexT* indices, 
                                     IndexT num_idx, 
                                     typename EmbedCacheSA<IndexT, TagT>::CacheData data
@@ -680,23 +680,23 @@ void __global__ UpdateAccumalateNoSyncFusedWithPipeline(int8_t* global0, int8_t*
         
         if (tid < num_idx)
         {
-            IndexT laneIdx =  indices[tid];
+            IndexT lane_idx =  indices[tid];
 
-            uint32_t setIdx = laneIdx % data.nSets;
-            uint32_t laneout = EmbedCacheGetWayMask<IndexT, TagT>(laneIdx, 0, data);
-            uint32_t laneway = __ffs(laneout) - 1;
-            if (laneout == 0)
+            uint32_t set_idx = lane_idx % data.num_sets;
+            uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, 0, data);
+            uint32_t lane_way = __ffs(lane_out) - 1;
+            if (lane_out == 0)
             {
                 cache_ptr = 0;
-                weight_ptr = reinterpret_cast<uint64_t>(global1 + (laneIdx) * ROW_SIZE);
+                weight_ptr = reinterpret_cast<uint64_t>(global1 + (lane_idx) * ROW_SIZE);
             }
             else
             {
-                auto way = laneway;
-                cache_ptr = (uint64_t)(data.pCache + (setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes);
+                auto way = lane_way;
+                cache_ptr = (uint64_t)(data.cache_ptr + (set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes);
                 weight_ptr = cache_ptr;   
             }
-            lane_table_ptr = reinterpret_cast<uint64_t>(dst + laneIdx * ROW_SIZE);
+            lane_table_ptr = reinterpret_cast<uint64_t>(dst + lane_idx * ROW_SIZE);
         }
     
         __syncwarp();
@@ -766,7 +766,7 @@ void __global__ UpdateAccumalateNoSyncFusedWithPipeline(int8_t* global0, int8_t*
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callUpdateAccumalateNoSyncFusedWithPipeline( const int8_t* grads, 
+cudaError_t call_update_accumulate_no_sync_fused_with_pipeline( const int8_t* grads, 
                     int8_t* dst, 
                     const IndexT* keys, 
                     IndexT num_keys,
@@ -774,24 +774,24 @@ cudaError_t callUpdateAccumalateNoSyncFusedWithPipeline( const int8_t* grads,
                     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
                     cudaStream_t stream)
 {
-    constexpr uint blocY = 16;
+    constexpr uint block_y = 16;
     constexpr int stage_count = 2;
     
-    dim3 blockDims(32, blocY);
-    const auto num_keys_per_block = blockDims.x * (blockDims.y - 1);
-    dim3 gridDims(static_cast<uint32_t>((num_keys + num_keys_per_block - 1)/num_keys_per_block));
-    size_t shared_mem_size_per_producer = (blocY -1 ) * calc_pipe_buffer_size(row_size_in_bytes);
+    dim3 block_dims(32, block_y);
+    const auto num_keys_per_block = block_dims.x * (block_dims.y - 1);
+    dim3 grid_dims(static_cast<uint32_t>((num_keys + num_keys_per_block - 1)/num_keys_per_block));
+    size_t shared_mem_size_per_producer = (block_y -1 ) * calc_pipe_buffer_size(row_size_in_bytes);
     size_t shared_mem = shared_mem_size_per_producer * stage_count;
     switch (row_size_in_bytes)
     {
     case 128:
     {
-        UpdateAccumalateNoSyncFusedWithPipeline<128, IndexT, blocY - 1, stage_count, float, TagT><<<gridDims, blockDims, shared_mem, stream>>>((int8_t*)grads, dst, dst, keys, num_keys, data);
+        update_accumulate_no_sync_fused_with_pipeline<128, IndexT, block_y - 1, stage_count, float, TagT><<<grid_dims, block_dims, shared_mem, stream>>>((int8_t*)grads, dst, dst, keys, num_keys, data);
         break;
     }
     case 512:
     {
-        UpdateAccumalateNoSyncFusedWithPipeline<512, IndexT, blocY - 1, stage_count, float4, TagT><<<gridDims, blockDims, shared_mem, stream>>>((int8_t*)grads, dst, dst, keys, num_keys, data);
+        update_accumulate_no_sync_fused_with_pipeline<512, IndexT, block_y - 1, stage_count, float4, TagT><<<grid_dims, block_dims, shared_mem, stream>>>((int8_t*)grads, dst, dst, keys, num_keys, data);
         break;
     }   
     default:
@@ -834,36 +834,36 @@ __global__ void find(const int8_t* uvm,
 {
     uint32_t tid_batch = blockIdx.x * 32 * BLOC_Y + threadIdx.y * 32;
     uint32_t tid = tid_batch + threadIdx.x; // each tid search for one index, and then we do a "transpose" and copy them out if needed
-    uint64_t laneptr;
+    uint64_t lane_ptr;
     if (tid >= num_idx)
     {
-        laneptr = 0;
+        lane_ptr = 0;
     }
     else
     {
-        auto currTable = 0;
-        IndexT laneIdx = indices[tid];
-        uint32_t cacheOffset = currTable * data.nSets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-        uint32_t setIdx = laneIdx % data.nSets;
-        uint32_t laneout = EmbedCacheGetWayMask<IndexT, TagT>(laneIdx, currTable, data);
-        uint32_t laneway = __ffs(laneout) - 1;
+        auto curr_table = 0;
+        IndexT lane_idx = indices[tid];
+        uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
+        uint32_t lane_way = __ffs(lane_out) - 1;
         FindOutput out;
-        if (laneout == 0)
+        if (lane_out == 0)
         {
-            if (data.bCountMisses)
+            if (data.count_misses)
             {
                 atomicAdd((unsigned long long*)data.misses, 1);
             }
-            miss_buff[tid] = get_sort_key<IndexT, SortKeyType>(laneIdx, false);
-            out.src_ptr =(uint64_t)(uvm + laneIdx * (uint64_t)data.rowSizeInBytes);
+            miss_buff[tid] = get_sort_key<IndexT, SortKeyType>(lane_idx, false);
+            out.src_ptr =(uint64_t)(uvm + lane_idx * (uint64_t)data.row_size_in_bytes);
         }
         else
         {
-            auto way = laneway;
-            out.src_ptr = (uint64_t)(data.pCache + (cacheOffset + setIdx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.rowSizeInBytes); 
-            miss_buff[tid] = get_sort_key<IndexT, SortKeyType>(laneIdx, true);
+            auto way = lane_way;
+            out.src_ptr = (uint64_t)(data.cache_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + way)*(uint64_t)data.row_size_in_bytes); 
+            miss_buff[tid] = get_sort_key<IndexT, SortKeyType>(lane_idx, true);
         }
-        out.dst_ptr = (uint64_t)(dst + tid * (uint64_t)data.rowSizeInBytes);
+        out.dst_ptr = (uint64_t)(dst + tid * (uint64_t)data.row_size_in_bytes);
         out_buff[tid] = out;
     }
     
@@ -873,8 +873,8 @@ template<typename IndexT, typename DataType, uint32_t BLOCK_Y, uint32_t UNROLL, 
 __global__ void gather(const FindOutput* out_buff, size_t num_idx, uint32_t KEYS_PER_Y, uint32_t row_size_in_bytes)
 {
     
-    auto blockId = blockIdx.x;
-    uint32_t tid_batch = blockId * KEYS_PER_Y * BLOCK_Y + threadIdx.y * KEYS_PER_Y;
+    auto block_id = blockIdx.x;
+    uint32_t tid_batch = block_id * KEYS_PER_Y * BLOCK_Y + threadIdx.y * KEYS_PER_Y;
     auto base_output = out_buff + tid_batch;
     
     if (tid_batch < num_idx)
@@ -953,11 +953,11 @@ __global__ void gather(const FindOutput* out_buff, size_t num_idx, uint32_t KEYS
 }
 
 template<typename IndexT, typename TagT>
-cudaError_t callSortGather( const int8_t* uvm, 
+cudaError_t call_sort_gather( const int8_t* uvm, 
                     int8_t* dst, 
                     const IndexT* keys, 
-                    int8_t* auxBuf,
-                    size_t& auxBufBytes,
+                    int8_t* aux_buf,
+                    size_t& aux_buf_bytes,
                     size_t num_keys,
                     size_t row_size_in_bytes,
                     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
@@ -965,43 +965,43 @@ cudaError_t callSortGather( const int8_t* uvm,
 {
     using SortKeyType = IndexT;
     cudaError_t err = cudaSuccess;
-    SortKeyType* sortKeyBuf = nullptr;
-    FindOutput* findBuf = nullptr;
-    SortKeyType* sortKeySortedBuf = nullptr;
-    FindOutput* findSortedBuf = nullptr;
-    size_t cubAuxBytes = 0;
-    err = cub::DeviceRadixSort::SortPairs(nullptr, cubAuxBytes,
-                    sortKeyBuf, sortKeyBuf, findBuf, findBuf, num_keys);
+    SortKeyType* sort_key_buf = nullptr;
+    FindOutput* find_buf = nullptr;
+    SortKeyType* sort_key_sorted_buf = nullptr;
+    FindOutput* find_sorted_buf = nullptr;
+    size_t cub_aux_bytes = 0;
+    err = cub::DeviceRadixSort::SortPairs(nullptr, cub_aux_bytes,
+                    sort_key_buf, sort_key_buf, find_buf, find_buf, num_keys);
     if (err != cudaSuccess)
     {
         return err;
     }
     
-    size_t findBytes = sizeof(FindOutput)*num_keys;
-    size_t sortKeyBytes = sizeof(SortKeyType)*num_keys;
-    size_t findSortedBytes = findBytes;
-    size_t sortKeySortedBytes = sortKeyBytes;
+    size_t find_bytes = sizeof(FindOutput)*num_keys;
+    size_t sort_key_bytes = sizeof(SortKeyType)*num_keys;
+    size_t find_sorted_bytes = find_bytes;
+    size_t sort_key_sorted_bytes = sort_key_bytes;
 
-    if (auxBuf == nullptr)
+    if (aux_buf == nullptr)
     {
-        auxBufBytes = cubAuxBytes + findBytes + sortKeyBytes + findSortedBytes + sortKeySortedBytes; 
+        aux_buf_bytes = cub_aux_bytes + find_bytes + sort_key_bytes + find_sorted_bytes + sort_key_sorted_bytes; 
         return cudaSuccess;
     }
 
-    sortKeyBuf = reinterpret_cast<SortKeyType*>(auxBuf);
-    sortKeySortedBuf = reinterpret_cast<SortKeyType*>(auxBuf + sortKeyBytes);
-    findBuf = reinterpret_cast<FindOutput*>(auxBuf + sortKeyBytes + sortKeySortedBytes);
-    findSortedBuf = reinterpret_cast<FindOutput*>(auxBuf + sortKeyBytes + sortKeySortedBytes + findBytes);
-    int8_t* cubAuxBuf = auxBuf + findBytes + sortKeyBytes + findSortedBytes + sortKeySortedBytes;
+    sort_key_buf = reinterpret_cast<SortKeyType*>(aux_buf);
+    sort_key_sorted_buf = reinterpret_cast<SortKeyType*>(aux_buf + sort_key_bytes);
+    find_buf = reinterpret_cast<FindOutput*>(aux_buf + sort_key_bytes + sort_key_sorted_bytes);
+    find_sorted_buf = reinterpret_cast<FindOutput*>(aux_buf + sort_key_bytes + sort_key_sorted_bytes + find_bytes);
+    int8_t* cub_aux_buf = aux_buf + find_bytes + sort_key_bytes + find_sorted_bytes + sort_key_sorted_bytes;
 
     constexpr auto num_keys_per_block = 32*2;
-    dim3 blockDims(32, 2);
-    dim3 gridDims(static_cast<uint32_t>((num_keys + num_keys_per_block - 1)/num_keys_per_block));
+    dim3 block_dims(32, 2);
+    dim3 grid_dims(static_cast<uint32_t>((num_keys + num_keys_per_block - 1)/num_keys_per_block));
 
-    find<IndexT, TagT, 2, SortKeyType><<<gridDims, blockDims, 0, stream>>>(uvm,
+    find<IndexT, TagT, 2, SortKeyType><<<grid_dims, block_dims, 0, stream>>>(uvm,
                             dst,
-                            sortKeyBuf,
-                            findBuf,
+                            sort_key_buf,
+                            find_buf,
                             keys,
                             num_keys,
                             data);
@@ -1011,8 +1011,8 @@ cudaError_t callSortGather( const int8_t* uvm,
         return err;
     }
     
-    err =cub::DeviceRadixSort::SortPairs(cubAuxBuf, cubAuxBytes,
-            sortKeyBuf, sortKeySortedBuf, findBuf, findSortedBuf, num_keys, 0, sizeof(SortKeyType)*8, stream);
+    err =cub::DeviceRadixSort::SortPairs(cub_aux_buf, cub_aux_bytes,
+            sort_key_buf, sort_key_sorted_buf, find_buf, find_sorted_buf, num_keys, 0, sizeof(SortKeyType)*8, stream);
     if (err != cudaSuccess)
     {
         return err;
@@ -1027,17 +1027,17 @@ cudaError_t callSortGather( const int8_t* uvm,
     if (row_size_in_bytes % 16 == 0)
     {
         
-        gather<IndexT, uint4, block_y, unroll, 32><<<gridDims2, blockDims2, 0, stream>>>(findSortedBuf, num_keys, num_keys_per_y, static_cast<uint32_t>(row_size_in_bytes));
+        gather<IndexT, uint4, block_y, unroll, 32><<<gridDims2, blockDims2, 0, stream>>>(find_sorted_buf, num_keys, num_keys_per_y, static_cast<uint32_t>(row_size_in_bytes));
         return cudaGetLastError();
     }
     else if (row_size_in_bytes % 4 == 0)
     {
-        gather<IndexT, uint, block_y, unroll, 32><<<gridDims2, blockDims2, 0, stream>>>(findSortedBuf, num_keys, num_keys_per_y, static_cast<uint32_t>(row_size_in_bytes));
+        gather<IndexT, uint, block_y, unroll, 32><<<gridDims2, blockDims2, 0, stream>>>(find_sorted_buf, num_keys, num_keys_per_y, static_cast<uint32_t>(row_size_in_bytes));
         return cudaGetLastError();
     }
     else
     {
-        gather<IndexT, uint8_t, block_y, unroll, 32><<<gridDims2, blockDims2, 0, stream>>>(findSortedBuf, num_keys, num_keys_per_y, static_cast<uint32_t>(row_size_in_bytes));
+        gather<IndexT, uint8_t, block_y, unroll, 32><<<gridDims2, blockDims2, 0, stream>>>(find_sorted_buf, num_keys, num_keys_per_y, static_cast<uint32_t>(row_size_in_bytes));
         return cudaGetLastError();
     }
     

@@ -64,9 +64,9 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
       NVE_CHECK_(cudaFreeHost(h_table_));
     }
     auto allocator = GetDefaultAllocator();
-    allocator->deviceFree(d_keys_);
-    allocator->deviceFree(d_data_);
-    allocator->deviceFree(d_hitmask_);
+    allocator->device_free(d_keys_);
+    allocator->device_free(d_data_);
+    allocator->device_free(d_hitmask_);
   }
 
   void test_insert() {
@@ -216,10 +216,10 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     tb_ = std::make_shared<TableType>(cfg);
     ctx_ = tb_->create_execution_context(0, 0, nullptr, nullptr);
     auto allocator = GetDefaultAllocator();
-    NVE_CHECK_(allocator->deviceAllocate(&d_keys_, sizeof(KeyType) * static_cast<size_t>(params.max_keys)));
-    NVE_CHECK_(allocator->deviceAllocate(&d_data_, static_cast<size_t>(params.row_size_bytes) * static_cast<size_t>(params.max_keys)));
+    NVE_CHECK_(allocator->device_allocate(&d_keys_, sizeof(KeyType) * static_cast<size_t>(params.max_keys)));
+    NVE_CHECK_(allocator->device_allocate(&d_data_, static_cast<size_t>(params.row_size_bytes) * static_cast<size_t>(params.max_keys)));
     hit_mask_size_in_bytes_ = ((static_cast<size_t>(params.max_keys) + 63) / 64) * sizeof(int64_t);
-    NVE_CHECK_(allocator->deviceAllocate(&d_hitmask_, hit_mask_size_in_bytes_));
+    NVE_CHECK_(allocator->device_allocate(&d_hitmask_, hit_mask_size_in_bytes_));
 
     ASSERT_TRUE(d_keys_);
     ASSERT_TRUE(d_data_);

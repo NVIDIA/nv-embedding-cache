@@ -49,7 +49,7 @@ TEST_P(AllocatorTest, DeviceAllocateAndFree) {
     void* ptr = nullptr;
 
     // Test allocation
-    EXPECT_EQ(cudaSuccess, allocator_->deviceAllocate(&ptr, alloc_size_));
+    EXPECT_EQ(cudaSuccess, allocator_->device_allocate(&ptr, alloc_size_));
     EXPECT_NE(nullptr, ptr);
 
     // Test we can write to the allocated memory
@@ -57,21 +57,21 @@ TEST_P(AllocatorTest, DeviceAllocateAndFree) {
     EXPECT_EQ(cudaSuccess, err);
 
     // Test deallocation
-    EXPECT_EQ(cudaSuccess, allocator_->deviceFree(ptr));
+    EXPECT_EQ(cudaSuccess, allocator_->device_free(ptr));
 }
 
 TEST_P(AllocatorTest, HostAllocateAndFree) {
     void* ptr = nullptr;
 
     // Test allocation
-    EXPECT_EQ(cudaSuccess, allocator_->hostAllocate(&ptr, alloc_size_));
+    EXPECT_EQ(cudaSuccess, allocator_->host_allocate(&ptr, alloc_size_));
     EXPECT_NE(nullptr, ptr);
 
     // Test we can write to the allocated memory
     memset(ptr, 0xFF, alloc_size_);
 
     // Test deallocation
-    EXPECT_EQ(cudaSuccess, allocator_->hostFree(ptr));
+    EXPECT_EQ(cudaSuccess, allocator_->host_free(ptr));
 }
 
 INSTANTIATE_TEST_SUITE_P(

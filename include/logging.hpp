@@ -45,7 +45,7 @@ inline std::ostream& operator<<(std::ostream& o, const LogLevel_t& ll) {
  * Logger backend interface.
  *
  * An application may derive from this interface and replace the backend implenmentation by calling
- * Logger::setBackend(). Logger backends do not need to filter logs, or guarantee thread safety. The
+ * Logger::set_backend(). Logger backends do not need to filter logs, or guarantee thread safety. The
  * Logger class handles this for the backend.
  */
 class LoggerBackend {
@@ -109,28 +109,28 @@ class Logger final {
     verbosity_level_(LogLevel_t::Warning),
     logger_backend_(std::make_shared<DefaultLoggerBackend>("[NVE]")) 
     {
-      setVerbosityLevel(getEnvVerbosityLevel());
+      set_verbosity_level(get_env_verbosity_level());
     }
 
   /**
    * Set the Logger verbosity level. Only messages on the same level, or a lower will be logged.
    */
-  inline void setVerbosityLevel(const LogLevel_t level) {
+  inline void set_verbosity_level(const LogLevel_t level) {
     verbosity_level_ = level;
   }
 
-  inline LogLevel_t getVerbosityLevel() noexcept { return verbosity_level_; }
+  inline LogLevel_t get_verbosity_level() noexcept { return verbosity_level_; }
 
   /**
    * Set the logger backend (override the default one).
    * Setting logger backend to nullptr will disable logging.
    */
-  inline void setBackend(std::shared_ptr<LoggerBackend>& logger_backend) {
+  inline void set_backend(std::shared_ptr<LoggerBackend>& logger_backend) {
     std::lock_guard lock(mutex_);
     logger_backend_ = logger_backend;
   }
 
-  inline std::shared_ptr<LoggerBackend> getBackend() noexcept {
+  inline std::shared_ptr<LoggerBackend> get_backend() noexcept {
     std::lock_guard lock(mutex_);
     return logger_backend_;
   }
@@ -147,7 +147,7 @@ class Logger final {
 
   inline void log(const LogMessage& lm) { log(lm.first, lm.second); }
  private:
-  LogLevel_t getEnvVerbosityLevel() {
+  LogLevel_t get_env_verbosity_level() {
     const char* env_var = std::getenv("NVE_LOG_LEVEL");
     if (env_var) {
       if (std::strncmp(env_var, "CRITICAL", std::strlen("CRITICAL")) == 0) {

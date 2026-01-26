@@ -17,7 +17,7 @@
 
 #pragma once
 #include <embedding_cache_combined.cuh>
-#include "kernels_common.cuh"
+#include "cuda_ops/kernels_common.cuh"
 #include "cuda_ops/cuda_common.h"
 
 using namespace nve;
@@ -58,7 +58,7 @@ __global__ void EmbeddingBagMain(const uint32_t batchSz, const INDEX_TYPE* __res
     for (int i = 0; i < num_hot / SUBWARP_WIDTH; i++)
     {
         INDEX_TYPE laneIdx = __ldcv(currIdx + i * SUBWARP_WIDTH + hotnessTid );
-        uint64_t lanePtr = AddressFunctor<INDEX_TYPE, CacheDataT>::GetAddress(laneIdx, table[currTable], currTable, cache);
+        uint64_t lanePtr = AddressFunctor<INDEX_TYPE, CacheDataT>::get_address(laneIdx, table[currTable], currTable, cache);
         #pragma unroll 4
         for (int s = 0; s < SUBWARP_WIDTH; s++)
         {

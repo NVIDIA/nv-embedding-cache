@@ -21,7 +21,6 @@ These samples demonstrate more complex usages.
 
 |Name|Location|Description|
 |-|-|-|
-|Embedding cache wrapper_sample|[../samples/ecache/wrapper_sample/](../samples/ecache/wrapper_sample/)|C++ wrapper of the embedding cache used in a training flow|
 |Layer sample|[../samples/layer_sample/](../samples/layer_sample/)|Layer inference (lookup)|
 |PyTorch Inference|[../samples/pytorch/inference_sample/](../samples/pytorch/inference_sample/)|Multi threaded inference with parallel updated|
 ||[]()||

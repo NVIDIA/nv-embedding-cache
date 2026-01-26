@@ -24,7 +24,7 @@ DefaultInsertHeuristic::DefaultInsertHeuristic(const std::vector<float>& thresho
     gen_(seed_),
     dis_(0.0, 1.0) {}
 
-bool DefaultInsertHeuristic::InsertNeeded(const float hitrate, const size_t table_id) {
+bool DefaultInsertHeuristic::insert_needed(const float hitrate, const size_t table_id) {
     auto warmup_chance = (1 - hitrate);
     auto steadystate_chance = (warmup_chance * warmup_chance * warmup_chance);
 
@@ -44,7 +44,7 @@ FSMInsertHeuristic::FSMInsertHeuristic(const std::vector<float>& threshold) :
     }
 }
 
-bool FSMInsertHeuristic::InsertNeeded(const float hitrate, const size_t table_id)
+bool FSMInsertHeuristic::insert_needed(const float hitrate, const size_t table_id)
 {
     NVE_CHECK_(table_id < threshold_.size(), "Invalid table index");
     if (threshold_[table_id] <= 0.f) {
@@ -145,7 +145,7 @@ StatisticalInsertHeuristic::StatisticalInsertHeuristic(const size_t num_keys, co
     }
 }
 
-bool StatisticalInsertHeuristic::InsertNeeded(const float hitrate, const size_t table_id)
+bool StatisticalInsertHeuristic::insert_needed(const float hitrate, const size_t table_id)
 {
     NVE_CHECK_(table_id < k_factor_.size(), "Invalid table index");
     switch (state_[table_id])

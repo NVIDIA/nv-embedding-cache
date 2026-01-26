@@ -53,7 +53,7 @@ void TestHeuristic(nve::InsertHeuristic& heuristic, uint32_t num_samples, uint32
     {
         int64_t count = 0;
         for (auto hitrate : hitrates) {
-            count += heuristic.InsertNeeded(hitrate, 0) ? 1 : 0;
+            count += heuristic.insert_needed(hitrate, 0) ? 1 : 0;
         }
         avg_count += static_cast<double>(count);
     }
@@ -131,16 +131,16 @@ TEST(StatisticalInsertHeuristic, StatisticalInsertSimpleTest) {
     
     // Start & Insert states: collect window and perform insertions
     for (size_t i = 0; i < sample_window; ++i) {
-        EXPECT_FALSE(heuristic.InsertNeeded(baseline_hitrate, 0));
+        EXPECT_FALSE(heuristic.insert_needed(baseline_hitrate, 0));
     }
     for (size_t i = 0; i < num_insertions_needed; ++i) {
-        EXPECT_TRUE(heuristic.InsertNeeded(baseline_hitrate, 0));
+        EXPECT_TRUE(heuristic.insert_needed(baseline_hitrate, 0));
     }
 
     // Now in steady state with stable hitrate (0.5f)
     // Should not insert for stable hitrates within the statistical bounds
     for (size_t i = 0; i < steady_state_iterations; ++i) {
-        EXPECT_FALSE(heuristic.InsertNeeded(baseline_hitrate, 0));
+        EXPECT_FALSE(heuristic.insert_needed(baseline_hitrate, 0));
     }
     
     // Now introduce anomalies
@@ -148,12 +148,12 @@ TEST(StatisticalInsertHeuristic, StatisticalInsertSimpleTest) {
     // Any hitrate above baseline_hitrate is an anomaly
     const float anomalous_hitrate = baseline_hitrate + 0.1f;
     for (size_t i = 0; i < num_unsteady_samples; ++i) {
-        EXPECT_FALSE(heuristic.InsertNeeded(anomalous_hitrate, 0));
+        EXPECT_FALSE(heuristic.insert_needed(anomalous_hitrate, 0));
     }
     
     // After num_unsteady_samples consecutive anomalies, should trigger num_insertions_needed insertions
     for (size_t i = 0; i < num_insertions_needed; ++i) {
-        EXPECT_TRUE(heuristic.InsertNeeded(baseline_hitrate, 0));
+        EXPECT_TRUE(heuristic.insert_needed(baseline_hitrate, 0));
     }
 }
 

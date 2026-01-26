@@ -113,15 +113,15 @@ class GPUTableExecutionContext: public ExecutionContext {
       max_modify_size_{max_modify_size}, count_misses_(count_misses), cache_{cache}, context_registry_(context_registry)
   {
     if (count_misses_) {
-      NVE_CHECK_(cache_->PerformanceMetricCreate(miss_metric_, nve::PerformanceMerticTypes::MERTIC_COUNT_MISSES));
-      NVE_CHECK_(cache_->PerformanceMetricReset(miss_metric_, lookup_stream_));
+      NVE_CHECK_(cache_->performance_metric_create(miss_metric_, nve::PerformanceMerticTypes::MERTIC_COUNT_MISSES));
+      NVE_CHECK_(cache_->performance_metric_reset(miss_metric_, lookup_stream_));
     } 
-    NVE_CHECK_(cache_->LookupContextCreate(lookup_context_, (count_misses_ ? &miss_metric_ : nullptr), (count_misses_ ? 1 : 0)),
+    NVE_CHECK_(cache_->lookup_context_create(lookup_context_, (count_misses_ ? &miss_metric_ : nullptr), (count_misses_ ? 1 : 0)),
               "Failed to create embedding cache lookup context.");
     if (max_modify_size_ < 1) {
       modify_context_.handle = 0;
     } else {
-      NVE_CHECK_(cache_->ModifyContextCreate(modify_context_, static_cast<uint32_t>(max_modify_size_)),
+      NVE_CHECK_(cache_->modify_context_create(modify_context_, static_cast<uint32_t>(max_modify_size_)),
                 "Failed to create embedding cache modification context.");
     }
     NVE_CHECK_(context_registry != nullptr, "Invalid context registry");
@@ -132,14 +132,14 @@ class GPUTableExecutionContext: public ExecutionContext {
     NVE_CHECK_(cudaStreamSynchronize(lookup_stream_));
     NVE_CHECK_(cudaStreamSynchronize(modify_stream_));
 
-    NVE_CHECK_(cache_->LookupContextDestroy(lookup_context_),
+    NVE_CHECK_(cache_->lookup_context_destroy(lookup_context_),
               "Failed to destroy embedding cache lookup context.");
     if (modify_context_.handle) {
-      NVE_CHECK_(cache_->ModifyContextDestroy(modify_context_),
+      NVE_CHECK_(cache_->modify_context_destroy(modify_context_),
                           "Failed to destroy embedding cache modification context.");
     }
     if (count_misses_) {
-      NVE_CHECK_(cache_->PerformanceMetricDestroy(miss_metric_));
+      NVE_CHECK_(cache_->performance_metric_destroy(miss_metric_));
     }
     context_registry_->remove_context(this);
   }
@@ -172,18 +172,18 @@ GpuTable<KeyType>::GpuTable(const GPUTableConfig& config, allocator_ptr_t alloca
 
   // Create cache
   typename CacheType::CacheConfig cfg;
-  cfg.embedWidth = static_cast<uint64_t>(config_.row_size_in_bytes);
-  cfg.cacheSzInBytes = static_cast<size_t>(config_.cache_size);
-  cfg.numTables = 1;  // Only supporting single table cache at this point
-  cfg.allocDataOnHost = config_.data_storage_on_host;
+  cfg.embed_width_in_bytes = static_cast<uint64_t>(config_.row_size_in_bytes);
+  cfg.cache_sz_in_bytes = static_cast<size_t>(config_.cache_size);
+  cfg.num_tables = 1;  // Only supporting single table cache at this point
+  cfg.allocate_data_on_host = config_.data_storage_on_host;
 
   if (config.modify_on_gpu) {
-    cache_ = std::make_shared<CacheTypeDevice>(allocator_.get(), getGlobalLogger(), cfg);
+    cache_ = std::make_shared<CacheTypeDevice>(allocator_.get(), GetGlobalLogger(), cfg);
   } else {
-    cache_ = std::make_shared<CacheTypeHost>(allocator_.get(), getGlobalLogger(), cfg);
+    cache_ = std::make_shared<CacheTypeHost>(allocator_.get(), GetGlobalLogger(), cfg);
   }
 
-  NVE_CHECK_(cache_->Init(), "Failed to Init cache");
+  NVE_CHECK_(cache_->init(), "Failed to Init cache");
   NVE_CHECK_(static_cast<bool>(cache_), "Failed to create embedding cache");
 
   // Initialize context registry
@@ -203,7 +203,7 @@ void GpuTable<KeyType>::clear(context_ptr_t& ctx) {
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
   NVE_CHECK_(gpu_table_ctx != nullptr, "Invalid GPU table context");
   StreamCoordinator sc(gpu_table_ctx->get_modify_stream(), config_.private_stream);
-  NVE_CHECK_(cache_->ClearCache(sc.queue_stream));
+  NVE_CHECK_(cache_->clear_cache(sc.queue_stream));
 }
 
 template <typename KeyType>
@@ -220,7 +220,7 @@ void GpuTable<KeyType>::erase(context_ptr_t& ctx, int64_t num_keys, const void* 
   auto ec_event = create_sync_event();
   StreamCoordinator sc(gpu_table_ctx->get_modify_stream(), config_.private_stream);
 
-  NVE_CHECK_(cache_->Invalidate(mod_ctx, static_cast<const key_type*>(keys),
+  NVE_CHECK_(cache_->invalidate(mod_ctx, static_cast<const key_type*>(keys),
                                 num_keys, 0, ec_event.get(), sc.queue_stream),
              "Failed to call cache invalidate");
 }
@@ -260,7 +260,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
     }
     case KernelType::LookupUVM:
     {
-      NVE_CHECK_(cache->Lookup(
+      NVE_CHECK_(cache->lookup(
         lookup_ctx,
         reinterpret_cast<const KeyType*>(keys),
         static_cast<size_t>(num_keys),
@@ -274,7 +274,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
     case KernelType::SortGather:
     {
       size_t aux_buffer_size = 0;
-      NVE_CHECK_(cache->LookupSortGather(
+      NVE_CHECK_(cache->lookup_sort_gather(
         lookup_ctx,
         reinterpret_cast<const KeyType*>(keys),
         static_cast<size_t>(num_keys),
@@ -286,7 +286,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
         value_stride,
         stream));
       int8_t* aux_buffer = (int8_t*)gpu_table_ctx->get_buffer("d_aux_buffer", aux_buffer_size, false);
-      NVE_CHECK_(cache->LookupSortGather(
+      NVE_CHECK_(cache->lookup_sort_gather(
         lookup_ctx,
         reinterpret_cast<const KeyType*>(keys),
         static_cast<size_t>(num_keys),
@@ -345,7 +345,7 @@ void GpuTable<KeyType>::find(context_ptr_t& ctx, int64_t num_keys, const void* k
     }
     run_find_uvm<KeyType, CacheType >(config_, cache_, ctx, num_keys, keys, values, value_stride, sc.queue_stream);
   } else {
-    NVE_CHECK_(cache_->Lookup(
+    NVE_CHECK_(cache_->lookup(
       lookup_ctx,
       reinterpret_cast<const KeyType*>(keys),
       static_cast<size_t>(num_keys),
@@ -390,7 +390,7 @@ void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void*
 
     auto num_keys_ = std::min(histogram.getNumBins(), static_cast<int64_t>(gpu_table_ctx->max_modify_size_));
 
-    NVE_CHECK_(cache_->Insert(
+    NVE_CHECK_(cache_->insert(
       mod_ctx,
       histogram.getKeys(),
       histogram.getPriority(),
@@ -412,12 +412,12 @@ void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void*
     auto ec_event = create_sync_event();
     StreamCoordinator sc(gpu_table_ctx->get_modify_stream(), config_.private_stream);
 
-    NVE_CHECK_(cache_->Insert(
+    NVE_CHECK_(cache_->insert(
       mod_ctx,
-      histogram.GetKeys(), 
-      histogram.GetPriority(),
-      histogram.GetData(),
-      histogram.GetNumBins(),
+      histogram.get_keys(), 
+      histogram.get_priority(),
+      histogram.get_data(),
+      histogram.get_num_bins(),
       0, // tableIndex
       ec_event.get(),
       sc.queue_stream
@@ -450,7 +450,7 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
     auto ec_event = create_sync_event();
     StreamCoordinator sc(modify_stream, config_.private_stream);
 
-    NVE_CHECK_(cache_->Update(
+    NVE_CHECK_(cache_->update(
       mod_ctx,
       static_cast<const key_type*>(keys) + k_start,
       static_cast<const int8_t*>(values) + (k_start * value_stride),
@@ -486,12 +486,12 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
       // Set event on every other lookup stream
       // Not including modify streams since they will be also be sync'ed with the lookup streams thus implicitly synced among themeselves
       sync = contexts_->create_sync_event();
-      sync->EventRecord();
-      sync->EventWaitStream(update_stream);
+      sync->event_record();
+      sync->event_wait_stream(update_stream);
     }
 
     // Set dependency on the modify stream (if different from update stream)
-    StreamCoordinator::CreateStreamDependency(modify_stream, update_stream);
+    StreamCoordinator::create_stream_dependency(modify_stream, update_stream);
 
     // Launch the update kernel
     UpdateTable<KeyType>(values, reinterpret_cast<const KeyType*>(d_keys),
@@ -513,7 +513,7 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
 
     if (!config_.private_stream) {
       // Have all lookup streams wait for the update to complete before starting
-      for (auto s : sync->Streams()) {
+      for (auto s : sync->get_streams()) {
         NVE_CHECK_(cudaStreamWaitEvent(s, uvm_update_event));
       }
     }
@@ -546,7 +546,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
   if (config_.private_stream) {
     auto lookup_ctx{gpu_table_ctx->lookup_context()};
 
-    NVE_CHECK_(cache_->UpdateAccumulateNoSync(
+    NVE_CHECK_(cache_->update_accumulate_no_sync(
       lookup_ctx,
       mod_ctx,
       static_cast<const key_type*>(keys),
@@ -568,7 +568,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
 
       auto ec_event = create_sync_event();
 
-      NVE_CHECK_(cache_->UpdateAccumulate(
+      NVE_CHECK_(cache_->update_accumulate(
         mod_ctx,
         static_cast<const key_type*>(keys) + k_start,
         static_cast<const int8_t*>(updates) + (k_start * update_stride),
@@ -582,7 +582,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
       ), "Failed to call cache update");
 
       if (k_end != num_keys) {
-        // Between consecutive updates (excluding UpdateAccumulateNoSync) we need to synchronize,
+        // Between consecutive updates (excluding update_accumulate_no_sync) we need to synchronize,
         // otherwise we overwrite the modify context state while the update is in progress.
         NVE_CHECK_(cudaStreamSynchronize(sc.queue_stream));
       }
@@ -604,12 +604,12 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
       // Set event on every other lookup stream
       // Not including modify streams since they will be also be sync'ed with the lookup streams thus implicitly synced among themeselves
       sync = contexts_->create_sync_event();
-      sync->EventRecord();
-      sync->EventWaitStream(update_stream);
+      sync->event_record();
+      sync->event_wait_stream(update_stream);
     }
 
     // Set dependency on the modify stream (if different from update stream)
-    StreamCoordinator::CreateStreamDependency(modify_stream, update_stream);
+    StreamCoordinator::create_stream_dependency(modify_stream, update_stream);
 
     if (config_.uvm_cpu_accumulate) {
       const void* h_keys = keys_bw->access_buffer(cudaMemoryTypeHost, true /*copy_content*/, sc.queue_stream);
@@ -847,7 +847,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
 
     if (!config_.private_stream) {
       // Have all lookup streams wait for the update to complete before starting
-      for (auto s : sync->Streams()) {
+      for (auto s : sync->get_streams()) {
         NVE_CHECK_(cudaStreamWaitEvent(s, uvm_update_event));
       }
     }
@@ -893,13 +893,13 @@ void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, c
           case PoolingType_t::Sum:
               callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, true, true, false>
                   (batch, static_cast<const int8_t*>(config_.uvm_table), reinterpret_cast<const KeyType*>(keys),
-                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->GetCacheData(lookup_ctx),
+                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->get_cache_data(lookup_ctx),
                   num_elements, reinterpret_cast<ValueType*>(values), sc.queue_stream);
               break;
           case PoolingType_t::Mean:
               callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, true, false, false>
                   (batch, static_cast<const int8_t*>(config_.uvm_table), reinterpret_cast<const KeyType*>(keys),
-                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->GetCacheData(lookup_ctx),
+                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->get_cache_data(lookup_ctx),
                   num_elements, reinterpret_cast<ValueType*>(values), sc.queue_stream);
               break;
           case PoolingType_t::WeightedSum:
@@ -907,7 +907,7 @@ void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, c
                         "Weights must be provided for weighted sum pooling");
               callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, true, true, true>
                   (batch, static_cast<const int8_t*>(config_.uvm_table), reinterpret_cast<const KeyType*>(keys),
-                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->GetCacheData(lookup_ctx),
+                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->get_cache_data(lookup_ctx),
                   num_elements, reinterpret_cast<ValueType*>(values), sc.queue_stream);
               break;
           case PoolingType_t::WeightedMean:
@@ -915,7 +915,7 @@ void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, c
                         "Weights must be provided for weighted mean pooling");
               callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, true, false, true>
                   (batch, static_cast<const int8_t*>(config_.uvm_table), reinterpret_cast<const KeyType*>(keys),
-                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->GetCacheData(lookup_ctx),
+                  offsets, weights, static_cast<int32_t>(fixed_hotness), cache_->get_cache_data(lookup_ctx),
                   num_elements, reinterpret_cast<ValueType*>(values), sc.queue_stream);
               break;
           default:
@@ -931,14 +931,14 @@ void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, c
             callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, false, true, false>
                 (static_cast<uint32_t>(num_offsets), static_cast<const int8_t*>(config_.uvm_table),
                  reinterpret_cast<const KeyType*>(keys), offsets, weights, static_cast<int32_t>(fixed_hotness),
-                 cache_->GetCacheData(lookup_ctx), num_elements,
+                 cache_->get_cache_data(lookup_ctx), num_elements,
                  reinterpret_cast<ValueType*>(values), sc.queue_stream);
             break;
         case PoolingType_t::Mean:
             callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, false, false, false>
                 (static_cast<uint32_t>(num_offsets), static_cast<const int8_t*>(config_.uvm_table),
                  reinterpret_cast<const KeyType*>(keys), offsets, weights, static_cast<int32_t>(fixed_hotness),
-                 cache_->GetCacheData(lookup_ctx), num_elements,
+                 cache_->get_cache_data(lookup_ctx), num_elements,
                  reinterpret_cast<ValueType*>(values), sc.queue_stream);
             break;
         case PoolingType_t::WeightedSum:
@@ -947,7 +947,7 @@ void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, c
             callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, false, true, true>
                 (static_cast<uint32_t>(num_offsets), static_cast<const int8_t*>(config_.uvm_table),
                  reinterpret_cast<const KeyType*>(keys), offsets, weights, static_cast<int32_t>(fixed_hotness),
-                 cache_->GetCacheData(lookup_ctx), num_elements,
+                 cache_->get_cache_data(lookup_ctx), num_elements,
                  reinterpret_cast<ValueType*>(values), sc.queue_stream);
             break;
         case PoolingType_t::WeightedMean:
@@ -956,7 +956,7 @@ void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, c
             callFindAndCombineKernel<ValueType, KeyType, ValueType, CacheDataType, false, false, true>
                 (static_cast<uint32_t>(num_offsets), static_cast<const int8_t*>(config_.uvm_table),
                  reinterpret_cast<const KeyType*>(keys), offsets, weights, static_cast<int32_t>(fixed_hotness),
-                 cache_->GetCacheData(lookup_ctx), num_elements,
+                 cache_->get_cache_data(lookup_ctx), num_elements,
                  reinterpret_cast<ValueType*>(values), sc.queue_stream);
             break;
         default:
@@ -1017,7 +1017,7 @@ void GpuTable<KeyType>::reset_lookup_counter(context_ptr_t& ctx) {
 
   auto miss_metric = gpu_table_ctx->miss_metric();
   StreamCoordinator sc(gpu_table_ctx->get_lookup_stream(), config_.private_stream);
-  NVE_CHECK_(cache_->PerformanceMetricReset(miss_metric, sc.queue_stream));
+  NVE_CHECK_(cache_->performance_metric_reset(miss_metric, sc.queue_stream));
 }
 
 template <typename KeyType>
@@ -1034,7 +1034,7 @@ void GpuTable<KeyType>::get_lookup_counter(context_ptr_t& ctx, int64_t* counter)
 
   auto miss_metric = gpu_table_ctx->miss_metric();
   StreamCoordinator sc(gpu_table_ctx->get_lookup_stream(), config_.private_stream);
-  NVE_CHECK_(cache_->PerformanceMetricGetValue(miss_metric, counter, sc.queue_stream));
+  NVE_CHECK_(cache_->performance_metric_get_value(miss_metric, counter, sc.queue_stream));
 }
 
 template <typename KeyType>

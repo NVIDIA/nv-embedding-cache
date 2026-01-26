@@ -99,7 +99,7 @@ class TestInsertHeuristic : public InsertHeuristic {
 public:
   TestInsertHeuristic(std::vector<bool> results = {true, true, true}) : results_(results) {}
   ~TestInsertHeuristic() override = default;
-  bool InsertNeeded(const float /*hitrate*/, const size_t threshold_id) override {
+  bool insert_needed(const float /*hitrate*/, const size_t threshold_id) override {
     return results_.at(threshold_id);
   }
   std::vector<bool> results_;

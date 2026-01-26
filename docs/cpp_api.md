@@ -69,12 +69,11 @@ The GPU Embedding cache is located in the [ecache](../include/ecache/) folder. T
 
 #### Samples
 * See the code in the [ecache/simple_sample](../samples/ecache/simple_sample/) sample for a simple example of the cache API usage.
-* A more complex sample is available in [wrapper_sample](../samples/ecache/wrapper_sample/).
 
 ## Utility classes
 Several key functionalities have a default implementation which users can override without resorting to source code changes in the SDK.  
 1. [Allocator](../include/allocator.hpp) - this class will be used to allocate buffers on system or GPU memory.
     An allocator object can be provided when constructing a layer/table/execution context.
     It is possible to use different allocators for different objects, but often a single allocator will suffice.
-2. [Logger](include/logging.hpp) - while the `Logger` class isn't overrideable, the application can implement a `LoggerBackend` then call `getGlobalLogger()->setBackend()`. You'll need to include [common.hpp](../include/common.hpp) for `getGlobalLogger()`.
+2. [Logger](include/logging.hpp) - while the `Logger` class isn't overrideable, the application can implement a `LoggerBackend` then call `GetGlobalLogger()->set_backend()`. You'll need to include [common.hpp](../include/common.hpp) for `GetGlobalLogger()`.
 3. [Threadpool](../include/thread_pool.hpp) - this class implements a multi-threaded execution environment for tasks (`std::function`). The SDK uses the thread pool to execute parallel on the CPU. By default the `SimpleThreadPool` will be used. Note that all custom tasks that perform CUDA calls must set the CUDA current device (using cudaSetDevice or using the ScopedDevice class), as the device context is tied to the thread performing the task which can differ from the calling thread.

@@ -24,14 +24,14 @@ template<typename IndexT>
 class AddressFunctor<IndexT, typename ECNoCache<IndexT>::CacheData>
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT laneIdx, const int8_t* pTable, uint32_t currTable, const typename ECNoCache<IndexT>::CacheData data)
+    static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename ECNoCache<IndexT>::CacheData data)
     {
-        if (data.bCountMisses)
+        if (data.count_misses)
         {
             atomicAdd((unsigned long long*)data.misses, 1llu);
         }
 
-        return (uint64_t)pTable + laneIdx * (uint64_t)data.rowSizeInBytes;
+        return (uint64_t)table + lane_idx * (uint64_t)data.row_size_in_bytes;
     }
 };
 }

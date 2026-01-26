@@ -21,7 +21,7 @@ The modify operation will first launch a kernel to invalidate the relevant cache
 have concluded, before altering the cache and re-enabling the affected cache entries.
 
 #### Custom Flows
-Invalidate and Commit relies on Lookup operation being queued on the GPU in an atomic fashion e.g a single CUDA kernel. Some users may implement their own complex gather flows. In order to maintain the required atomicity, if the flow uses more than one CUDA kernel, the user needs to call the Start/EndCustomFlow APIs.
+Invalidate and Commit relies on Lookup operation being queued on the GPU in an atomic fashion e.g a single CUDA kernel. Some users may implement their own complex gather flows. In order to maintain the required atomicity, if the flow uses more than one CUDA kernel, the user needs to call the Start/end_custom_flow APIs.
 
 ## Multi device
 Embeddings can span multiple devices/nodes by way of sharding. This is accomplished with a CUDA buffer tha spans multiple devices as detailed in the [CUDA programming guide](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/virtual-memory-management.html#).

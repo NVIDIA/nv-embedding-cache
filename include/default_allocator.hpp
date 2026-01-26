@@ -54,12 +54,12 @@ public:
 
   DefaultAllocator(size_t host_alloc_threshold_bytes);
   virtual ~DefaultAllocator() override = default;
-  virtual cudaError_t deviceAllocate(void** ptr, size_t sz, int device_id = -1) noexcept override;
-  virtual cudaError_t deviceFree(void* ptr, int device_id = -1) noexcept override;
-  virtual cudaError_t deviceAllocateAsync(void** ptr, size_t sz, cudaStream_t stream, int device_id = -1) noexcept override;
-  virtual cudaError_t deviceFreeAsync(void* ptr, cudaStream_t stream, int device_id = -1) noexcept override;
-  virtual cudaError_t hostAllocate(void** ptr, size_t sz) noexcept override;
-  virtual cudaError_t hostFree(void* ptr) noexcept override;
+  virtual cudaError_t device_allocate(void** ptr, size_t sz, int device_id = -1) noexcept override;
+  virtual cudaError_t device_free(void* ptr, int device_id = -1) noexcept override;
+  virtual cudaError_t device_allocate_async(void** ptr, size_t sz, cudaStream_t stream, int device_id = -1) noexcept override;
+  virtual cudaError_t device_free_async(void* ptr, cudaStream_t stream, int device_id = -1) noexcept override;
+  virtual cudaError_t host_allocate(void** ptr, size_t sz) noexcept override;
+  virtual cudaError_t host_free(void* ptr) noexcept override;
 
 private:
   std::unordered_map<int,cudaMemPool_t> mem_pools_;

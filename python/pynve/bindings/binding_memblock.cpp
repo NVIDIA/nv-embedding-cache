@@ -32,12 +32,12 @@ LinearMemBlock::LinearMemBlock(size_t size_to_alloc)
     : MemBlock(MemBlockType::LINEAR),
     allocator_(GetDefaultAllocator()) {
     NVE_CHECK_(allocator_ != nullptr);
-    NVE_CHECK_((allocator_->hostAllocate(&ptr_, size_to_alloc)));
+    NVE_CHECK_((allocator_->host_allocate(&ptr_, size_to_alloc)));
     NVE_CHECK_(ptr_ != nullptr);
 }
 
 LinearMemBlock::~LinearMemBlock() {
-    allocator_->hostFree(ptr_);
+    allocator_->host_free(ptr_);
 }
 
 void* LinearMemBlock::get_ptr() const {

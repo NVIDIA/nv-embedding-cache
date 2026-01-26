@@ -374,8 +374,8 @@ void GPUEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64_t num_ke
   StreamCoordinator sc(modify_stream, private_modify_stream_);
 
   std::shared_ptr<nve::DefaultECEvent> syncEvent = contexts_->create_sync_event();
-  NVE_CHECK_(syncEvent->EventRecord());
-  NVE_CHECK_(syncEvent->EventWaitStream(private_modify_stream_));
+  NVE_CHECK_(syncEvent->event_record());
+  NVE_CHECK_(syncEvent->event_wait_stream(private_modify_stream_));
 
   // call update accumulate kernel, use private modify stream for execution
   UpdateTable<KeyType>(d_values, reinterpret_cast<const KeyType*>(d_keys),
@@ -420,8 +420,8 @@ void GPUEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const int64_t nu
   StreamCoordinator sc(modify_stream, private_modify_stream_);
 
   std::shared_ptr<nve::DefaultECEvent> syncEvent = contexts_->create_sync_event();
-  NVE_CHECK_(syncEvent->EventRecord());
-  NVE_CHECK_(syncEvent->EventWaitStream(private_modify_stream_));
+  NVE_CHECK_(syncEvent->event_record());
+  NVE_CHECK_(syncEvent->event_wait_stream(private_modify_stream_));
 
   // call update accumulate kernel
   switch (value_type) {

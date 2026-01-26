@@ -1,7 +1,6 @@
 FROM nvcr.io/nvidia/pytorch:25.06-py3
 RUN apt-get update
 RUN apt-get -y install sudo redis
-RUN sed -i '/^torch==/c\torch>=2.7' /etc/pip/constraint.txt
 
 ARG UID
 ARG UNAME

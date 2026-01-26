@@ -98,7 +98,7 @@ void AutoInsertHandler::auto_insert(
 
     // collect keys and data
     collect_keys_and_data(keys_bw, output_bw, lookup_stream, num_keys);
-  } else if (--insert_freq_cnt_ < 0  && heuristic_->InsertNeeded(hitrate, static_cast<size_t>(table_id_))) {
+  } else if (--insert_freq_cnt_ < 0  && heuristic_->insert_needed(hitrate, static_cast<size_t>(table_id_))) {
     // start collecting
     collected_output_stride_ = output_stride;
     collected_keys_ = 0;

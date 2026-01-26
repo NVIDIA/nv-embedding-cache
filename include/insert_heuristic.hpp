@@ -28,7 +28,7 @@ namespace nve {
 class InsertHeuristic {
   public:
   virtual ~InsertHeuristic() = default;
-  virtual bool InsertNeeded(const float hitrate, const size_t table_id) = 0;
+  virtual bool insert_needed(const float hitrate, const size_t table_id) = 0;
 };
 
 // TODO: TRTREC-88
@@ -37,7 +37,7 @@ class DefaultInsertHeuristic : public InsertHeuristic {
   DefaultInsertHeuristic(const std::vector<float>& thresholds); 
   ~DefaultInsertHeuristic() override = default;
   
-  bool InsertNeeded(const float hitrate, const size_t table_id) override;
+  bool insert_needed(const float hitrate, const size_t table_id) override;
 
   private:
   const std::vector<float> thresholds_;
@@ -52,7 +52,7 @@ class FSMInsertHeuristic :  public InsertHeuristic
 public:
     FSMInsertHeuristic(const std::vector<float>& thresholds);
     ~FSMInsertHeuristic() override = default;
-    bool InsertNeeded(const float hitrate, const size_t table_id) override;
+    bool insert_needed(const float hitrate, const size_t table_id) override;
 private:
     enum class State : uint64_t
     {
@@ -78,7 +78,7 @@ public:
     // max_unsteady_samples: the maximum number of unsteady samples in a row to allow before the state is considered unstable.
     StatisticalInsertHeuristic(const size_t num_keys, const std::vector<float>& k_factor, const size_t window_size = 14, const size_t num_inserts_needed = 50, const size_t max_unsteady_samples = 3);
     ~StatisticalInsertHeuristic() override = default;
-    bool InsertNeeded(const float hitrate, const size_t table_id) override;
+    bool insert_needed(const float hitrate, const size_t table_id) override;
 
 private:
     enum class State : uint64_t

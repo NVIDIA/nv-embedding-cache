@@ -28,9 +28,9 @@
 namespace nve {
 
 template<typename IndexT, typename CacheDataT>
-cudaError_t callCacheQueryUVM(const IndexT* d_keys, const size_t len,
+cudaError_t call_cache_query_uvm(const IndexT* d_keys, const size_t len,
     int8_t* d_values, const int8_t* d_table,
-    CacheDataT data, cudaStream_t stream, uint32_t currTable, size_t stride);
+    CacheDataT data, cudaStream_t stream, uint32_t curr_table, size_t stride);
 
 
 template<typename IndexT>
@@ -41,13 +41,13 @@ public:
 public:
     struct CacheConfig
     {
-        uint32_t rowSizeInBytes;
+        uint32_t row_size_in_bytes;
     };
 
     struct CacheData
     {
-        uint32_t rowSizeInBytes;
-        bool bCountMisses;
+        uint32_t row_size_in_bytes;
+        bool count_misses;
         int64_t* misses;
     };
 
@@ -55,28 +55,28 @@ public:
     {
     };
 
-    ECNoCache(Allocator* pAllocator, Logger* pLogger, CacheConfig& cfg) : EmbedCacheBase<IndexT>(pAllocator, pLogger, API), m_config(cfg)
+    ECNoCache(Allocator* allocator, Logger* pLogger, CacheConfig& cfg) : EmbedCacheBase<IndexT>(allocator, pLogger, API), config_(cfg)
     {
 
     }
 
-    ECError LookupContextCreate(LookupContextHandle& outHandle, const PerformanceMetric* pMertics, size_t nMetrics) const override
+    ECError lookup_context_create(LookupContextHandle& out_handle, const PerformanceMetric* metrics, size_t num_metrics) const override
     {
         try 
         {
-            CacheData* pData;
-            CHECK_ERR_AND_THROW(this->m_pAllocator->hostAllocate((void**)&pData, sizeof(CacheData)));
-            memset(pData, 0, sizeof(CacheData));
-            pData->rowSizeInBytes = m_config.rowSizeInBytes;
-            for (size_t i = 0; i < nMetrics; i++)
+            CacheData* p_data;
+            CHECK_ERR_AND_THROW(this->allocator_->host_allocate((void**)&p_data, sizeof(CacheData)));
+            memset(p_data, 0, sizeof(CacheData));
+            p_data->row_size_in_bytes = config_.row_size_in_bytes;
+            for (size_t i = 0; i < num_metrics; i++)
             {
-                if (pMertics->type == MERTIC_COUNT_MISSES)
+                if (metrics->type == MERTIC_COUNT_MISSES)
                 {
-                    pData->bCountMisses = true;
-                    pData->misses = pMertics[i].p_dVal;
+                    p_data->count_misses = true;
+                    p_data->misses = metrics[i].d_val;
                 }
             }
-            outHandle.handle = (uint64_t)pData;
+            out_handle.handle = (uint64_t)p_data;
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -86,17 +86,17 @@ public:
     }
 
 
-    ECError LookupContextDestroy(LookupContextHandle& handle) const override
+    ECError lookup_context_destroy(LookupContextHandle& handle) const override
     {
         CacheData* p = (CacheData*)handle.handle;
         handle.handle = 0;
 
-        ECError ret = this->m_pAllocator->hostFree(p);
+        ECError ret = this->allocator_->host_free(p);
         return ret;
     }
 
     // performance 
-    ECError PerformanceMetricCreate(PerformanceMetric& outMetric, PerformanceMerticTypes type) const override
+    ECError performance_metric_create(PerformanceMetric& out_metric, PerformanceMerticTypes type) const override
     {
         try 
         {
@@ -104,9 +104,9 @@ public:
             {
             case MERTIC_COUNT_MISSES:
             {
-                CHECK_ERR_AND_THROW(this->m_pAllocator->deviceAllocate((void**)&outMetric.p_dVal, sizeof(uint32_t)));
-                outMetric.type = type;
-                CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemset(outMetric.p_dVal, 0, sizeof(uint32_t)));
+                CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&out_metric.d_val, sizeof(uint32_t)));
+                out_metric.type = type;
+                CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemset(out_metric.d_val, 0, sizeof(uint32_t)));
                 return ECERROR_SUCCESS;
             }
             default:
@@ -120,7 +120,7 @@ public:
         
     }
     
-    ECError PerformanceMetricDestroy(PerformanceMetric& metric) const override
+    ECError performance_metric_destroy(PerformanceMetric& metric) const override
     {
         try
         {
@@ -128,8 +128,8 @@ public:
             {
             case MERTIC_COUNT_MISSES:
             {
-                ECError ret = this->m_pAllocator->deviceFree(metric.p_dVal);
-                metric.p_dVal = nullptr;
+                ECError ret = this->allocator_->device_free(metric.d_val);
+                metric.d_val = nullptr;
                 return ret;
             }
             default:
@@ -144,7 +144,7 @@ public:
         
     }
 
-    ECError PerformanceMetricGetValue(const PerformanceMetric& metric, int64_t* pOutValue, cudaStream_t stream) const override
+    ECError performance_metric_get_value(const PerformanceMetric& metric, int64_t* p_out_value, cudaStream_t stream) const override
     {
         try
         {
@@ -152,11 +152,11 @@ public:
             {
             case MERTIC_COUNT_MISSES:
             {
-                if (!metric.p_dVal)
+                if (!metric.d_val)
                 {
                     EC_THROW(ECERROR_INVALID_ARGUMENT);
                 }
-                CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(pOutValue, metric.p_dVal, sizeof(metric.p_dVal[0]), cudaMemcpyDefault, stream));
+                CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(p_out_value, metric.d_val, sizeof(metric.d_val[0]), cudaMemcpyDefault, stream));
                 return ECERROR_SUCCESS;
             }
             default:
@@ -170,11 +170,11 @@ public:
         
     }
 
-    ECError PerformanceMetricReset(PerformanceMetric& pMetric, cudaStream_t stream) const override
+    ECError performance_metric_reset(PerformanceMetric& p_metric, cudaStream_t stream) const override
     {
         try
         {
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(pMetric.p_dVal, 0, sizeof(pMetric.p_dVal[0]), stream));
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(p_metric.d_val, 0, sizeof(p_metric.d_val[0]), stream));
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -183,23 +183,23 @@ public:
         }
     }
 
-    ECError ModifyContextCreate(ModifyContextHandle& outHandle, uint32_t /*maxUpdateSize*/) const override
+    ECError modify_context_create(ModifyContextHandle& out_handle, uint32_t /*max_update_size*/) const override
     {
-        outHandle.handle = 0;
+        out_handle.handle = 0;
         return ECERROR_SUCCESS;
     }
 
-    ECError ModifyContextDestroy(ModifyContextHandle& /*outHandle*/) const override
+    ECError modify_context_destroy(ModifyContextHandle& /*out_handle*/) const override
     {
         return ECERROR_SUCCESS;
     }
 
-    ECError Invalidate(
-        ModifyContextHandle& /*modifyContextHandle*/,
+    ECError invalidate(
+        ModifyContextHandle& /*modify_context_handle*/,
         const IndexT* /*keys*/,
-        size_t /*numKeys*/,
-        uint32_t /*tableIndex*/,
-        IECEvent* /*syncEvent*/,
+        size_t /*num_keys*/,
+        uint32_t /*table_index*/,
+        IECEvent* /*sync_event*/,
         cudaStream_t /*stream*/) override
     {
         return ECERROR_SUCCESS;
@@ -209,16 +209,16 @@ public:
     {
     }
     
-    ECError Init() override
+    ECError init() override
     {
         try
         {
-            if (!this->m_pAllocator)
+            if (!this->allocator_)
             {
                 EC_THROW(ECERROR_BAD_ALLOCATOR);
             }
 
-            if (!this->m_pLogger)
+            if (!this->logger_)
             {
                 EC_THROW(ECERROR_BAD_LOGGER);
             }
@@ -231,32 +231,32 @@ public:
     }
 
     // return CacheData for Address Calcaulation each template should implement its own
-    CacheData GetCacheData(const LookupContextHandle& handle) const
+    CacheData get_cache_data(const LookupContextHandle& handle) const
     {
         CacheData* cd = (CacheData*)handle.handle;
         // if cd is nullptr we have a problem, but i hate for this function to take a reference, it will create code ugly lines, please don't pass nullptr here
         return *cd;
     }
 
-    virtual ECError UpdateAccumulate(
-        ModifyContextHandle& /*modifyContextHandle*/,
+    virtual ECError update_accumulate(
+        ModifyContextHandle& /*modify_context_handle*/,
         const IndexT* /*keys*/,
         const int8_t* /*d_values*/,
         int64_t /*stride*/,
-        size_t /*numKeys*/,
-        uint32_t /*tableIndex*/,
-        DataTypeFormat /*updateFormat*/,
-        DataTypeFormat /*cacheFormat*/,
-        IECEvent* /*syncEvent*/,
+        size_t /*num_keys*/,
+        uint32_t /*table_index*/,
+        DataTypeFormat /*update_format*/,
+        DataTypeFormat /*cache_format*/,
+        IECEvent* /*sync_event*/,
         cudaStream_t /*stream*/) override
     {
         return ECERROR_SUCCESS;
     }
 
-    ECError Lookup(const LookupContextHandle& /*hLookup*/, const IndexT* d_keys, const size_t len,
+    ECError lookup(const LookupContextHandle& /*h_lookup*/, const IndexT* d_keys, const size_t len,
                                             int8_t* /*d_values*/, uint64_t* d_missing_index,
                                             IndexT* d_missing_keys, size_t* d_missing_len,
-                                            uint32_t /*currTable*/, size_t /*stride*/, cudaStream_t stream) override
+                                            uint32_t /*curr_table*/, size_t /*stride*/, cudaStream_t stream) override
     {
         try 
         {
@@ -273,9 +273,9 @@ public:
         }
     }
 
-    ECError Lookup(const LookupContextHandle& /*hLookup*/, const IndexT* /*d_keys*/, const size_t len,
+    ECError lookup(const LookupContextHandle& /*h_lookup*/, const IndexT* /*d_keys*/, const size_t len,
                                             int8_t* /*d_values*/, uint64_t* d_hit_mask,
-                                            uint32_t /*currTable*/, size_t /*stride*/, cudaStream_t /*stream*/) override
+                                            uint32_t /*curr_table*/, size_t /*stride*/, cudaStream_t /*stream*/) override
     {
         try 
         {
@@ -289,16 +289,16 @@ public:
         
     }
 
-    ECError Lookup(const LookupContextHandle& hLookup, const IndexT* d_keys, const size_t len,
-                                            int8_t* d_values, const int8_t* d_table, uint32_t currTable, 
+    ECError lookup(const LookupContextHandle& h_lookup, const IndexT* d_keys, const size_t len,
+                                            int8_t* d_values, const int8_t* d_table, uint32_t curr_table, 
                                             size_t stride, cudaStream_t stream) override
     {
         try 
         {
-            auto data = GetCacheData(hLookup);
+            auto data = get_cache_data(h_lookup);
             if (len > 0)
             {
-                CACHE_CUDA_ERR_CHK_AND_THROW(callCacheQueryUVM<IndexT>(d_keys, len, d_values, d_table, data, stream, currTable, stride));
+                CACHE_CUDA_ERR_CHK_AND_THROW(call_cache_query_uvm<IndexT>(d_keys, len, d_values, d_table, data, stream, curr_table, stride));
             }
             return ECERROR_SUCCESS;
         }
@@ -308,92 +308,92 @@ public:
         }
     }
 
-    ECError LookupSortGather(const LookupContextHandle& /*hLookup*/, const IndexT* /*d_keys*/, const size_t /*len*/,
-                                            int8_t* /*d_values*/, const int8_t* /*d_table*/, int8_t* /*d_auxiliryBuffer*/, size_t& /*auxiliryBufferBytes*/, 
-                                            uint32_t /*currTable*/, size_t /*stride*/, cudaStream_t /*stream*/)
+    ECError lookup_sort_gather(const LookupContextHandle& /*h_lookup*/, const IndexT* /*d_keys*/, const size_t /*len*/,
+                                            int8_t* /*d_values*/, const int8_t* /*d_table*/, int8_t* /*d_auxiliary_buffer*/, size_t& /*auxiliary_buffer_bytes*/, 
+                                            uint32_t /*curr_table*/, size_t /*stride*/, cudaStream_t /*stream*/)
     {
         return ECERROR_NOT_IMPLEMENTED;
     }
 
-    ECError UpdateAccumulateNoSync(const LookupContextHandle& /*hLookup*/, ModifyContextHandle& /*hModify*/, const IndexT* /*d_keys*/, const size_t /*len*/, const int8_t* /*d_values*/, uint32_t /*currTable*/, size_t /*stride*/, 
-                                            DataTypeFormat /*inputFormat*/, DataTypeFormat /*outputFormat*/, cudaStream_t /*stream*/) override
+    ECError update_accumulate_no_sync(const LookupContextHandle& /*h_lookup*/, ModifyContextHandle& /*hModify*/, const IndexT* /*d_keys*/, const size_t /*len*/, const int8_t* /*d_values*/, uint32_t /*curr_table*/, size_t /*stride*/, 
+                                            DataTypeFormat /*input_format*/, DataTypeFormat /*output_format*/, cudaStream_t /*stream*/) override
                                             {
         return ECERROR_SUCCESS;
     }
 
-    ECError UpdateAccumulateNoSyncFused(const LookupContextHandle&, ModifyContextHandle&, const IndexT*, const size_t, const int8_t*, uint32_t, size_t, 
+    ECError update_accumulate_no_sync_fused(const LookupContextHandle&, ModifyContextHandle&, const IndexT*, const size_t, const int8_t*, uint32_t, size_t, 
                                             DataTypeFormat, DataTypeFormat, int8_t*, cudaStream_t)
     {
         return ECERROR_NOT_IMPLEMENTED;
     }
 
-    size_t GetMaxNumEmbeddingVectorsInCache() const override
+    size_t get_max_num_embedding_vectors_in_cache() const override
     {
         return 0;
     }
     
-    CacheAllocationSize GetLookupContextSize() const override
+    CacheAllocationSize get_lookup_context_size() const override
     {
         CacheAllocationSize ret = {0};
-        ret.hostAllocationSize = sizeof(CacheData);
+        ret.host_allocation_size = sizeof(CacheData);
         return ret;
     }
 
-    CacheAllocationSize GetModifyContextSize(uint32_t /*maxUpdateSize*/) const override
+    CacheAllocationSize get_modify_context_size(uint32_t /*max_update_size*/) const override
     {
         CacheAllocationSize ret = {0};
         return ret;
     }
 
-    ECError GetKeysStoredInCache(const LookupContextHandle& /*lookupContextHandle*/, IndexT* /*outKeys*/, size_t& numOutKeys) const override
+    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* /*out_keys*/, size_t& num_out_keys) const override
     {
-        numOutKeys = 0;
+        num_out_keys = 0;
         return ECERROR_SUCCESS;
     }
 
-    ECError ClearCache(cudaStream_t /*stream*/) override
+    ECError clear_cache(cudaStream_t /*stream*/) override
     {
         return ECERROR_SUCCESS;
     }
 
     // assuming indices is host accessiable
-    ECError Insert(
-        ModifyContextHandle& /*modifyContextHandle*/,
+    ECError insert(
+        ModifyContextHandle& /*modify_context_handle*/,
         const IndexT* /*keys*/,
         const float* /*priority*/,
-        const int8_t* const* /*ppData*/,
-        size_t /*numKeys*/,
-        uint32_t /*tableIndex*/,
-        IECEvent* /*syncEvent*/,
+        const int8_t* const* /*pp_data*/,
+        size_t /*num_keys*/,
+        uint32_t /*table_index*/,
+        IECEvent* /*sync_event*/,
         cudaStream_t /*stream*/)
     {
         return ECERROR_SUCCESS;
     }
 
     // assuming indices is host accessiable
-    ECError Update(
-        ModifyContextHandle& /*modifyContextHandle*/,
+    ECError update(
+        ModifyContextHandle& /*modify_context_handle*/,
         const IndexT* /*keys*/,
         const int8_t* /*d_values*/,
         int64_t /*stride*/,
-        size_t /*numKeys*/,
-        uint32_t /*tableIndex*/,
-        IECEvent* /*syncEvent*/,
+        size_t /*num_keys*/,
+        uint32_t /*table_index*/,
+        IECEvent* /*sync_event*/,
         cudaStream_t /*stream*/)
     {
         return ECERROR_SUCCESS;
     }
 
-    ECError StartCustomFlow() override
+    ECError start_custom_flow() override
     {
         return ECERROR_SUCCESS;
     }
 
-    ECError EndCustomFlow() override    
+    ECError end_custom_flow() override    
     {
         return ECERROR_SUCCESS;
     }
 private:
-    CacheConfig m_config;
+    CacheConfig config_;
 };
 }

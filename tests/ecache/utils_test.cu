@@ -16,8 +16,6 @@
  */
 
 #include "gtest/gtest.h"
-#include "samples/wrapper_sample/cuda_utils.cuh"
-#include "samples/wrapper_sample/communicator.h"
 #include <datagen.h>
 #include <memory>
 #include <algorithm>
@@ -291,58 +289,4 @@ TEST_F(TestDedup64, DedupAccumulate)
         m_stream);
 
     CheckAccumulate<__half>(num_keys, row_size_in_bytes);
-}
-
-TEST(CommunicatorTest, basic)
-{
-    constexpr uint32_t data_offset = 1;
-    int device_count = 0;
-    CHECK_CUDA_ERROR(cudaGetDeviceCount(&device_count));
-    if (device_count == 1)
-    {
-	    GTEST_SKIP();
-    }
-    std::vector<std::shared_ptr<std::thread>> threads;
-    std::vector<cudaStream_t> streams;
-    std::vector<Buffer<uint64_t>*> combined_buffs;
-    std::vector<Buffer<uint64_t>*> out_buffs;
-    for (uint32_t dev = 0; dev < device_count; dev++)
-    {
-        CHECK_CUDA_ERROR(cudaSetDevice(dev));
-        cudaStream_t stream;
-        CHECK_CUDA_ERROR(cudaStreamCreate(&stream));
-        Buffer<uint64_t>* combined_buff = new Buffer<uint64_t>(device_count*sizeof(uint64_t));
-        memset(combined_buff->ph, 0, combined_buff->m_size);
-        combined_buff->HtoD(stream);
-        Buffer<uint64_t>* out_buff = new Buffer<uint64_t>(sizeof(uint64_t));
-        out_buff->ph[0] = dev + data_offset;
-        out_buff->HtoD(stream);
-        threads.push_back(std::make_shared<std::thread>([=] {
-            CHECK_CUDA_ERROR(cudaSetDevice(dev));
-            Communicator comm(device_count, dev, "__temp__", dev);
-            comm.AllToAll((const int8_t*)out_buff->pd, (int8_t*)combined_buff->pd, sizeof(uint64_t), stream);
-            CHECK_CUDA_ERROR(cudaStreamSynchronize(stream));
-        }));
-        streams.push_back(stream);
-        combined_buffs.push_back(combined_buff);
-        out_buffs.push_back(out_buff);
-    }
-    for (auto t : threads)
-    {
-        t->join();
-    }
-
-    std::vector<uint64_t> ref(device_count);
-    // fill reference buffer with data_offset , ... , data_offset + device_count
-    std::iota(ref.begin(), ref.end(), data_offset);
-    for (uint32_t dev = 0; dev < device_count; dev++)
-    {
-        CHECK_CUDA_ERROR(cudaSetDevice(dev));
-        combined_buffs[dev]->DtoH(streams[dev]);
-        CHECK_CUDA_ERROR(cudaStreamSynchronize(streams[dev]));
-        EXPECT_TRUE(std::equal(ref.begin(), ref.end(), combined_buffs[dev]->ph));
-        delete combined_buffs[dev];
-        delete out_buffs[dev];
-        CHECK_CUDA_ERROR(cudaStreamDestroy(streams[dev]));
-    }
 }

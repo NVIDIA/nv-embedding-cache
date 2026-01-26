@@ -57,7 +57,6 @@ INSTANTIATE_TEST_SUITE_P(
             "!rm /tmp/keys.npy /tmp/values.npy"},           // Cleanup temporary files
         std::vector<std::string>{"simple_cpp"},
         std::vector<std::string>{"simple_sample"},
-        std::vector<std::string>{"wrapper_sample"},
         std::vector<std::string>{"layer_sample"}
     )
 );

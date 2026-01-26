@@ -23,7 +23,6 @@
 #include <numeric>
 #include "embedding_cache_combined.cuh"
 #include "cuda_ops/scatter.cuh"
-#include "cuda_ops/embedding_bag_kernel.cuh"
 #include "cuda_ops/update_accumulate.cuh"
 #include "cuda_ops/cuda_utils.cuh"
 #include "cuda_ops/dedup_grads_kernel.cuh"
@@ -61,8 +60,8 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     }
 
     ~EmbeddingCacheRefTest() {
-        CHECK_CUDA_ERROR(m_cache_ptr->LookupContextDestroy(m_handle_lookup));
-        CHECK_CUDA_ERROR(m_cache_ptr->ModifyContextDestroy(m_handle_modify));
+        CHECK_CUDA_ERROR(m_cache_ptr->lookup_context_destroy(m_handle_lookup));
+        CHECK_CUDA_ERROR(m_cache_ptr->modify_context_destroy(m_handle_modify));
     }
 
     void LaunchTest(uint64_t num_rows, uint32_t num_elements, uint32_t batch, uint32_t hotness, bool allocDataOnHost) {
@@ -76,9 +75,9 @@ class EmbeddingCacheRefTest : public ::testing::Test {
         InitCache();
         InitTestExtras();
         AllocateKeys();
-        CacheDataType cache_data = m_cache_ptr->GetCacheData(m_handle_lookup);
+        CacheDataType cache_data = m_cache_ptr->get_cache_data(m_handle_lookup);
         std::vector<IndexType> cached_indices = 
-            ComputeCachedIndices(cache_data.nSets, CacheType::NUM_WAYS);
+            ComputeCachedIndices(cache_data.num_sets, CacheType::NUM_WAYS);
         PopulateCache(cached_indices);
         ComputeRefResults(m_table->ph, m_keys->ph, cached_indices);
         LaunchKernel(m_table->pd, m_keys->pd, cache_data);
@@ -103,7 +102,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     void GetCacheContent(ElemType* d_cache_content, std::shared_ptr<Buffer<IndexType>> keys_in_c, size_t& num_keys) 
     {
         
-        m_cache_ptr->GetKeysStoredInCache(m_handle_lookup, keys_in_c->ph, num_keys);
+        m_cache_ptr->get_keys_stored_in_cache(m_handle_lookup, keys_in_c->ph, num_keys);
         keys_in_c->HtoD(m_stream);
         int64_t num_hitmask_elems = (num_keys + 31) / 32;
         auto hitmask = std::make_shared<Buffer<uint32_t>>(num_hitmask_elems * sizeof(uint32_t));
@@ -111,12 +110,12 @@ class EmbeddingCacheRefTest : public ::testing::Test {
 
         NVE_DEBUG_PRINTF_("launch lookup with hitmask kernel\n");
 
-        m_cache_ptr->Lookup(m_handle_lookup, keys_in_c->pd, num_keys, (int8_t*)d_cache_content, (uint64_t*)hitmask->pd, 0, m_num_elements*sizeof(ElemType), m_stream);
+        m_cache_ptr->lookup(m_handle_lookup, keys_in_c->pd, num_keys, (int8_t*)d_cache_content, (uint64_t*)hitmask->pd, 0, m_num_elements*sizeof(ElemType), m_stream);
     }
 
     std::map<IndexType, std::vector<ElemType>> GetCacheContent()
     {
-        auto num_vec_in_c = m_cache_ptr->GetMaxNumEmbeddingVectorsInCache();
+        auto num_vec_in_c = m_cache_ptr->get_max_num_embedding_vectors_in_cache();
         auto key_in_c = std::make_shared<Buffer<IndexType>>(sizeof(IndexType)*num_vec_in_c);
         auto cache_content = std::make_shared<Buffer<ElemType>>(sizeof(ElemType)*this->m_num_elements*num_vec_in_c);
         size_t num_keys_in_c = 0;
@@ -158,17 +157,17 @@ class EmbeddingCacheRefTest : public ::testing::Test {
         const uint32_t num_rows_in_cache = static_cast<uint32_t>(cache_ratio * static_cast<float>(this->m_num_rows));
 
         typename CacheType::CacheConfig cfg;
-        cfg.embedWidth = this->m_num_elements * sizeof(ElemType);
+        cfg.embed_width_in_bytes = this->m_num_elements * sizeof(ElemType);
 
         NVE_DEBUG_PRINTF_("cache of %d entries\n", int(cache_ratio * float(this->m_num_rows)));
-        cfg.cacheSzInBytes = num_rows_in_cache * cfg.embedWidth;
-        cfg.numTables = 1;
-        cfg.allocDataOnHost = m_allocDataOnHost;
+        cfg.cache_sz_in_bytes = num_rows_in_cache * cfg.embed_width_in_bytes;
+        cfg.num_tables = 1;
+        cfg.allocate_data_on_host = m_allocDataOnHost;
 
         m_cache_ptr = std::make_shared<CacheType>(&m_cache_allocator, &m_cache_logger, cfg);
-        m_cache_ptr->Init();
+        m_cache_ptr->init();
 
-        m_cache_ptr->LookupContextCreate(m_handle_lookup, nullptr, 0);
+        m_cache_ptr->lookup_context_create(m_handle_lookup, nullptr, 0);
     }
 
     void AllocateTable() {
@@ -239,7 +238,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
         NVE_DEBUG_PRINTF_("inserting %lu embeds to cache\n", cached_indices.size());
 
         std::vector<float> priorities(cached_indices.size(), 1.0f);
-        m_cache_ptr->ModifyContextCreate(m_handle_modify, static_cast<uint32_t>(cached_indices.size()));
+        m_cache_ptr->modify_context_create(m_handle_modify, static_cast<uint32_t>(cached_indices.size()));
 
         nve::DefaultHistogram<IndexType> hist(cached_indices.data(), cached_indices.size(),
                                               reinterpret_cast<const int8_t*>(m_table->ph),
@@ -248,8 +247,8 @@ class EmbeddingCacheRefTest : public ::testing::Test {
         CHECK_CUDA_ERROR(cudaEventCreate(&wait));
         nve::DefaultECEvent ec_event(std::vector<cudaStream_t>{});
 
-        m_cache_ptr->Insert(
-            m_handle_modify, hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), 0, &ec_event, m_stream);
+        m_cache_ptr->insert(
+            m_handle_modify, hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &ec_event, m_stream);
 
         CHECK_CUDA_ERROR(cudaEventRecord(wait));
         CHECK_CUDA_ERROR(cudaEventSynchronize(wait));
@@ -492,7 +491,7 @@ class EmbeddingCacheLookupHitMaskRefTest : public EmbeddingCacheRefTest<T> {
 
         NVE_DEBUG_PRINTF_("launch lookup with hitmask kernel\n");
 
-        CHECK_CUDA_ERROR((nve::callCacheQueryHitMask<IndexType, IndexType>(
+        CHECK_CUDA_ERROR((nve::call_cache_query_hit_mask<IndexType, IndexType>(
             indices, this->m_batch * this->m_hotness,
             reinterpret_cast<int8_t*>(m_result->pd), m_hitmask->pd, cache_data,
             this->m_stream, 0, this->m_num_elements * sizeof(ElemType))));                         
@@ -905,7 +904,7 @@ class EmbeddingCacheFusedUpdateAccumlateTest : public EmbeddingCacheRefTest<T> {
         m_input->HtoD(this->m_stream);
 
         uint64_t num_indices = *m_h_num_runs_out;
-        CHECK_CUDA_ERROR((nve::callUpdateAccumalateNoSyncFusedWithPipeline<IndexType,IndexType>(reinterpret_cast<int8_t*>(m_input->pd), 
+        CHECK_CUDA_ERROR((nve::call_update_accumulate_no_sync_fused_with_pipeline<IndexType,IndexType>(reinterpret_cast<int8_t*>(m_input->pd), 
                                    (int8_t*)(table), 
                                    m_unique_keys->pd, 
                                    static_cast<IndexType>(num_indices),
@@ -1008,7 +1007,7 @@ class EmbeddingCacheLookupSortGatherRefTest : public EmbeddingCacheRefTest<T> {
 
         // first calc required aux size
         size_t bytes = 0;
-        CHECK_CUDA_ERROR((nve::callSortGather<IndexType, IndexType>(
+        CHECK_CUDA_ERROR((nve::call_sort_gather<IndexType, IndexType>(
             reinterpret_cast<const int8_t*>(table), 
             reinterpret_cast<int8_t*>(m_result->pd), 
             indices, 
@@ -1025,7 +1024,7 @@ class EmbeddingCacheLookupSortGatherRefTest : public EmbeddingCacheRefTest<T> {
         CHECK_CUDA_ERROR(cudaMalloc(&aux, bytes));
 
         // launch kernel
-        CHECK_CUDA_ERROR((nve::callSortGather<IndexType, IndexType>(
+        CHECK_CUDA_ERROR((nve::call_sort_gather<IndexType, IndexType>(
             reinterpret_cast<const int8_t*>(table), 
             reinterpret_cast<int8_t*>(m_result->pd), 
             indices, 
@@ -1788,14 +1787,14 @@ class HistogramTest : public ::testing::Test {
                 static_cast<size_t>(embedding_size),
                 false);
             
-            num_unique_keys = static_cast<KeyType>(histogramCPU.GetNumBins());
+            num_unique_keys = static_cast<KeyType>(histogramCPU.get_num_bins());
             unique_keys_h.resize(num_unique_keys);
             priority_h.resize(num_unique_keys);
             data_ptrs_h.resize(num_unique_keys);
 
-            memcpy(&unique_keys_h[0], histogramCPU.GetKeys(), num_unique_keys * sizeof(KeyType));
-            memcpy(&priority_h[0], histogramCPU.GetPriority(), num_unique_keys * sizeof(float));
-            memcpy(&data_ptrs_h[0], histogramCPU.GetData(), num_unique_keys * sizeof(int8_t*));
+            memcpy(&unique_keys_h[0], histogramCPU.get_keys(), num_unique_keys * sizeof(KeyType));
+            memcpy(&priority_h[0], histogramCPU.get_priority(), num_unique_keys * sizeof(float));
+            memcpy(&data_ptrs_h[0], histogramCPU.get_data(), num_unique_keys * sizeof(int8_t*));
         }
 
         // get ref histogram sorted by priority

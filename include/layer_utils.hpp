@@ -94,10 +94,10 @@ public:
   StreamCoordinator(const cudaStream_t& caller_stream, const cudaStream_t& run_stream) :
     queue_stream(run_stream ? run_stream : caller_stream), caller_stream_(caller_stream)
   {
-    CreateStreamDependency(caller_stream_, queue_stream);
+    create_stream_dependency(caller_stream_, queue_stream);
   }
   ~StreamCoordinator() {
-    CreateStreamDependency(queue_stream, caller_stream_);
+    create_stream_dependency(queue_stream, caller_stream_);
   }
 
   /**
@@ -105,7 +105,7 @@ public:
    * Specifically, commands queued for dst after this call will wait for all commands queued for src before this call.
    * An ad-hoc cudaEvent will be created for this call (this will cause a small overhead, measured 0.21us on my machine)
    */
-  static inline void CreateStreamDependency(const cudaStream_t& src, const cudaStream_t& dst) {
+  static inline void create_stream_dependency(const cudaStream_t& src, const cudaStream_t& dst) {
     if (src != dst) {
       cudaEvent_t e;
       NVE_CHECK_(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));

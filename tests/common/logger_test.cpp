@@ -110,7 +110,7 @@ static void LogAllMessages() {
 }
 
 static void LogAndTestSingleMessage(LogLevel_t lvl) {
-  getGlobalLogger()->setVerbosityLevel(lvl);
+  GetGlobalLogger()->set_verbosity_level(lvl);
   LogCapture lc;
   LogMessages({lvl});
   const auto msg = test_params.at(lvl).message;
@@ -125,7 +125,7 @@ static void LogAndTestSingleMessage(LogLevel_t lvl) {
 }
 
 static void LogAndTestVerbosity(LogLevel_t test_lvl) {
-  getGlobalLogger()->setVerbosityLevel(test_lvl);
+  GetGlobalLogger()->set_verbosity_level(test_lvl);
   LogCapture lc;
   LogAllMessages();
   for (const auto& [lvl, param] : test_params) {

@@ -35,15 +35,15 @@ public:
    * @param sz Size in bytes
    * @param device_id Device index to be used. Negative value implies use the current device.
    */
-  virtual cudaError_t deviceAllocate(void** ptr, size_t sz, int device_id = -1) noexcept = 0;
+  virtual cudaError_t device_allocate(void** ptr, size_t sz, int device_id = -1) noexcept = 0;
 
   /**
    * Free a buffer on a device.
    * @param ptr Buffer address.
    * @param device_id Device index to be used. Negative value implies use the current device.
-   * @note device_id must be the same as the value used during deviceAllocate
+   * @note device_id must be the same as the value used during device_allocate
    */
-  virtual cudaError_t deviceFree(void* ptr, int device_id = -1) noexcept = 0;
+  virtual cudaError_t device_free(void* ptr, int device_id = -1) noexcept = 0;
 
   /**
    * Allocate buffer on a device using a stream.
@@ -52,9 +52,9 @@ public:
    * @param stream CUDA stream to use for allocation
    * @param device_id Device index to be used. Negative value implies use the current device.
    */
-  virtual cudaError_t deviceAllocateAsync(void** ptr, size_t sz, cudaStream_t, int device_id = -1) noexcept {
+  virtual cudaError_t device_allocate_async(void** ptr, size_t sz, cudaStream_t, int device_id = -1) noexcept {
     // Defaulting to synchronized version
-    return deviceAllocate(ptr, sz, device_id);
+    return device_allocate(ptr, sz, device_id);
   }
 
   /**
@@ -62,11 +62,11 @@ public:
    * @param ptr Buffer address.
    * @param stream CUDA stream to use for freeing
    * @param device_id Device index to be used. Negative value implies use the current device.
-   * @note device_id must be the same as the value used during deviceAllocateAsync
+   * @note device_id must be the same as the value used during device_allocate_async
    */
-  virtual cudaError_t deviceFreeAsync(void* ptr, cudaStream_t, int device_id = -1) noexcept {
+  virtual cudaError_t device_free_async(void* ptr, cudaStream_t, int device_id = -1) noexcept {
     // Defaulting to synchronized version
-    return deviceFree(ptr, device_id);
+    return device_free(ptr, device_id);
   }
 
   /**
@@ -74,13 +74,13 @@ public:
    * @param ptr Buffer address.
    * @param sz Size in bytes
    */
-  virtual cudaError_t hostAllocate(void** ptr, size_t sz) noexcept = 0;
+  virtual cudaError_t host_allocate(void** ptr, size_t sz) noexcept = 0;
 
   /**
    * Free a buffer in host memory.
    * @param ptr Buffer address.
    */
-  virtual cudaError_t hostFree(void* ptr) noexcept = 0;
+  virtual cudaError_t host_free(void* ptr) noexcept = 0;
 };
 
 }  // namespace nve

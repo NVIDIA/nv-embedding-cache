@@ -51,7 +51,7 @@ __global__ void EmbedScatter( const int8_t* __restrict__ src,
     const int8_t* embed_src = src + embed * embed_src_stride_in_bytes;
     int8_t* embed_dst = dst + embed * embed_dst_stride_in_bytes;
 
-    nve::MemcpyWarp<SubwarpWidth, DataType>(embed_dst, embed_src, embed_width_in_bytes);
+    nve::memcpy_warp<SubwarpWidth, DataType>(embed_dst, embed_src, embed_width_in_bytes);
 }
 
 template<uint32_t SubwarpWidth, typename DataType>

@@ -60,7 +60,7 @@ std::string RuntimeError<bool>::to_string() const {
   return o.str();
 }
 
-Logger* getGlobalLogger() {
+Logger* GetGlobalLogger() {
   static Logger global_logger_;
   return &global_logger_;
 }

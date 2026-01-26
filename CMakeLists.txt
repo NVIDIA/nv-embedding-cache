@@ -15,6 +15,7 @@
 
 cmake_minimum_required(VERSION 3.18) # Need 3.18 for nvcc target compute arch
 
+# For CMake Debugging
 function(dump_all_vars)
   # todo: use "string REGEX MATCH" to print only vars matching regex
   set(VAR_FILE "cmake.vars")
@@ -27,7 +28,12 @@ function(dump_all_vars)
   endforeach()
 endfunction(dump_all_vars)
 
-project(NV_Embeddings LANGUAGES C CXX CUDA VERSION 0.1.0)
+# Read version from version.txt
+file(READ "${CMAKE_SOURCE_DIR}/version.txt" NVE_VERSION)
+string(STRIP "${NVE_VERSION}" NVE_VERSION)
+
+project(NV_Embedding_Cache LANGUAGES C CXX CUDA VERSION ${NVE_VERSION}) # Version format: Year.Month.Patch
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

@@ -49,7 +49,7 @@ __global__ void EmbedPipelineScatter(const FindOutput* out_buff, size_t num_indi
     const int8_t* embed_src = buff + embed * row_size_in_bytes;
     int8_t* embed_dst = (int8_t*)(out_buff[embed].dst_ptr);
 
-    nve::MemcpyWarp<SubwarpWidth, DataType>(embed_dst, embed_src, row_size_in_bytes);
+    nve::memcpy_warp<SubwarpWidth, DataType>(embed_dst, embed_src, row_size_in_bytes);
 }
 
 template<uint32_t SubwarpWidth, typename DataType>
@@ -283,7 +283,7 @@ void gather_flow_pipeline(std::shared_ptr<nve::ExecutionContext> ctx,
               int device_id,
               GatherKernelPipelineParams params)
 {
-    auto cache_data = cache_ptr->GetCacheData(lookup_handle); 
+    auto cache_data = cache_ptr->get_cache_data(lookup_handle); 
     auto aux_streams = ctx->get_aux_streams("gather_kernel_aux_streams", std::max(params.num_aux_streams, 1lu));
     
     //////////////////////////////////////////////////////////////////////////////////////////////
@@ -340,7 +340,7 @@ void gather_flow_pipeline(std::shared_ptr<nve::ExecutionContext> ctx,
     constexpr auto num_keys_per_block = 32*2;
     dim3 blockDims(32, 2);
     dim3 gridDims(static_cast<uint32_t>((n + num_keys_per_block - 1)/num_keys_per_block));
-    cache_ptr->StartCustomFlow();
+    cache_ptr->start_custom_flow();
     find<IndexT, TagT, 2, SortKeyType><<<gridDims, blockDims, 0, stream>>>(uvm_table_ptr,
                             reinterpret_cast<int8_t*>(d_values),
                             d_sort_key_buf,
@@ -383,7 +383,7 @@ void gather_flow_pipeline(std::shared_ptr<nve::ExecutionContext> ctx,
         NVE_CHECK_(cudaEventRecord(event_gpu_gather_done, gather_stream));
         NVE_CHECK_(cudaStreamWaitEvent(stream, event_gpu_gather_done, 0));
     }
-    cache_ptr->EndCustomFlow();
+    cache_ptr->end_custom_flow();
     
     //////////////////////////////////////////////////////////////////////////////////////////////
     // cpu gather phase

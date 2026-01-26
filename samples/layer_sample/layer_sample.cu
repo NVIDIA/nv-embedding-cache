@@ -276,7 +276,7 @@ int main(int argc, char* argv[]) {
           const auto table_size = num_rows * row_size;
           LogVerbose(verbose, std::string("Allocating sysmem table (" + std::to_string(float(table_size)/GB) + " GB)"));
           void* ptr(nullptr);
-          nve::GetDefaultAllocator()->hostAllocate(&ptr, table_size);
+          nve::GetDefaultAllocator()->host_allocate(&ptr, table_size);
           if (!ptr) {
             throw std::runtime_error("Failed to allocated sysmem table!");
           } else {
@@ -316,7 +316,7 @@ int main(int argc, char* argv[]) {
           const auto table_size = num_rows * row_size;
           LogVerbose(verbose, std::string("Allocating sysmem table (" + std::to_string(float(table_size)/GB) + " GB)"));
           void* ptr(nullptr);
-          nve::GetDefaultAllocator()->hostAllocate(&ptr, table_size);
+          nve::GetDefaultAllocator()->host_allocate(&ptr, table_size);
           if (!ptr) {
             throw std::runtime_error("Failed to allocated sysmem table!");
           } else {
@@ -516,7 +516,7 @@ int main(int argc, char* argv[]) {
 
     // Free resources
     for (auto ptr : cuda_host_allocations) {
-      nve::GetDefaultAllocator()->hostFree(ptr);
+      nve::GetDefaultAllocator()->host_free(ptr);
     }
     for (auto ptr : malloc_host_allocations) {
       free(ptr);

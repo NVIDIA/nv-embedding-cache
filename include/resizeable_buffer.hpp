@@ -33,9 +33,9 @@ class ResizeableBuffer {
   }
   ~ResizeableBuffer() {
     if (host_alloc_) {
-      NVE_CHECK_(allocator_->hostFree(buffer_));
+      NVE_CHECK_(allocator_->host_free(buffer_));
     } else {
-      NVE_CHECK_(allocator_->deviceFree(buffer_));
+      NVE_CHECK_(allocator_->device_free(buffer_));
     }
     size_ = 0;
   }
@@ -44,14 +44,14 @@ class ResizeableBuffer {
     if (buffer_size > size_) {
       if (host_alloc_) {
         if (buffer_) {
-          NVE_CHECK_(allocator_->hostFree(buffer_));
+          NVE_CHECK_(allocator_->host_free(buffer_));
         }
-        NVE_CHECK_(allocator_->hostAllocate(&buffer_, buffer_size));
+        NVE_CHECK_(allocator_->host_allocate(&buffer_, buffer_size));
       } else {
         if (buffer_) {
-          NVE_CHECK_(allocator_->deviceFree(buffer_));
+          NVE_CHECK_(allocator_->device_free(buffer_));
         }
-        NVE_CHECK_(allocator_->deviceAllocate(&buffer_, buffer_size));
+        NVE_CHECK_(allocator_->device_allocate(&buffer_, buffer_size));
       }
       size_ = buffer_size;
     }

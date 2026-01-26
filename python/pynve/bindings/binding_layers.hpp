@@ -268,7 +268,7 @@ public:
         row_size_in_bytes_ = (row_size * element_size);
         
         ScopedDevice scope_device(device_id_);
-        allocator_->hostAllocate((void**)&h_num_runs_out_, sizeof(IndexT) * 2);
+        allocator_->host_allocate((void**)&h_num_runs_out_, sizeof(IndexT) * 2);
         NVE_CHECK_(cudaStreamCreate(&modify_stream_)); 
 
         logging_interval_ = config.logging_interval;
@@ -278,7 +278,7 @@ public:
     {
         ScopedDevice scope_device(device_id_);
         // children responsible for releasing contexts
-        allocator_->hostFree(h_num_runs_out_);
+        allocator_->host_free(h_num_runs_out_);
         if (modify_stream_)
         {
             ScopedDevice scope_device(device_id_);

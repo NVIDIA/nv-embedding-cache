@@ -101,22 +101,22 @@ protected:
         case CACHE_IMPLEMENTATION_TYPE::SET_ASSOCIATIVE_HOST_METADATA:
         {
             typename CacheSAHostModify<IndexT, IndexT>::CacheConfig config;
-            config.cacheSzInBytes = t.cache.numSets * t.table.rowSizeInBytes * 8;
-            config.embedWidth = t.table.rowSizeInBytes;
-            config.numTables = t.table.numTables;
-            config.allocDataOnHost = t.cache.allocDataOnHost;
-            config.decayRate = t.cache.decayRate;
+            config.cache_sz_in_bytes = t.cache.numSets * t.table.rowSizeInBytes * 8;
+            config.embed_width_in_bytes = t.table.rowSizeInBytes;
+            config.num_tables = t.table.numTables;
+            config.allocate_data_on_host = t.cache.allocDataOnHost;
+            config.decay_rate = t.cache.decayRate;
             m_pCache = std::make_shared<CacheSAHostModify<IndexT, IndexT>>(&m_allocator, &m_logger, config);
             break;
         }
         case CACHE_IMPLEMENTATION_TYPE::SET_ASSOCIATIVE_DEVICE_ONLY:
         {
             typename CacheSADeviceModify<IndexT, IndexT>::CacheConfig config;
-            config.cacheSzInBytes = t.cache.numSets * t.table.rowSizeInBytes * 8;
-            config.embedWidth = t.table.rowSizeInBytes;
-            config.numTables = t.table.numTables;
-            config.allocDataOnHost = t.cache.allocDataOnHost;
-            config.decayRate = t.cache.decayRate;
+            config.cache_sz_in_bytes = t.cache.numSets * t.table.rowSizeInBytes * 8;
+            config.embed_width_in_bytes = t.table.rowSizeInBytes;
+            config.num_tables = t.table.numTables;
+            config.allocate_data_on_host = t.cache.allocDataOnHost;
+            config.decay_rate = t.cache.decayRate;
             m_pCache = std::make_shared<CacheSADeviceModify<IndexT, IndexT>>(&m_allocator, &m_logger, config);
             break;
         }
@@ -124,7 +124,7 @@ protected:
             FAIL() << "Unkown Cache implemenation\n";
         }
 
-        CHECK_EC(m_pCache->Init());
+        CHECK_EC(m_pCache->init());
         
         m_dMissingIndex.resize(numTables);
         m_dMissingKeys.resize(numTables);
@@ -164,10 +164,10 @@ protected:
             ModifyContextHandle hModify;
             LookupContextHandle hLookup;
             std::array<PerformanceMetric, NUM_PERFORMANCE_METRIC_TYPES> perfMetric;
-            CHECK_EC(m_pCache->ModifyContextCreate(hModify, static_cast<uint32_t>(numIndices)));
+            CHECK_EC(m_pCache->modify_context_create(hModify, static_cast<uint32_t>(numIndices)));
             // needs to be expended when more metrics will be introduced
-            CHECK_EC(m_pCache->PerformanceMetricCreate(perfMetric[MERTIC_COUNT_MISSES], MERTIC_COUNT_MISSES));
-            CHECK_EC(m_pCache->LookupContextCreate(hLookup, perfMetric.data(), 1));
+            CHECK_EC(m_pCache->performance_metric_create(perfMetric[MERTIC_COUNT_MISSES], MERTIC_COUNT_MISSES));
+            CHECK_EC(m_pCache->lookup_context_create(hLookup, perfMetric.data(), 1));
             m_hLookup.push_back(hLookup);
             m_hModify.push_back(hModify);
             m_perfMetric.push_back(perfMetric);
@@ -215,9 +215,9 @@ protected:
 
         for (uint32_t i = 0; i < t.env.numStreams; i++)
         {
-            CHECK_EC(m_pCache->PerformanceMetricDestroy(m_perfMetric.at(i).at(MERTIC_COUNT_MISSES)));
-            CHECK_EC(m_pCache->LookupContextDestroy(m_hLookup.at(i)));
-            CHECK_EC(m_pCache->ModifyContextDestroy(m_hModify.at(i)));
+            CHECK_EC(m_pCache->performance_metric_destroy(m_perfMetric.at(i).at(MERTIC_COUNT_MISSES)));
+            CHECK_EC(m_pCache->lookup_context_destroy(m_hLookup.at(i)));
+            CHECK_EC(m_pCache->modify_context_destroy(m_hModify.at(i)));
             CHECK_CUDA_ERROR(cudaStreamDestroy(m_streams.at(i)));
         }   
 
@@ -269,7 +269,7 @@ protected:
             {
                 DefaultHistogram hist(hIdx[i], numIndices, (const int8_t*)m_pTable[i], t.table.rowStride, t.table.bLinearTable);
                 
-                CHECK_EC(m_pCache->Insert(m_hModify[0], hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), i, &syncEvent, m_streams[0]));
+                CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), i, &syncEvent, m_streams[0]));
                 CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
             }
         }
@@ -281,11 +281,11 @@ protected:
             {
                 if (bUseUVM)
                 {
-                    this->m_pCache->Lookup(this->m_hLookup[s], this->m_dKeys[i], numIndices, (int8_t*)this->m_dValues[i], (const int8_t*)this->m_pTable[i], i, t.table.rowSizeInBytes, this->m_streams[s]);
+                    this->m_pCache->lookup(this->m_hLookup[s], this->m_dKeys[i], numIndices, (int8_t*)this->m_dValues[i], (const int8_t*)this->m_pTable[i], i, t.table.rowSizeInBytes, this->m_streams[s]);
                 }
                 else
                 {
-                    this->m_pCache->Lookup(this->m_hLookup[s], this->m_dKeys[i], numIndices, (int8_t*)this->m_dValues[i], this->m_dMissingIndex[i], this->m_dMissingKeys[i], this->m_dMissingLen[i], i, t.table.rowSizeInBytes, this->m_streams[s]);
+                    this->m_pCache->lookup(this->m_hLookup[s], this->m_dKeys[i], numIndices, (int8_t*)this->m_dValues[i], this->m_dMissingIndex[i], this->m_dMissingKeys[i], this->m_dMissingLen[i], i, t.table.rowSizeInBytes, this->m_streams[s]);
                     CHECK_CUDA_ERROR(cudaMemcpyAsync(this->m_hMissingLen[i], this->m_dMissingLen[i], sizeof(size_t), cudaMemcpyDefault, this->m_streams[s]));
                     
                     // disptach rest of copies this intentaionally doesn't optimize copy size to check all stream parrallisem doesn't cause issues
@@ -311,9 +311,9 @@ protected:
 
     void CheckKeysInCache(const std::set<IndexT> &keys, size_t missingTolerable)
     {
-        std::vector<IndexT> outKeys(m_pCache->GetMaxNumEmbeddingVectorsInCache());
+        std::vector<IndexT> outKeys(m_pCache->get_max_num_embedding_vectors_in_cache());
         size_t nKeys = 0;
-        m_pCache->GetKeysStoredInCache(m_hLookup[0], outKeys.data(), nKeys);
+        m_pCache->get_keys_stored_in_cache(m_hLookup[0], outKeys.data(), nKeys);
         std::set<IndexT> cacheKeys(outKeys.begin(), outKeys.begin() + nKeys);
         size_t missingCount = 0;
         for (auto key : keys)
@@ -328,9 +328,9 @@ protected:
 
     void AssertCacheContainsExactly(const std::set<IndexT> &keys)
     {
-        std::vector<IndexT> outKeys(m_pCache->GetMaxNumEmbeddingVectorsInCache());
+        std::vector<IndexT> outKeys(m_pCache->get_max_num_embedding_vectors_in_cache());
         size_t nKeys = 0;
-        m_pCache->GetKeysStoredInCache(m_hLookup[0], outKeys.data(), nKeys);
+        m_pCache->get_keys_stored_in_cache(m_hLookup[0], outKeys.data(), nKeys);
         std::set<IndexT> cacheKeys(outKeys.begin(), outKeys.begin() + nKeys);
         EXPECT_EQ(keys, cacheKeys);
         EXPECT_EQ(nKeys, keys.size());
@@ -405,12 +405,12 @@ protected:
             hIdx.push_back(static_cast<IndexT>(i));
         }
         DefaultHistogram hist(hIdx.data(), nIndices, (const int8_t*)m_pTable[0], t.table.rowStride, true);
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), 0, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &syncEvent, m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         AssertCacheContainsExactly(std::set<IndexT>(hIdx.begin(), hIdx.end()));
 
         CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], hIdx.data(), hIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
-        this->m_pCache->Lookup(this->m_hLookup[0], this->m_dKeys[0], hIdx.size(), (int8_t*)this->m_dValues[0], this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
+        this->m_pCache->lookup(this->m_hLookup[0], this->m_dKeys[0], hIdx.size(), (int8_t*)this->m_dValues[0], this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
         CHECK_CUDA_ERROR(cudaMemcpyAsync(this->m_hMissingLen[0], this->m_dMissingLen[0], sizeof(size_t), cudaMemcpyDefault, this->m_streams[0]));
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
         EXPECT_EQ(*this->m_hMissingLen[0], 0);
@@ -435,7 +435,7 @@ protected:
         }
         std::set<IndexT> ref(hIdx.begin(), hIdx.end());
         DefaultHistogram hist(hIdx.data(), nIndices, (const int8_t*)m_pTable[0], t.table.rowStride, true);
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), 0, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &syncEvent, m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         {
             AssertCacheContainsExactly(ref);
@@ -446,9 +446,9 @@ protected:
         invIdx.push_back(7);
         if (t.cache.impl == CACHE_IMPLEMENTATION_TYPE::SET_ASSOCIATIVE_DEVICE_ONLY) {
             CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], invIdx.data(), invIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
-            CHECK_EC(m_pCache->Invalidate(m_hModify[0], this->m_dKeys[0], invIdx.size(), 0, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->invalidate(m_hModify[0], this->m_dKeys[0], invIdx.size(), 0, &syncEvent, m_streams[0]));
         } else {
-            CHECK_EC(m_pCache->Invalidate(m_hModify[0], invIdx.data(), invIdx.size(), 0, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->invalidate(m_hModify[0], invIdx.data(), invIdx.size(), 0, &syncEvent, m_streams[0]));
         }
         for (auto i : invIdx)
         {
@@ -459,7 +459,7 @@ protected:
         {
             AssertCacheContainsExactly(ref);
             CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], invIdx.data(), invIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
-            this->m_pCache->Lookup(this->m_hLookup[0], this->m_dKeys[0], invIdx.size(), (int8_t*)this->m_dValues[0], this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
+            this->m_pCache->lookup(this->m_hLookup[0], this->m_dKeys[0], invIdx.size(), (int8_t*)this->m_dValues[0], this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
             CHECK_CUDA_ERROR(cudaMemcpyAsync(this->m_hMissingLen[0], this->m_dMissingLen[0], sizeof(size_t), cudaMemcpyDefault, this->m_streams[0]));
             
             CHECK_CUDA_ERROR(cudaMemcpyAsync(this->m_hMissingKeys[0], this->m_dMissingKeys[0], invIdx.size()*sizeof(IndexT), cudaMemcpyDefault, this->m_streams[0]));
@@ -488,12 +488,12 @@ protected:
             hIdx.push_back(static_cast<IndexT>(i));
         }
         DefaultHistogram hist(hIdx.data(), nIndices, (const int8_t*)m_pTable[0], t.table.rowStride, true);
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), 0, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &syncEvent, m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         AssertCacheContainsExactly(std::set<IndexT>(hIdx.begin(), hIdx.end()));
 
         // clear cache
-        CHECK_EC(m_pCache->ClearCache(m_streams[0]));
+        CHECK_EC(m_pCache->clear_cache(m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
 
         AssertCacheContainsExactly(std::set<IndexT>());
@@ -508,14 +508,14 @@ protected:
             auto numIndices = t.sample.sampleSize * t.sample.numSamples;
             EXPECT_EQ(*m_hMissingLen[i], numIndices);
             int64_t missCount = 0;
-            m_pCache->PerformanceMetricGetValue(m_perfMetric[i][MERTIC_COUNT_MISSES], &missCount, 0);
+            m_pCache->performance_metric_get_value(m_perfMetric[i][MERTIC_COUNT_MISSES], &missCount, 0);
             CHECK_CUDA_ERROR(cudaDeviceSynchronize());
             EXPECT_EQ(missCount, numIndices);
         };
         Lookup(f, sg, false, false);
     }
 
-    void SimpleUpdateAccumulate()
+    void Simpleupdate_accumulate()
     {
         // first put indices make sure those are in the cache
         constexpr size_t nIndices = 10;
@@ -534,7 +534,7 @@ protected:
         }
         
         DefaultHistogram hist(hIdx.data(), nIndices, (const int8_t*)m_pTable[0], t.table.rowStride, true);
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), 0, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &syncEvent, m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         
         // allocate and fill update data
@@ -550,9 +550,9 @@ protected:
         CHECK_CUDA_ERROR(cudaMemcpy(this->m_dValues[0], gradUpdate, hIdx.size()*t.table.rowSizeInBytes, cudaMemcpyDefault));
         if (t.cache.impl == CACHE_IMPLEMENTATION_TYPE::SET_ASSOCIATIVE_DEVICE_ONLY) {
             CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], hIdx.data(), hIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
-            CHECK_EC(m_pCache->UpdateAccumulate(m_hModify[0], this->m_dKeys[0], (const int8_t*)this->m_dValues[0], t.table.rowSizeInBytes, hIdx.size(), 0, nve::DATATYPE_FP32, nve::DATATYPE_FP32, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->update_accumulate(m_hModify[0], this->m_dKeys[0], (const int8_t*)this->m_dValues[0], t.table.rowSizeInBytes, hIdx.size(), 0, nve::DATATYPE_FP32, nve::DATATYPE_FP32, &syncEvent, m_streams[0]));
         } else {
-            CHECK_EC(m_pCache->UpdateAccumulate(m_hModify[0], hIdx.data(), (const int8_t*)this->m_dValues[0], t.table.rowSizeInBytes, hIdx.size(), 0, nve::DATATYPE_FP32, nve::DATATYPE_FP32, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->update_accumulate(m_hModify[0], hIdx.data(), (const int8_t*)this->m_dValues[0], t.table.rowSizeInBytes, hIdx.size(), 0, nve::DATATYPE_FP32, nve::DATATYPE_FP32, &syncEvent, m_streams[0]));
         }
         float* ref = nullptr;
         CHECK_CUDA_ERROR(cudaMallocHost(&ref, t.table.rowSizeInBytes*nIndices));
@@ -568,7 +568,7 @@ protected:
         float* test = nullptr;
         CHECK_CUDA_ERROR(cudaMallocHost(&test, t.table.rowSizeInBytes*nIndices));
         CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], hIdx.data(), hIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
-        this->m_pCache->Lookup(this->m_hLookup[0], this->m_dKeys[0], hIdx.size(), (int8_t*)test, this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
+        this->m_pCache->lookup(this->m_hLookup[0], this->m_dKeys[0], hIdx.size(), (int8_t*)test, this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
         CHECK_CUDA_ERROR(cudaStreamSynchronize(m_streams[0]));
         for (uint32_t i = 0; i < nIndices*rowSizeInElements; i++) {
             EXPECT_EQ(ref[i], test[i]);
@@ -584,7 +584,7 @@ protected:
         constexpr float LOW_PRIORITY = 0.00001f;
         // First populate the cache and make sure the keys are in the cache.
         size_t nSampleIndices = t.sample.numSamples * t.sample.sampleSize;
-        size_t nMaxIndicesInCache = m_pCache->GetMaxNumEmbeddingVectorsInCache();
+        size_t nMaxIndicesInCache = m_pCache->get_max_num_embedding_vectors_in_cache();
         size_t nChunksToInsert = (nMaxIndicesInCache + nSampleIndices - 1) / nSampleIndices;
         DefaultECEvent syncEvent(m_streams);
         std::vector<IndexT> hOriginalIdx;
@@ -601,7 +601,7 @@ protected:
             size_t startIndex = i * nSampleIndices;
             size_t endIndex = std::min(startIndex + nSampleIndices, nMaxIndicesInCache);
             size_t chunkSize = endIndex - startIndex;
-            CHECK_EC(m_pCache->Insert(m_hModify[0], hOriginalIdx.data() + startIndex, originalPriorities.data() + startIndex, pOriginalData.data() + startIndex, chunkSize, 0, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->insert(m_hModify[0], hOriginalIdx.data() + startIndex, originalPriorities.data() + startIndex, pOriginalData.data() + startIndex, chunkSize, 0, &syncEvent, m_streams[0]));
         }
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         std::set<IndexT> refOriginal(hOriginalIdx.begin(), hOriginalIdx.end());
@@ -618,13 +618,13 @@ protected:
             hOtherIdx.push_back(static_cast<IndexT>(idx));
             pOtherData[i] = (const int8_t*)m_pTable[0] + idx * t.table.rowSizeInBytes;
         }
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hOtherIdx.data(), otherLowPriorities.data(), pOtherData.data(), nOtherIndices, 0, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hOtherIdx.data(), otherLowPriorities.data(), pOtherData.data(), nOtherIndices, 0, &syncEvent, m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         AssertCacheContainsExactly(refOriginal);
 
         // Try to insert again with high priority, we'll expect the new keys to be fully inserted, which will result in some eviction and replacing.
         std::vector<float> otherHighPriorities(nOtherIndices, HIGH_PRIORITY);
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hOtherIdx.data(), otherHighPriorities.data(), pOtherData.data(), nOtherIndices, 0, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hOtherIdx.data(), otherHighPriorities.data(), pOtherData.data(), nOtherIndices, 0, &syncEvent, m_streams[0]));
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
         CheckKeysInCache(std::set<IndexT>(hOtherIdx.begin(), hOtherIdx.end()), 0);
         CheckKeysInCache(refOriginal, nOtherIndices);
@@ -662,11 +662,11 @@ TEST(NegativeTests, InitZeroMemory)
 
     typename CacheSAHostModify<uint32_t, uint32_t>::CacheConfig config;
 
-    config.cacheSzInBytes = 0;
-    config.embedWidth = 128;
-    config.numTables = 1;
+    config.cache_sz_in_bytes = 0;
+    config.embed_width_in_bytes = 128;
+    config.num_tables = 1;
     CacheSAHostModify<uint32_t, uint32_t> ec(&allocator, &logger, config);
-    EXPECT_EQ(ec.Init() , ECERROR_MEMORY_ALLOCATED_TO_CACHE_TOO_SMALL);
+    EXPECT_EQ(ec.init() , ECERROR_MEMORY_ALLOCATED_TO_CACHE_TOO_SMALL);
 }
 
 using Test_UINT32_T_FLOAT = ApiTest<uint32_t, float>;
@@ -766,16 +766,16 @@ TEST_P(Test_UINT32_T_FLOAT, SimpleUpdate)
             }
         }
         DefaultHistogram hist(m_hKeys[i], numIndices, (const int8_t*)m_pTable[i], t.table.rowStride, t.table.bLinearTable);
-        CHECK_EC(m_pCache->Insert(m_hModify[0], hist.GetKeys(), hist.GetPriority(), hist.GetData(), hist.GetNumBins(), i, &syncEvent, m_streams[0]));
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), i, &syncEvent, m_streams[0]));
 
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
 
         CHECK_CUDA_ERROR(cudaMemcpy(this->m_dValues[i], updateData[i], numIndices*t.table.rowSizeInBytes, cudaMemcpyDefault));
         if (t.cache.impl == CACHE_IMPLEMENTATION_TYPE::SET_ASSOCIATIVE_DEVICE_ONLY) {
             CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[i], m_hKeys[i], numIndices*sizeof(IndexType), cudaMemcpyDefault));
-            CHECK_EC(m_pCache->Update(m_hModify[0], m_dKeys[i], (const int8_t*)this->m_dValues[i], t.table.rowSizeInBytes, numIndices, i, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->update(m_hModify[0], m_dKeys[i], (const int8_t*)this->m_dValues[i], t.table.rowSizeInBytes, numIndices, i, &syncEvent, m_streams[0]));
         } else {
-            CHECK_EC(m_pCache->Update(m_hModify[0], m_hKeys[i], (const int8_t*)this->m_dValues[i], t.table.rowSizeInBytes, numIndices, i, &syncEvent, m_streams[0]));
+            CHECK_EC(m_pCache->update(m_hModify[0], m_hKeys[i], (const int8_t*)this->m_dValues[i], t.table.rowSizeInBytes, numIndices, i, &syncEvent, m_streams[0]));
         }
         CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
     }
@@ -804,9 +804,9 @@ TEST_P(Test_UINT32_T_FLOAT, SimpleClear)
     SimpleClear();
 }
 
-TEST_P(Test_UINT32_T_FLOAT, SimpleUpdateAccumulate)
+TEST_P(Test_UINT32_T_FLOAT, Simpleupdate_accumulate)
 {
-    SimpleUpdateAccumulate();
+    Simpleupdate_accumulate();
 }
 
 TEST_P(Test_UINT32_T_FLOAT, CheckMetric)
@@ -822,7 +822,7 @@ TEST_P(Test_UINT32_T_FLOAT, PerformanceTest)
     {
         size_t missingLen = *m_hMissingLen[i];
         int64_t val = 0;
-        CHECK_EC(m_pCache->PerformanceMetricGetValue(m_perfMetric[i][MERTIC_COUNT_MISSES], &val, 0));
+        CHECK_EC(m_pCache->performance_metric_get_value(m_perfMetric[i][MERTIC_COUNT_MISSES], &val, 0));
         EXPECT_EQ(val, missingLen);
     };
     Lookup(f, sg, true, false);

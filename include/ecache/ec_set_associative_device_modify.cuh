@@ -44,72 +44,72 @@ public:
 
     struct ModifyContext
     {
-        ModifyList* pdList;
-        ModifyEntry* pdEntries; // device allocated entries to modify
-        int8_t* pdTmpStorage;
-        size_t tmpStorageSz;
-        uint32_t maxUpdateSz; // TODO: should be max num keys
-        uint32_t tableIndex;
-        DataTypeFormat inputType;
-        DataTypeFormat outputType;
+        ModifyList* d_list;
+        ModifyEntry* d_entries; // device allocated entries to modify
+        int8_t* d_tmp_storage;
+        size_t tmp_storage_sz;
+        uint32_t max_update_sz; // TODO: should be max num keys
+        uint32_t table_index;
+        DataTypeFormat input_type;
+        DataTypeFormat output_type;
     };
 
 public:
     static constexpr CACHE_IMPLEMENTATION_TYPE TYPE = CACHE_IMPLEMENTATION_TYPE::SET_ASSOCIATIVE_DEVICE_ONLY;
 
-    CacheSADeviceModify(Allocator* pAllocator, Logger* pLogger, const CacheConfig& cfg) 
-           : EmbedCacheSA<IndexT, TagT>(pAllocator, pLogger, cfg, TYPE)
+    CacheSADeviceModify(Allocator* allocator, Logger* logger, const CacheConfig& cfg) 
+           : EmbedCacheSA<IndexT, TagT>(allocator, logger, cfg, TYPE)
     {}
 
     virtual ~CacheSADeviceModify() override = default;
 
-    ECError ModifyContextCreate(ModifyContextHandle& outHandle, uint32_t maxUpdateSize) const override
+    ECError modify_context_create(ModifyContextHandle& out_handle, uint32_t max_update_size) const override
     {
-        ModifyContext* pContext = nullptr;
+        ModifyContext* context = nullptr;
         try
         {
             // check erros
-            CHECK_ERR_AND_THROW(this->m_pAllocator->hostAllocate((void**)&pContext, sizeof(ModifyContext)));
-            memset(pContext, 0, sizeof(ModifyContext));
-            CHECK_ERR_AND_THROW(this->m_pAllocator->deviceAllocate((void**)&pContext->pdList, sizeof(ModifyList)));
-            CHECK_ERR_AND_THROW(this->m_pAllocator->deviceAllocate((void**)&pContext->pdEntries, maxUpdateSize * sizeof(ModifyEntry)));
+            CHECK_ERR_AND_THROW(this->allocator_->host_allocate((void**)&context, sizeof(ModifyContext)));
+            memset(context, 0, sizeof(ModifyContext));
+            CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&context->d_list, sizeof(ModifyList)));
+            CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&context->d_entries, max_update_size * sizeof(ModifyEntry)));
 
-            pContext->maxUpdateSz = maxUpdateSize;
+            context->max_update_sz = max_update_size;
 
             // calling ComputeSetReplaceData to calculate temp storage size
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetReplaceData<IndexT, TagT, CounterT, NUM_WAYS, false>(
                 nullptr,
                 nullptr,
                 nullptr,
-                pContext->tmpStorageSz,
-                pContext->maxUpdateSz, // max number of keys
+                context->tmp_storage_sz,
+                context->max_update_sz, // max number of keys
                 nullptr,
-                this->m_dpTags,
-                m_pdCounters,
-                this->m_pCache,
-                this->m_config.embedWidth,
-                this->m_config.decayRate,
-                this->m_nSets,
-                pContext->maxUpdateSz,
-                pContext->pdList,
+                this->d_tags_,
+                d_counters_,
+                this->cache_,
+                this->config_.embed_width_in_bytes,
+                this->config_.decay_rate,
+                this->num_sets_,
+                context->max_update_sz,
+                context->d_list,
                 0)));
 
-            CHECK_ERR_AND_THROW(this->m_pAllocator->deviceAllocate((void**)&pContext->pdTmpStorage, pContext->tmpStorageSz));
+            CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&context->d_tmp_storage, context->tmp_storage_sz));
 
-            outHandle.handle = (uint64_t)pContext;
+            out_handle.handle = (uint64_t)context;
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
         {
             // deallocate everything
-            if (pContext != nullptr) {
-                if (pContext->pdEntries != nullptr)
-                    CHECK_ERR_AND_THROW(this->m_pAllocator->deviceFree(pContext->pdEntries));
-                if (pContext->pdList != nullptr)
-                    CHECK_ERR_AND_THROW(this->m_pAllocator->deviceFree(pContext->pdList));
-                if (pContext->pdTmpStorage != nullptr)
-                    CHECK_ERR_AND_THROW(this->m_pAllocator->deviceFree(pContext->pdTmpStorage));
-                CHECK_ERR_AND_THROW(this->m_pAllocator->hostFree(pContext));
+            if (context != nullptr) {
+                if (context->d_entries != nullptr)
+                    CHECK_ERR_AND_THROW(this->allocator_->device_free(context->d_entries));
+                if (context->d_list != nullptr)
+                    CHECK_ERR_AND_THROW(this->allocator_->device_free(context->d_list));
+                if (context->d_tmp_storage != nullptr)
+                    CHECK_ERR_AND_THROW(this->allocator_->device_free(context->d_tmp_storage));
+                CHECK_ERR_AND_THROW(this->allocator_->host_free(context));
             }
 
             // can i do multiple catches
@@ -117,20 +117,20 @@ public:
         }
     }
 
-    ECError ModifyContextDestroy(ModifyContextHandle& outHandle) const override
+    ECError modify_context_destroy(ModifyContextHandle& out_handle) const override
     {
         try
         {
-            CacheSADeviceModify::ModifyContext* pContext = (CacheSADeviceModify::ModifyContext*)outHandle.handle;
-            if (!pContext)
+            CacheSADeviceModify::ModifyContext* context = (CacheSADeviceModify::ModifyContext*)out_handle.handle;
+            if (!context)
             {
                 return ECERROR_SUCCESS;
             }
-            CHECK_ERR_AND_THROW(this->m_pAllocator->deviceFree(pContext->pdEntries));
-            CHECK_ERR_AND_THROW(this->m_pAllocator->deviceFree(pContext->pdList));
-            CHECK_ERR_AND_THROW(this->m_pAllocator->deviceFree(pContext->pdTmpStorage));
-            CHECK_ERR_AND_THROW(this->m_pAllocator->hostFree(pContext));
-            outHandle.handle = 0;
+            CHECK_ERR_AND_THROW(this->allocator_->device_free(context->d_entries));
+            CHECK_ERR_AND_THROW(this->allocator_->device_free(context->d_list));
+            CHECK_ERR_AND_THROW(this->allocator_->device_free(context->d_tmp_storage));
+            CHECK_ERR_AND_THROW(this->allocator_->host_free(context));
+            out_handle.handle = 0;
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -140,36 +140,36 @@ public:
         
     }
 
-    ECError Invalidate(
-        ModifyContextHandle& modifyContextHandle,
+    ECError invalidate(
+        ModifyContextHandle& modify_context_handle,
         const IndexT* keys,
-        size_t numKeys,
-        uint32_t tableIndex,
-        IECEvent* syncEvent,
+        size_t num_keys,
+        uint32_t table_index,
+        IECEvent* sync_event,
         cudaStream_t stream) override
     {
         try
         {
-            std::lock_guard<std::mutex> lock(m_modifyMutex);
+            std::lock_guard<std::mutex> lock(modify_mutex_);
             
-            ModifyContext* pContext = (ModifyContext*)modifyContextHandle.handle;
-            if (!pContext)
+            ModifyContext* context = (ModifyContext*)modify_context_handle.handle;
+            if (!context)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
 
-            auto pDstDeviceCurrTags = this->m_dpTags + tableIndex * this->m_nSets * NUM_WAYS;
+            auto dst_tags = this->d_tags_ + table_index * this->num_sets_ * NUM_WAYS;
 
             ModifyList list;
-            list.nEntries = 0;
-            list.pEntries = pContext->pdEntries;
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(pContext->pdList, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
+            list.num_entries = 0;
+            list.entries = context->d_entries;
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(context->d_list, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetInvalidateData<IndexT, TagT, NUM_WAYS>(
-                keys, numKeys, this->m_nSets, pDstDeviceCurrTags, pContext->maxUpdateSz,
-                pContext->pdList, stream)));
+                keys, num_keys, this->num_sets_, dst_tags, context->max_update_sz,
+                context->d_list, stream)));
 
-            InvalidateTagsAndSync(pContext, numKeys, pDstDeviceCurrTags, syncEvent, stream);
+            invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
             return ECERROR_SUCCESS;
         }
@@ -179,27 +179,27 @@ public:
         }
     }
 
-    CacheAllocationSize GetModifyContextSize(uint32_t maxUpdateSize) const override
+    CacheAllocationSize get_modify_context_size(uint32_t max_update_size) const override
     {
-        constexpr size_t szCounterPerSet = sizeof(CounterT) * NUM_WAYS;
+        constexpr size_t sz_counter_per_set = sizeof(CounterT) * NUM_WAYS;
 
         CacheAllocationSize ret = {0, 0};
-        size_t hostSize = 0;
-        size_t deviceSize = 0;
-        hostSize += sizeof(ModifyContext);
-        deviceSize += this->m_nSets * szCounterPerSet;
-        deviceSize += maxUpdateSize * sizeof(ModifyEntry);
-        deviceSize += sizeof(uint32_t);
-        ret.hostAllocationSize = hostSize;
-        ret.deviceAllocationSize = deviceSize;
+        size_t host_size = 0;
+        size_t device_size = 0;
+        host_size += sizeof(ModifyContext);
+        device_size += this->num_sets_ * sz_counter_per_set;
+        device_size += max_update_size * sizeof(ModifyEntry);
+        device_size += sizeof(uint32_t);
+        ret.host_allocation_size = host_size;
+        ret.device_allocation_size = device_size;
         return ret;
     }
 
-    virtual ECError ClearCache(cudaStream_t stream) override
+    virtual ECError clear_cache(cudaStream_t stream) override
     {
         try 
         {
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(this->m_dpTags, INVALID_IDX, this->m_nSets*sizeof(TagT) * NUM_WAYS* this->m_config.numTables, stream));
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(this->d_tags_, INVALID_IDX, this->num_sets_*sizeof(TagT) * NUM_WAYS* this->config_.num_tables, stream));
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -209,57 +209,57 @@ public:
     }
 
     // assuming keys are device accessiable
-    ECError Insert(
-        ModifyContextHandle& modifyContextHandle,
+    ECError insert(
+        ModifyContextHandle& modify_context_handle,
         const IndexT* keys,
         const float* priority,
-        const int8_t* const* ppData,
-        size_t numKeys,
-        uint32_t tableIndex,
-        IECEvent* syncEvent,
+        const int8_t* const* data_ptrs,
+        size_t num_keys,
+        uint32_t table_index,
+        IECEvent* sync_event,
         cudaStream_t stream) override
     {
         try
         {
-            std::lock_guard<std::mutex> lock(m_modifyMutex);
+            std::lock_guard<std::mutex> lock(modify_mutex_);
 
-            ModifyContext* pContext = (ModifyContext*)modifyContextHandle.handle;
-            if (!pContext)
+            ModifyContext* context = (ModifyContext*)modify_context_handle.handle;
+            if (!context)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
 
-            auto pDstDeviceCurrTags = this->m_dpTags + tableIndex * this->m_nSets * NUM_WAYS;
-            int8_t* pCurrCache = this->m_pCache + tableIndex * this->m_nSets * NUM_WAYS * this->m_config.embedWidth;
+            auto dst_tags = this->d_tags_ + table_index * this->num_sets_ * NUM_WAYS;
+            int8_t* cache_ptr = this->cache_ + table_index * this->num_sets_ * NUM_WAYS * this->config_.embed_width_in_bytes;
 
             ModifyList list;
-            list.nEntries = 0;
-            list.pEntries = pContext->pdEntries;
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(pContext->pdList, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
+            list.num_entries = 0;
+            list.entries = context->d_entries;
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(context->d_list, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetReplaceData<IndexT, TagT, CounterT, NUM_WAYS, false>(
-                ppData,
+                data_ptrs,
                 keys,
-                pContext->pdTmpStorage,
-                pContext->tmpStorageSz,
-                numKeys,
+                context->d_tmp_storage,
+                context->tmp_storage_sz,
+                num_keys,
                 priority,
-                pDstDeviceCurrTags,
-                m_pdCounters,
-                pCurrCache,
-                this->m_config.embedWidth,
-                this->m_config.decayRate,
-                this->m_nSets,
-                pContext->maxUpdateSz,
-                pContext->pdList,
+                dst_tags,
+                d_counters_,
+                cache_ptr,
+                this->config_.embed_width_in_bytes,
+                this->config_.decay_rate,
+                this->num_sets_,
+                context->max_update_sz,
+                context->d_list,
                 stream)));
 
-            InvalidateTagsAndSync(pContext, numKeys, pDstDeviceCurrTags, syncEvent, stream);
+            invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
             // copy data
-            CACHE_CUDA_ERR_CHK_AND_THROW((callMemUpdateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), static_cast<uint32_t>(this->m_config.embedWidth), stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_mem_update_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), static_cast<uint32_t>(this->config_.embed_width_in_bytes), stream)));
             // update tags
-            CACHE_CUDA_ERR_CHK_AND_THROW((callTagUpdateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), pDstDeviceCurrTags, stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_update_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), dst_tags, stream)));
 
             return ECERROR_SUCCESS;
         }
@@ -270,44 +270,44 @@ public:
     }
 
     // assuming keys are device accessiable
-    ECError Update(
-        ModifyContextHandle& modifyContextHandle,
+    ECError update(
+        ModifyContextHandle& modify_context_handle,
         const IndexT* keys,
         const int8_t* d_values,
         int64_t stride,
-        size_t numKeys,
-        uint32_t tableIndex,
-        IECEvent* syncEvent,
+        size_t num_keys,
+        uint32_t table_index,
+        IECEvent* sync_event,
         cudaStream_t stream) override
     {
         try
         {   
-            std::lock_guard<std::mutex> lock(m_modifyMutex);
+            std::lock_guard<std::mutex> lock(modify_mutex_);
 
-            ModifyContext* pContext = (ModifyContext*)modifyContextHandle.handle;
-            if (!pContext)
+            ModifyContext* context = (ModifyContext*)modify_context_handle.handle;
+            if (!context)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
 
-            auto pDstDeviceCurrTags = this->m_dpTags + tableIndex * this->m_nSets * NUM_WAYS;
-            int8_t* pCurrCache = this->m_pCache + tableIndex * this->m_nSets * NUM_WAYS * this->m_config.embedWidth;
+            auto dst_tags = this->d_tags_ + table_index * this->num_sets_ * NUM_WAYS;
+            int8_t* cache_ptr = this->cache_ + table_index * this->num_sets_ * NUM_WAYS * this->config_.embed_width_in_bytes;
 
             ModifyList list;
-            list.nEntries = 0;
-            list.pEntries = pContext->pdEntries;
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(pContext->pdList, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
+            list.num_entries = 0;
+            list.entries = context->d_entries;
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(context->d_list, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetUpdateData<IndexT, TagT, NUM_WAYS>(
-                pCurrCache, d_values, keys, numKeys, this->m_nSets, stride, this->m_config.embedWidth, pDstDeviceCurrTags,
-                pContext->maxUpdateSz, pContext->pdList, stream)));
+                cache_ptr, d_values, keys, num_keys, this->num_sets_, stride, this->config_.embed_width_in_bytes, dst_tags,
+                context->max_update_sz, context->d_list, stream)));
 
-            InvalidateTagsAndSync(pContext, numKeys, pDstDeviceCurrTags, syncEvent, stream);
+            invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
             // update data
-            CACHE_CUDA_ERR_CHK_AND_THROW((callMemUpdateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), static_cast<uint32_t>(this->m_config.embedWidth), stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_mem_update_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), static_cast<uint32_t>(this->config_.embed_width_in_bytes), stream)));
             // update tags
-            CACHE_CUDA_ERR_CHK_AND_THROW((callTagUpdateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), pDstDeviceCurrTags, stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_update_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), dst_tags, stream)));
 
             return ECERROR_SUCCESS;
         }
@@ -318,50 +318,50 @@ public:
     }
 
     // assuming keys are device accessiable
-    ECError UpdateAccumulate(
-        ModifyContextHandle& modifyContextHandle,
+    ECError update_accumulate(
+        ModifyContextHandle& modify_context_handle,
         const IndexT* keys,
         const int8_t* d_values,
         int64_t stride,
-        size_t numKeys,
-        uint32_t tableIndex,
-        DataTypeFormat updateFormat,
-        DataTypeFormat cacheFormat,
-        IECEvent* syncEvent,
+        size_t num_keys,
+        uint32_t table_index,
+        DataTypeFormat update_format,
+        DataTypeFormat cache_format,
+        IECEvent* sync_event,
         cudaStream_t stream) override
     {
         try
         {         
-            std::lock_guard<std::mutex> lock(m_modifyMutex);
-            ModifyContext* pContext = (ModifyContext*)modifyContextHandle.handle;
-            if (!pContext)
+            std::lock_guard<std::mutex> lock(modify_mutex_);
+            ModifyContext* context = (ModifyContext*)modify_context_handle.handle;
+            if (!context)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
 
-            auto pDstDeviceCurrTags = this->m_dpTags + tableIndex * this->m_nSets * NUM_WAYS;
-            int8_t* pCurrCache = this->m_pCache + tableIndex * this->m_nSets * NUM_WAYS * this->m_config.embedWidth;
+            auto dst_tags = this->d_tags_ + table_index * this->num_sets_ * NUM_WAYS;
+            int8_t* cache_ptr = this->cache_ + table_index * this->num_sets_ * NUM_WAYS * this->config_.embed_width_in_bytes;
 
             ModifyList list;
-            list.nEntries = 0;
-            list.pEntries = pContext->pdEntries;
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(pContext->pdList, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
+            list.num_entries = 0;
+            list.entries = context->d_entries;
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(context->d_list, &list, sizeof(ModifyList), cudaMemcpyHostToDevice, stream));
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetUpdateData<IndexT, TagT, NUM_WAYS>(
-                pCurrCache, d_values, keys, numKeys, this->m_nSets, stride, this->m_config.embedWidth, pDstDeviceCurrTags,
-                pContext->maxUpdateSz, pContext->pdList, stream)));
+                cache_ptr, d_values, keys, num_keys, this->num_sets_, stride, this->config_.embed_width_in_bytes, dst_tags,
+                context->max_update_sz, context->d_list, stream)));
 
-            InvalidateTagsAndSync(pContext, numKeys, pDstDeviceCurrTags, syncEvent, stream);
+            invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
             // update data
-            if (pContext->inputType == nve::DATATYPE_INT8_SCALED) {
-                CACHE_CUDA_ERR_CHK_AND_THROW((callMemUpdateAccumulateQuantizedKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), static_cast<uint32_t>(this->m_config.embedWidth), updateFormat, cacheFormat, stream)));
+            if (context->input_type == nve::DATATYPE_INT8_SCALED) {
+                CACHE_CUDA_ERR_CHK_AND_THROW((call_mem_update_accumulate_quantized_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), static_cast<uint32_t>(this->config_.embed_width_in_bytes), update_format, cache_format, stream)));
             } else {
-                CACHE_CUDA_ERR_CHK_AND_THROW((callMemUpdateAccumulateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), static_cast<uint32_t>(this->m_config.embedWidth), updateFormat, cacheFormat, stream)));
+                CACHE_CUDA_ERR_CHK_AND_THROW((call_mem_update_accumulate_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), static_cast<uint32_t>(this->config_.embed_width_in_bytes), update_format, cache_format, stream)));
             }
 
             // update tags
-            CACHE_CUDA_ERR_CHK_AND_THROW((callTagUpdateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numKeys), pDstDeviceCurrTags, stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_update_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_keys), dst_tags, stream)));
 
             return ECERROR_SUCCESS;
         }
@@ -371,30 +371,30 @@ public:
         }
     }
 
-    ECError GetKeysStoredInCache(const LookupContextHandle& /*lookupContextHandle*/, IndexT* outKeys, size_t& numOutKeys) const override
+    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t& num_out_keys) const override
     {
         try 
         {
-            if (!outKeys || !this->m_hpTags)
+            if (!out_keys || !this->h_tags_)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
 
             CACHE_CUDA_ERR_CHK_AND_THROW(cudaDeviceSynchronize());
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpy(this->m_hpTags, this->m_dpTags, this->m_nSets * NUM_WAYS * sizeof(TagT), cudaMemcpyDeviceToHost));
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpy(this->h_tags_, this->d_tags_, this->num_sets_ * NUM_WAYS * sizeof(TagT), cudaMemcpyDeviceToHost));
  
-            numOutKeys = 0;
-            for (size_t i = 0; i < this->m_nSets; i++)
+            num_out_keys = 0;
+            for (size_t i = 0; i < this->num_sets_; i++)
             {
                 for (size_t j = 0; j < NUM_WAYS; j++)
                 {
-                    TagT tag = this->m_hpTags[i * NUM_WAYS + j];
+                    TagT tag = this->h_tags_[i * NUM_WAYS + j];
                     if (tag == static_cast<TagT>(INVALID_IDX))
                     {
                         continue;
                     }
-                    IndexT key = static_cast<IndexT>(tag * this->m_nSets + i);
-                    outKeys[numOutKeys++] = key;
+                    IndexT key = static_cast<IndexT>(tag * this->num_sets_ + i);
+                    out_keys[num_out_keys++] = key;
                 }
             }
             return ECERROR_SUCCESS;
@@ -407,22 +407,22 @@ public:
 
 private:
 
-    ECError InvalidateTagsAndSync(const ModifyContext* pContext,
-                                  size_t numTags,
+    ECError invalidate_tags_and_sync(const ModifyContext* context,
+                                  size_t num_entries,
                                   TagT* tags,
-                                  IECEvent* syncEvent,
+                                  IECEvent* sync_event,
                                   cudaStream_t stream) {
         try 
         {
             
-            CACHE_CUDA_ERR_CHK_AND_THROW((callTagInvalidateKernel<IndexT, TagT>(pContext->pdList, static_cast<uint32_t>(numTags), tags, stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_invalidate_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_entries), tags, stream)));
 
             CACHE_CUDA_ERR_CHK_AND_THROW(cudaStreamSynchronize(stream));  
             {
-                typename EmbedCacheSA<IndexT, TagT>::WriteLock lock(this->m_customFlowMutex); // this will prevent invalidation while custom flow is running and avoid multiple invalidations
-                CHECK_ERR_AND_THROW(syncEvent->EventRecord());
+                typename EmbedCacheSA<IndexT, TagT>::WriteLock lock(this->custom_flow_mutex_); // this will prevent invalidation while custom flow is running and avoid multiple invalidations
+                CHECK_ERR_AND_THROW(sync_event->event_record());
             }
-            CHECK_ERR_AND_THROW(syncEvent->EventWaitStream(stream));
+            CHECK_ERR_AND_THROW(sync_event->event_wait_stream(stream));
 
             return ECERROR_SUCCESS;
         }
@@ -432,26 +432,26 @@ private:
         }
     }
 
-    virtual size_t GetExtraDeviceAllocSize(uint64_t numTables, uint64_t numSets) const override 
+    virtual size_t get_extra_device_alloc_size(uint64_t num_tables, uint64_t num_sets) const override 
     {
-        size_t ctr_size = numTables * numSets * NUM_WAYS * sizeof(CounterT);
+        size_t ctr_size = num_tables * num_sets * NUM_WAYS * sizeof(CounterT);
         return ctr_size;
     }
 
-    virtual void InitExtrasDevice(uint64_t numTables, int8_t* pool, size_t space) override 
+    virtual void init_extras_device(uint64_t num_tables, int8_t* pool, size_t space) override 
     {
         // we should have set the number of sets before calling this function
-        assert(this->m_nSets > 0);
-        size_t sz = GetExtraDeviceAllocSize(numTables, this->m_nSets);
-        m_pdCounters = (CounterT*)EmbedCacheSA<IndexT, TagT>::AllocateInPool(pool, space, sz, 16);
-        CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemset(m_pdCounters, 0, sz));
+        assert(this->num_sets_ > 0);
+        size_t sz = get_extra_device_alloc_size(num_tables, this->num_sets_);
+        d_counters_ = (CounterT*)EmbedCacheSA<IndexT, TagT>::allocate_in_pool(pool, space, sz, 16);
+        CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemset(d_counters_, 0, sz));
     }
 
-    virtual size_t GetCounterSizePerSet() const override {
+    virtual size_t get_counter_size_per_set() const override {
         return CACHE_ALIGN(sizeof(CounterT) * NUM_WAYS, 16);
     }
 
-    std::mutex m_modifyMutex;
-    CounterT* m_pdCounters; // device allocated counters to modify
+    std::mutex modify_mutex_;
+    CounterT* d_counters_; // device allocated counters to modify
 };
 }

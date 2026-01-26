@@ -19,10 +19,3 @@ include_directories(${PROJECT_SOURCE_DIR}/samples/common)
 
 add_executable(ecache_test api_test.cu)
 target_link_libraries(ecache_test PUBLIC gtest_main nve-common)
-
-add_executable(wrapper_test 
-  wrapper_test.cu
-  wrapper_test_large.cu
-  ${PROJECT_SOURCE_DIR}/samples/ecache/wrapper_sample/cache_wrapper.cu
-  ${PROJECT_SOURCE_DIR}/samples/ecache/wrapper_sample/communicator.cu)
-target_link_libraries(wrapper_test PUBLIC gtest_main nccl nve-common)

@@ -164,8 +164,8 @@ __global__ void SetReplaceDataKernel(
     using ModifyEntry = typename EmbedCacheSA<KeyType, TagType>::ModifyEntry;
     using ModifyList = typename EmbedCacheSA<KeyType, TagType>::ModifyList;
     ModifyList* result = reinterpret_cast<ModifyList*>(replace_entries);
-    ModifyEntry* entries = reinterpret_cast<ModifyEntry*>(result->pEntries);
-    uint32_t* num_replace_entries_to_update = &result->nEntries;
+    ModifyEntry* entries = reinterpret_cast<ModifyEntry*>(result->entries);
+    uint32_t* num_replace_entries_to_update = &result->num_entries;
 
     const uint32_t setID = blockIdx.x * blockDim.y + threadIdx.y;
 
@@ -284,8 +284,8 @@ __global__ void SetReplaceDataKernel(
                 uint64_t dst_offset = set * NUM_WAYS + final_dst_pos;
                 dst_offset *= static_cast<uint64_t>(embed_width_in_bytes);
                 int8_t* dst_ptr = cache_ptr + dst_offset;
-                entries[curr_num_replace_entries].pSrc = data_ptrs[src_pos];
-                entries[curr_num_replace_entries].pDst = dst_ptr;
+                entries[curr_num_replace_entries].src = data_ptrs[src_pos];
+                entries[curr_num_replace_entries].dst = dst_ptr;
                 entries[curr_num_replace_entries].set = set;
                 entries[curr_num_replace_entries].way = final_dst_pos;
                 entries[curr_num_replace_entries].tag = TagType(index / num_sets);
@@ -516,8 +516,8 @@ __global__ void SetUpdateDataKernel(
     using ModifyEntry = typename EmbedCacheSA<KeyType, TagType>::ModifyEntry;
     using ModifyList = typename EmbedCacheSA<KeyType, TagType>::ModifyList;
     ModifyList* result = reinterpret_cast<ModifyList*>(replace_entries);
-    ModifyEntry* entries = reinterpret_cast<ModifyEntry*>(result->pEntries);
-    uint32_t* num_replace_entries_to_update = &result->nEntries;
+    ModifyEntry* entries = reinterpret_cast<ModifyEntry*>(result->entries);
+    uint32_t* num_replace_entries_to_update = &result->num_entries;
         
     const uint32_t keyID = blockIdx.x * blockDim.x + threadIdx.x;
     if (keyID < num_keys) {
@@ -534,13 +534,13 @@ __global__ void SetUpdateDataKernel(
                 if (curr_num_replace_entries < max_update_size) {
                     // create a record
                     if (invalidate_only) {
-                        entries[curr_num_replace_entries].pSrc = nullptr;
-                        entries[curr_num_replace_entries].pDst = nullptr;
+                        entries[curr_num_replace_entries].src = nullptr;
+                        entries[curr_num_replace_entries].dst = nullptr;
                         entries[curr_num_replace_entries].tag = static_cast<TagType>(-1);
                     } else {
                         int8_t* dst_ptr = cache_ptr + ( set * NUM_WAYS + w ) * embed_width_in_bytes;
-                        entries[curr_num_replace_entries].pSrc = values + keyID * value_stride;
-                        entries[curr_num_replace_entries].pDst = dst_ptr;
+                        entries[curr_num_replace_entries].src = values + keyID * value_stride;
+                        entries[curr_num_replace_entries].dst = dst_ptr;
                         entries[curr_num_replace_entries].tag = static_cast<TagType>(key / num_sets);
                     }
                     entries[curr_num_replace_entries].set = set;

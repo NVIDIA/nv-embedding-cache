@@ -25,14 +25,14 @@ template<typename IndexT, typename CacheDataT>
 class AddressFunctor
 {
 public:
-    static __device__ inline uint64_t GetAddress(IndexT /*index*/, const int8_t* /*pTable*/, uint32_t /*currTable*/, const CacheDataT /*data*/)
+    static __device__ inline uint64_t get_address(IndexT /*index*/, const int8_t* /*table*/, uint32_t /*curr_table*/, const CacheDataT /*data*/)
     {
         return 0;
     }
 };
 
 template<uint32_t SUBWARP_WIDTH, typename DataType>
-__device__ void MemcpyWarp(int8_t* pDst, const int8_t* __restrict__ pSrc, uint32_t sz)
+__device__ void memcpy_warp(int8_t* pDst, const int8_t* __restrict__ pSrc, uint32_t sz)
 {
     const auto offset_in_sample = threadIdx.x % SUBWARP_WIDTH;
     const uint32_t ELEMENT_SIZE = sizeof(DataType);
@@ -49,9 +49,9 @@ __device__ void MemcpyWarp(int8_t* pDst, const int8_t* __restrict__ pSrc, uint32
 }
 
 template<typename IndexT, uint32_t SUBWARP_WIDTH, uint32_t BLOCK_Y, typename DataType, typename CacheDataT>
-__global__ void QueryUVM(const IndexT* d_keys, const size_t len,
+__global__ void query_uvm(const IndexT* d_keys, const size_t len,
     int8_t* d_values, const int8_t* __restrict__ d_table,
-    CacheDataT data, uint32_t currTable, size_t stride)
+    CacheDataT data, uint32_t curr_table, size_t stride)
 {
     uint32_t tid_batch = blockIdx.x * SUBWARP_WIDTH * BLOCK_Y + threadIdx.y * SUBWARP_WIDTH;
     uint32_t tid = tid_batch + threadIdx.x; // each tid search for one index, and then we do a "transpose" and copy them out if needed
@@ -63,8 +63,8 @@ __global__ void QueryUVM(const IndexT* d_keys, const size_t len,
     }
     else
     {
-        IndexT laneIdx = d_keys[tid];
-        laneptr = AddressFunctor<IndexT, CacheDataT>::GetAddress(laneIdx, d_table, currTable, data);
+        IndexT lane_idx = d_keys[tid];
+        laneptr = AddressFunctor<IndexT, CacheDataT>::get_address(lane_idx, d_table, curr_table, data);
     }
 
     __syncwarp();
@@ -75,10 +75,10 @@ __global__ void QueryUVM(const IndexT* d_keys, const size_t len,
         const uint32_t ELEMENT_SIZE = sizeof(DataType);
         uint64_t src_ptr = __shfl_sync(0xffffffff, laneptr, s, SUBWARP_WIDTH);
         if (src_ptr != 0) {
-            for (uint32_t k = 0; k < data.rowSizeInBytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
+            for (uint32_t k = 0; k < data.row_size_in_bytes; k += ELEMENT_SIZE*SUBWARP_WIDTH)
             {
                 uint32_t offset = k + threadIdx.x * ELEMENT_SIZE;
-                if (offset < data.rowSizeInBytes)
+                if (offset < data.row_size_in_bytes)
                 {
                     DataType d = __ldg((DataType*)(src_ptr + offset));
                     DataType* dst_ptr = (DataType*)(d_values + (tid_batch + s) * stride + offset);
@@ -90,9 +90,9 @@ __global__ void QueryUVM(const IndexT* d_keys, const size_t len,
 }
 
 template<typename IndexT, typename CacheDataT>
-cudaError_t callCacheQueryUVM(const IndexT* d_keys, const size_t len,
+cudaError_t call_cache_query_uvm(const IndexT* d_keys, const size_t len,
     int8_t* d_values, const int8_t* d_table,
-    CacheDataT data, cudaStream_t stream, uint32_t currTable, size_t stride)
+    CacheDataT data, cudaStream_t stream, uint32_t curr_table, size_t stride)
 {
     const uint32_t blockX = 32;
     const uint32_t blockY = 4;
@@ -100,17 +100,17 @@ cudaError_t callCacheQueryUVM(const IndexT* d_keys, const size_t len,
     const uint32_t nBlock = static_cast<uint32_t>(len / blockSize + std::min(len % blockSize, (size_t)1));
     dim3 gridDims(nBlock);
     dim3 blockDims(blockX, blockY);
-    if (data.rowSizeInBytes % sizeof(uint4) == 0)
+    if (data.row_size_in_bytes % sizeof(uint4) == 0)
     {
-        QueryUVM<IndexT, blockX, blockY, uint4><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_table, data, currTable, stride);
+        query_uvm<IndexT, blockX, blockY, uint4><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_table, data, curr_table, stride);
     }
-    else if (data.rowSizeInBytes % sizeof(uint32_t) == 0)
+    else if (data.row_size_in_bytes % sizeof(uint32_t) == 0)
     {
-        QueryUVM<IndexT, blockX, blockY, uint32_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_table, data, currTable, stride);
+        query_uvm<IndexT, blockX, blockY, uint32_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_table, data, curr_table, stride);
     }
     else
     {
-        QueryUVM<IndexT, blockX, blockY, uint8_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_table, data, currTable, stride);
+        query_uvm<IndexT, blockX, blockY, uint8_t><<<gridDims, blockDims, 0, stream>>>(d_keys, len, d_values, d_table, data, curr_table, stride);
     }
     return cudaGetLastError();
 }

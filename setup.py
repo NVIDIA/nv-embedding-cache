@@ -27,6 +27,16 @@ import distutils.command.build
 # - PYNVE_BUILD_SAMPLES: Set to '1' to build samples/tests (default: disabled)
 # - PYNVE_DISABLE_AVX512: Set to disable AVX512 in CI builds
 _build_dir = os.environ.get('PYNVE_BUILD_DIR', 'build')
+
+
+def get_version():
+    """Read version from version.txt file."""
+    version_file = "version.txt"
+    try:
+        with open(version_file) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "0.0.0"  # Fallback version
 class BuildCommand(distutils.command.build.build):
     def initialize_options(self):
         distutils.command.build.build.initialize_options(self)
@@ -73,7 +83,7 @@ class CMakeBuild(build_ext):
 
         # Create destination directory if it doesn't exist
         os.makedirs(dest_dir, exist_ok=True)
-        
+
         # Copy binary files
         for filename in os.listdir(src_dir):
             if filename.endswith('.so') and not ("sample" in filename):
@@ -81,9 +91,19 @@ class CMakeBuild(build_ext):
                 dest_file = os.path.join(dest_dir, filename)
                 self.copy_file(src_file, dest_file)
 
+        # Generate _version.py from version.txt
+        version = get_version()
+        version_dest = os.path.join(dest_dir, "_version.py")
+        version_content = f"""# Generated from version.txt
+__version__ = "{version}"
+__version_info__ = tuple(int(x) for x in "{version}".split('.'))
+"""
+        with open(version_dest, 'w') as f:
+            f.write(version_content)
+
 setup(
         name='pynve',
-        version='0.1.0',
+        version=get_version(),
         package_dir={"": "python"},
         packages=['pynve', 'pynve.torch'],
         ext_modules=[Extension('pynve', sources=[])],

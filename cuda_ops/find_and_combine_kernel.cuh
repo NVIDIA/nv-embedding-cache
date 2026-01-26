@@ -64,7 +64,7 @@ __global__ void FindAndCombine(const uint32_t batchSz,
     {
         // TODO: should be conditional load
         INDEX_TYPE laneIdx = ((i + hotnessTid) < hotness) ? __ldcv(currIdx + i + hotnessTid) : 0;
-        uint64_t lanePtr = AddressFunctor<INDEX_TYPE, CacheDataT>::GetAddress(laneIdx, table, 0, cache);
+        uint64_t lanePtr = AddressFunctor<INDEX_TYPE, CacheDataT>::get_address(laneIdx, table, 0, cache);
         #pragma unroll 4
         for (int s = 0; s < SUBWARP_WIDTH; s++)
         {

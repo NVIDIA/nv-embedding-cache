@@ -40,7 +40,7 @@ void __global__ embedding_mul(IndexT* keys,
     
     // device side service function the cache provides to get pointer to where data resides
     using CacheFunctor = AddressFunctor<IndexT, CacheType::CacheData>; 
-    int8_t* dataPtr = (int8_t*)CacheFunctor::GetAddress(key, embeddingTable, 0, cache); 
+    int8_t* dataPtr = (int8_t*)CacheFunctor::get_address(key, embeddingTable, 0, cache); 
     outBuffer[blockIdx.x * stride + threadIdx.x] = dataPtr[threadIdx.x] * 2;
 }
 
@@ -55,15 +55,15 @@ int main()
         DefaultAllocator allocator(DefaultAllocator::DEFAULT_HOST_ALLOC_THRESHOLD);
         Logger logger;
         CacheType::CacheConfig cConfig;
-        cConfig.cacheSzInBytes = 4*MB; // the maximum size of device size memory the cache can use
-        cConfig.embedWidth = rowSizeInBytes; // the row size of the embedding in bytes
-        cConfig.numTables = 1; // number of tables the cache can back up
+        cConfig.cache_sz_in_bytes = 4*MB; // the maximum size of device size memory the cache can use
+        cConfig.embed_width_in_bytes = rowSizeInBytes; // the row size of the embedding in bytes
+        cConfig.num_tables = 1; // number of tables the cache can back up
 
         // constructing an instance of CacheType so far no memory is allocated, 
         CacheType cache(&allocator, &logger, cConfig);
 
         // Calling init will calculate required memory and allocate it device side
-        err = cache.Init();
+        err = cache.init();
         ECCheck(err);
 
         //allocate table
@@ -92,14 +92,14 @@ int main()
         // Creating LookupContext 
 
         PerformanceMetric missCount;
-        err = cache.PerformanceMetricCreate(missCount, MERTIC_COUNT_MISSES); // create a cache miss counter
+        err = cache.performance_metric_create(missCount, MERTIC_COUNT_MISSES); // create a cache miss counter
         ECCheck(err);
         LookupContextHandle lookupHandle;
-        err = cache.LookupContextCreate(lookupHandle, &missCount, 1); // create the context with miss counter
+        err = cache.lookup_context_create(lookupHandle, &missCount, 1); // create the context with miss counter
         ECCheck(err);
 
         // perform lookup
-        err = cache.Lookup(
+        err = cache.lookup(
             lookupHandle, // the context to lookup in
             deviceKeys, // keys to lookup in cache
             N, // number of keys in deviceKeys buffer
@@ -113,15 +113,15 @@ int main()
         CUDACheck(cudaStreamSynchronize(0));
         // cache is unpopulated so all keys should be missed
         int64_t cacheMisses;
-        err = cache.PerformanceMetricGetValue(missCount, &cacheMisses, 0);
+        err = cache.performance_metric_get_value(missCount, &cacheMisses, 0);
         ECCheck(err);
         CHECK_AND_THROW(cacheMisses == N, "Should have 0 hits");
-        err = cache.PerformanceMetricReset(missCount, 0);
+        err = cache.performance_metric_reset(missCount, 0);
         ECCheck(err);
         // perform some cache population
         // create a modify context
         ModifyContextHandle modifyHandle;
-        err = cache.ModifyContextCreate(
+        err = cache.modify_context_create(
             modifyHandle, // handle to the context
             N // maximal update size needed to allocate some buffers
         );
@@ -141,12 +141,12 @@ int main()
             rowSizeInBytes, // stride of the value buffer
             true    // linear table
             );
-        err = cache.Insert(
+        err = cache.insert(
             modifyHandle, // modify context to work with
-            hist.GetKeys(), // sorted keys by prio
-            hist.GetPriority(), // the priority of keys - value the represent how important key is can be a frequency of key
-            hist.GetData(), // an array of pointers for each key where is data
-            hist.GetNumBins(), // num of keys in the array
+            hist.get_keys(), // sorted keys by prio
+            hist.get_priority(), // the priority of keys - value the represent how important key is can be a frequency of key
+            hist.get_data(), // an array of pointers for each key where is data
+            hist.get_num_bins(), // num of keys in the array
             0, // table index
             &syncEvent,
             0
@@ -155,7 +155,7 @@ int main()
         CUDACheck(cudaStreamSynchronize(0));
 
         // query again
-        err = cache.Lookup(
+        err = cache.lookup(
             lookupHandle, // the context to lookup in
             deviceKeys, // keys to lookup in cache
             N, // number of keys in deviceKeys buffer
@@ -168,7 +168,7 @@ int main()
         ECCheck(err);
         CUDACheck(cudaStreamSynchronize(0));
         // all keys should be in cache
-        err = cache.PerformanceMetricGetValue(missCount, &cacheMisses, 0);
+        err = cache.performance_metric_get_value(missCount, &cacheMisses, 0);
         ECCheck(err);
         CHECK_AND_THROW(cacheMisses == 0, "Should have 0 misses");
         // use outputbuffer in a different kerenl
@@ -181,18 +181,18 @@ int main()
             deviceKeys,  // key buffer
             data, // pointer to table to resolve misses
             deviceOutBuffer, // output buffer
-            cache.GetCacheData(lookupHandle), // casting the lookup handle into a struct for kernel usage 
+            cache.get_cache_data(lookupHandle), // casting the lookup handle into a struct for kernel usage 
             rowSizeInBytes // outbuffer stride
         );
         CUDACheck(cudaGetLastError()); // Check kernel launch didn't generate an error
         CUDACheck(cudaDeviceSynchronize());
 
         // perform clean up
-        err = cache.LookupContextDestroy(lookupHandle);
+        err = cache.lookup_context_destroy(lookupHandle);
         ECCheck(err);
-        err = cache.ModifyContextDestroy(modifyHandle);
+        err = cache.modify_context_destroy(modifyHandle);
         ECCheck(err);
-        err = cache.PerformanceMetricDestroy(missCount);
+        err = cache.performance_metric_destroy(missCount);
         ECCheck(err);
 
         CUDACheck(cudaFreeHost(data));

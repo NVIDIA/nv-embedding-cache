@@ -92,7 +92,7 @@ size_t get_largest_hugepage_bits(size_t alloc_size) {
 
 DefaultAllocator::DefaultAllocator(size_t host_alloc_threshold_bytes) : host_alloc_threshold_(host_alloc_threshold_bytes) {}
 
-cudaError_t DefaultAllocator::deviceAllocate(void** ptr, size_t sz, int device_id) noexcept {
+cudaError_t DefaultAllocator::device_allocate(void** ptr, size_t sz, int device_id) noexcept {
     // Figure out if we need to change current device
     int curr_device;
     RETURN_IF_CUDA_ERROR_(cudaGetDevice(&curr_device));
@@ -113,7 +113,7 @@ cudaError_t DefaultAllocator::deviceAllocate(void** ptr, size_t sz, int device_i
     return res;
 }
 
-cudaError_t DefaultAllocator::deviceFree(void* ptr, int device_id) noexcept {
+cudaError_t DefaultAllocator::device_free(void* ptr, int device_id) noexcept {
     ALLOC_DEBUG_PRINT("[%s] ptr=%p, device=%d\n", __FUNCTION__, ptr, device_id);
     int curr_device;
     RETURN_IF_CUDA_ERROR_(cudaGetDevice(&curr_device));
@@ -132,7 +132,7 @@ cudaError_t DefaultAllocator::deviceFree(void* ptr, int device_id) noexcept {
     return res;
 }
 
-cudaError_t DefaultAllocator::deviceAllocateAsync(void** ptr, size_t sz, cudaStream_t stream, int device_id) noexcept {
+cudaError_t DefaultAllocator::device_allocate_async(void** ptr, size_t sz, cudaStream_t stream, int device_id) noexcept {
     // Figure out if we need to change current device
     int curr_device;
     RETURN_IF_CUDA_ERROR_(cudaGetDevice(&curr_device));
@@ -161,7 +161,7 @@ cudaError_t DefaultAllocator::deviceAllocateAsync(void** ptr, size_t sz, cudaStr
     return res;
 }
 
-cudaError_t DefaultAllocator::deviceFreeAsync(void* ptr, cudaStream_t stream, int device_id) noexcept {
+cudaError_t DefaultAllocator::device_free_async(void* ptr, cudaStream_t stream, int device_id) noexcept {
     ALLOC_DEBUG_PRINT("[%s] ptr=%p, stream=%p, device=%d\n", __FUNCTION__, ptr, stream, device_id);
     int curr_device;
     RETURN_IF_CUDA_ERROR_(cudaGetDevice(&curr_device));
@@ -180,7 +180,7 @@ cudaError_t DefaultAllocator::deviceFreeAsync(void* ptr, cudaStream_t stream, in
     return res;
 }
 
-cudaError_t DefaultAllocator::hostAllocate(void** ptr, size_t sz) noexcept {
+cudaError_t DefaultAllocator::host_allocate(void** ptr, size_t sz) noexcept {
     size_t hugepage_bits = 0;
     if(sz >= host_alloc_threshold_) {
       hugepage_bits = get_largest_hugepage_bits(sz);
@@ -208,7 +208,7 @@ cudaError_t DefaultAllocator::hostAllocate(void** ptr, size_t sz) noexcept {
     }
 }
 
-cudaError_t DefaultAllocator::hostFree(void* ptr) noexcept {
+cudaError_t DefaultAllocator::host_free(void* ptr) noexcept {
     auto ptr_alloc_data = host_mmap_allocations_.find(ptr);
     if (ptr_alloc_data != host_mmap_allocations_.end()) {
       auto res = cudaHostUnregister(ptr);
