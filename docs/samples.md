@@ -1,4 +1,4 @@
-# Embedding SDK Samples
+# NV Embedding Cache Samples
 
 Samples are located in [../samples/](../samples/) and are listed below with a short description.
 

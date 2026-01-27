@@ -1,6 +1,6 @@
 # Advanced Topics
 
-## Execution contexts
+## Execution contexts (C++ only)
 The collection of state and resources needed during execution of lookup/modify is called an [execution context](include/execution_context.hpp). These objects are created by a layer or table (depending on the selected integration level) and are used by the calling software stack to separate resources of parallel executions. I.e. each execution context represents a single reuseable parallel execution environment. For example, using 3 contexts, you can run 3 operations in parallel (each using a different context). Using the same context in multiple parallel ops can result in undefined behavior.
 
 The application is expected to create a fixed amount of execution contexts during initialization, then use them in some repeating order (e.g. round-robin).
@@ -21,7 +21,7 @@ The modify operation will first launch a kernel to invalidate the relevant cache
 have concluded, before altering the cache and re-enabling the affected cache entries.
 
 #### Custom Flows
-Invalidate and Commit relies on Lookup operation being queued on the GPU in an atomic fashion e.g a single CUDA kernel. Some users may implement their own complex gather flows. In order to maintain the required atomicity, if the flow uses more than one CUDA kernel, the user needs to call the Start/end_custom_flow APIs.
+Invalidate and Commit relies on Lookup operation being queued on the GPU in an atomic fashion e.g a single CUDA kernel. Some users may implement their own complex gather flows. In order to maintain the required atomicity, if the flow uses more than one CUDA kernel, the user needs to call the start/end_custom_flow APIs.
 
 ## Multi device
 Embeddings can span multiple devices/nodes by way of sharding. This is accomplished with a CUDA buffer tha spans multiple devices as detailed in the [CUDA programming guide](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/virtual-memory-management.html#).
@@ -38,7 +38,7 @@ To run the GoogleTests use:
 ```bash
 ./tests/embedding_layer/redis_cluster.sh start
 sleep 5
-for test in build/bin/*test*; do  ./$test; done
+for test in build_dir/bin/*test*; do  ./$test; done
 ./tests/embedding_layer/redis_cluster.sh stop
 ```
 * Note: the redis_cluster.sh script is handling local redis server nodes needed for some of the tests

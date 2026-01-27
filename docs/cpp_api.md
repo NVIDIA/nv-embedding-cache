@@ -54,7 +54,7 @@ The main table API is in: [table.hpp](../include/table.hpp) and specific table t
 5. [RedisClusterTable](../plugins/redis/include/redis_cluster_table.hpp) - a table accessing a remote [Redis](https://redis.io/) cluster.
 6. [RocksDBTable](../plugins/rocksdb/include/rocksdb_table.hpp) - a table accessing remote [RocksDB](https://rocksdb.org/) storage.
 
-Tables (except the GPUTable) are built separately as plugins, to reduce dependencies external where possible.
+Tables (except the GPUTable) are built separately as plugins, to reduce dependencies where possible.
 
 ### Samples
 * TBD
