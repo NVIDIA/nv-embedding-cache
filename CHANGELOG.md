@@ -1,3 +1,9 @@
+# NV Embedding Cache 26.02.1
+
+## New Features
+
+- Added NVHM submodule
+
 # NV Embedding Cache 26.02
 
 ## New Features

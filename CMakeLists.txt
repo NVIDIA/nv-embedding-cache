@@ -85,8 +85,7 @@ endif()
 list(REMOVE_DUPLICATES NVE_FEATURES)
 
 # Option to disable nvhm plugin specifically
-# Currently on by default until NVHM is released
-option(NVE_DISABLE_NVHM_PLUGIN "Disable the nvhm plugin" ON)
+option(NVE_DISABLE_NVHM_PLUGIN "Disable the nvhm plugin" OFF)
 if(NVE_DISABLE_NVHM_PLUGIN)
   list(REMOVE_ITEM NVE_FEATURES "nvhm_plugin")
   message(STATUS "nvhm_plugin disabled via NVE_DISABLE_NVHM_PLUGIN")
