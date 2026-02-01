@@ -20,6 +20,7 @@
 #include <bit_ops.hpp>
 #include <host_table.hpp>
 #include <nvhashmap/map.hpp>
+#include <nvhashmap/experimental/prefetch.hpp>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>

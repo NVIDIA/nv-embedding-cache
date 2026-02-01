@@ -521,7 +521,7 @@ int64_t NvhmMapTable<MaskType, MapType, PartitionerType>::find_(
             mask = mask_type::insert(mask, j);
           }};
           
-          nvhm::ring_prefetch_queue<key_type, prefetch_type, KeyFetchQueueLength> queue;
+          nvhm::experimental::ring_prefetch_queue<key_type, prefetch_type, KeyFetchQueueLength> queue;
           while (mask_type::has_next(it_head)) {
             const int64_t j{mask_type::next(it_head)};
             it_head = mask_type::skip(it_head);
