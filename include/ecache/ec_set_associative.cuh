@@ -960,6 +960,7 @@ cudaError_t call_sort_gather( const int8_t* uvm,
                     size_t& aux_buf_bytes,
                     size_t num_keys,
                     size_t row_size_in_bytes,
+                    int64_t block_size,
                     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
                     cudaStream_t stream)
 {
@@ -1020,8 +1021,9 @@ cudaError_t call_sort_gather( const int8_t* uvm,
     
     constexpr auto block_y = 4;
     dim3 blockDims2(32, block_y);
-    constexpr auto num_keys_per_y = 4096;
-    constexpr auto num_keys_per_block_gather = num_keys_per_y*block_y;
+    uint32_t num_keys_per_y = static_cast<uint32_t>(block_size);
+    
+    auto num_keys_per_block_gather = num_keys_per_y*block_y;
     constexpr auto unroll = 8;
     dim3 gridDims2(static_cast<uint32_t>((num_keys + num_keys_per_block_gather - 1)/num_keys_per_block_gather));
     if (row_size_in_bytes % 16 == 0)

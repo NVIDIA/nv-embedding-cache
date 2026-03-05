@@ -104,6 +104,17 @@ private:
     std::shared_ptr<CUDADistributedBuffer> dist_buffer_;
 };
 
+
+class DistHostMemBlock : public MemBlock {
+public:
+    DistHostMemBlock(std::shared_ptr<DistributedEnv> env, size_t row_size, size_t num_embeddings, nve::DataType_t dtype);
+    ~DistHostMemBlock() = default;
+    void* get_ptr() const override;
+
+private:
+    std::shared_ptr<CUDADistributedBuffer> dist_buffer_;
+};
+
 // Memblock to allow application to provide a raw ptr that's GPU accessible
 class UserMemBlock : public MemBlock {
 public:

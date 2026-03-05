@@ -86,6 +86,7 @@ cudaError_t call_sort_gather( const int8_t* uvm,
                     int8_t* auxBuf,
                     size_t num_keys,
                     size_t row_size_in_bytes,
+                    int64_t block_size,
                     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
                     cudaStream_t stream);
 
@@ -477,7 +478,7 @@ public:
 
     ECError lookup_sort_gather(const LookupContextHandle& h_lookup, const IndexT* d_keys, const size_t len,
                                             int8_t* d_values, const int8_t* d_table, int8_t* d_auxiliary_buffer, size_t& auxiliary_buffer_bytes, uint32_t /*curr_table*/, 
-                                            size_t stride, cudaStream_t stream) override
+                                            size_t stride, int64_t block_size, cudaStream_t stream) override
     {
         try
         {
@@ -491,6 +492,7 @@ public:
                     required_bytes,
                     len,
                     stride,
+                    block_size,
                     data,
                     stream)));
             
@@ -517,6 +519,7 @@ public:
                     auxiliary_buffer_bytes,
                     len,
                     stride,
+                    block_size,
                     data,
                     stream)));
                     CHECK_ERR_AND_THROW(end_custom_flow());

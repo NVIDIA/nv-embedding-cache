@@ -297,6 +297,9 @@ void NvhmMapTable<MaskType, MapType, PartitionerType>::insert(
           static_assert(dependent_false_v<meta_type>, "Overflow handler not implemented.");
         }
       }
+
+      // Update part_size after erasing
+      part_size = static_cast<int64_t>(map.size());
     }
   }};
 

@@ -51,12 +51,13 @@ static int pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
 
 namespace nve {
 
-CUDADistributedBuffer::CUDADistributedBuffer(uint64_t size, std::shared_ptr<DistributedEnv> dist_env) : env_(dist_env) {
+CUDADistributedBuffer::CUDADistributedBuffer(uint64_t size, std::shared_ptr<DistributedEnv> dist_env, BufferLocation location) : env_(dist_env) {
   NVE_CHECK_(dist_env != nullptr);
   single_host_ = env_->single_host();
   if (single_host_) {
-    init_single_host(size);
+    init_single_host(size, location);
   } else {
+    NVE_CHECK_(location != BufferLocation::ALLOCATION_SYS_MEM, "Distributed buffer on host is not supported for multi-host deployments");
     init_multi_host(size);
   }
   env_->barrier();
@@ -116,7 +117,7 @@ size_t CUDADistributedBuffer::get_device_granularity(CUmemAllocationProp prop) {
   return granularity;
 }
 
-void CUDADistributedBuffer::init_single_host(uint64_t size) {
+void CUDADistributedBuffer::init_single_host(uint64_t size, BufferLocation location) {
   const bool root_proc = (env_->rank() == 0);
   NVE_CHECK_(env_->single_host());
   num_shards_ = collect_devices(all_devices_);
@@ -124,7 +125,7 @@ void CUDADistributedBuffer::init_single_host(uint64_t size) {
 
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.type = (location == BufferLocation::ALLOCATION_SYS_MEM) ? CU_MEM_LOCATION_TYPE_HOST_NUMA : CU_MEM_LOCATION_TYPE_DEVICE;
   prop.location.id = 0;
   prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
@@ -141,7 +142,7 @@ void CUDADistributedBuffer::init_single_host(uint64_t size) {
       if (all_devices_[i] >= 0) {
         // Allocate & export handle
         CUmemGenericAllocationHandle handle;
-        prop.location.id = all_devices_[i];
+        prop.location.id = (location == BufferLocation::ALLOCATION_SYS_MEM) ? 0 : all_devices_[i];
         NVE_CHECK_(cuMemCreate(&handle, shard_size_, &prop, 0 /*flags*/));
         NVE_CHECK_(cuMemExportToShareableHandle(&shareable_handles.at(i), handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0 /*flags*/));
         all_alloc_handles_.push_back(handle);

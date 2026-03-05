@@ -14,7 +14,6 @@
 # limitations under the License.
 
 include_directories(
-  ${PROJECT_SOURCE_DIR}/googletest/googletest/include
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

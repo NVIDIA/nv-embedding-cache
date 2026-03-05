@@ -100,3 +100,4 @@ For example:
 * [Python API](python_api.md)
 * [Samples](samples.md)
 * [Advanced topics](advanced.md)
+* [Multi-GPU and Multi-Node](multi_gpu.md)

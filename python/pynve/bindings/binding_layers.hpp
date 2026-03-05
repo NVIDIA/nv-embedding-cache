@@ -50,6 +50,8 @@ namespace nve {
 struct EmbedLayerConfig {
     int64_t logging_interval = -1;
     int64_t kernel_mode = 0;
+    int64_t kernel_mode_value_1 = 0;
+    int64_t kernel_mode_value_2 = 0;
 };
 
 template<typename IndexT>
@@ -255,6 +257,12 @@ public:
         emb_layer_ptr_->clear(ctx);
     }
 
+    void erase(size_t num_keys, uintptr_t keys, int64_t table_id, uint64_t stream_)
+    {
+        auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
+        emb_layer_ptr_->erase(ctx, num_keys, reinterpret_cast<const void*>(keys), table_id);
+    }
+
     NVEmbedBinding(int device_id, size_t row_size, nve::DataType_t dtype, EmbedLayerConfig config) : allocator_(GetDefaultAllocator()), 
                         d_tmp_device_buf_(allocator_, false),
                         d_tmp_host_buf_(allocator_, true),
@@ -391,9 +399,22 @@ public:
         insert_heuristic_thresholds.push_back(0.75f);
 
         if (host_cache_size > 0) {
-            host_table_ptr_t mw_table = create_nvhm_map_table(host_cache_size, this->row_size_in_bytes_, dtype);
-            tables.push_back(mw_table);
-            insert_heuristic_thresholds.push_back(0.75f);
+            host_table_ptr_t nvhm_table = create_nvhm_table(host_cache_size, this->row_size_in_bytes_, dtype);
+            tables.push_back(nvhm_table);
+            if (remote) {
+                // Host cache is L2 with remote being L3, set target hitrate to be proportional by size
+                // Unless num_rows is 0, which means increase host cache can increase indefinitely
+                auto num_rows = std::dynamic_pointer_cast<ParameterServerTable>(remote)->get_num_rows();
+                float target_hitrate = num_rows > 0 ? float(host_cache_size) / float(num_rows * this->row_size_in_bytes_) : 1.0f;
+                if (target_hitrate > 1.f) {
+                    NVE_LOG_WARNING_("Cache is initialized with maximal size larger than the embedding table");
+                    target_hitrate = std::min(target_hitrate, 1.0f); // Clamping hitrate to 1.0
+                }
+                insert_heuristic_thresholds.push_back(target_hitrate);
+            } else {
+                // No remote so host cache is the last level, therefore there's no way to auto-insert and no misses are expected at this level
+                insert_heuristic_thresholds.push_back(0.0f);
+            }
         }
         if (remote) {
             // we are using a custom table wrapper to be able to do late binding of the parameter server
@@ -402,7 +423,6 @@ public:
             insert_heuristic_thresholds.push_back(0.f); // remote PS is typically updated externally instead of by the layer
         }
         typename layer_type::Config layer_cfg = {"ps_layer", std::make_shared<DefaultInsertHeuristic>(insert_heuristic_thresholds)};
-
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, tables, nullptr /* using default allocator for device 0*/);
     }
 
@@ -411,7 +431,7 @@ public:
         ps_table_->set_table(table);
     }
 
-    host_table_ptr_t create_nvhm_map_table(uint64_t table_size, uint64_t row_size, nve::DataType_t data_type)
+    host_table_ptr_t create_nvhm_table(uint64_t table_size, uint64_t row_size, nve::DataType_t data_type)
     {
         load_host_table_plugin("nvhm");
 
@@ -419,7 +439,7 @@ public:
         const int64_t keys_per_partition = table_size / row_size / num_partitions;
         NVE_CHECK_(keys_per_partition > 0, "Host table is too small");
 
-        nlohmann::json mw_conf = {
+        nlohmann::json nvhm_conf = {
           {"key_size", sizeof(IndexT)},
           {"max_value_size", row_size},
           {"num_partitions", num_partitions},
@@ -427,16 +447,16 @@ public:
           {"value_alignment", 32},
           {"overflow_policy",
             {
-              {"handler", "evict_random"}, // Using random eviction, assuming gpu cache handles all host keys.
+              {"handler", "evict_random"}, // Using random eviction, assuming gpu cache handles all hot keys.
                                            // Otherwise, replace with "evict_lru"
               {"overflow_margin", keys_per_partition},
               {"resolution_margin", 0.9}
             }
           }
         };
-        nve::host_table_factory_ptr_t mw_fac{
+        nve::host_table_factory_ptr_t nvhm_fac{
           nve::create_host_table_factory(R"({"implementation": "nvhm_map"})"_json)};
-        return mw_fac->produce(0, mw_conf);
+        return nvhm_fac->produce(0, nvhm_conf);
     }
 
     ~HierarchicalEmbedding()
@@ -494,13 +514,14 @@ private:
 
         // handle kernel mode
         cfg.kernel_mode_type = config.kernel_mode;
-        if (mem_block_->get_type() == MemBlockType::NVL || mem_block_->get_type() == MemBlockType::MPI) {
-            cfg.kernel_mode_type = static_cast<uint64_t>(nve::KernelType::LookupUVM); // kernel mode do lookup uvm not sort and gather for nvl.
+        
+        if (cfg.kernel_mode_type == static_cast<uint64_t>(nve::KernelType::SortGather)) {
+            cfg.kernel_mode_value = config.kernel_mode_value_1 > 0 ? config.kernel_mode_value_1 : 1024;
         }
 
-        if (cfg.kernel_mode_type == static_cast<uint64_t>(nve::KernelType::PipelineGather)) {
-            gather_pipeline_params_.task_size = 1024;
-            gather_pipeline_params_.num_aux_streams = 16;
+        else if (cfg.kernel_mode_type == static_cast<uint64_t>(nve::KernelType::PipelineGather)) {
+            gather_pipeline_params_.task_size = config.kernel_mode_value_1 > 0 ? config.kernel_mode_value_1 : 1024;
+            gather_pipeline_params_.num_aux_streams = config.kernel_mode_value_2 > 0 ? config.kernel_mode_value_2 : 16;
             cfg.kernel_mode_value = reinterpret_cast<uintptr_t>(&gather_pipeline_params_);
         }
         

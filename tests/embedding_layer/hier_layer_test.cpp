@@ -143,7 +143,7 @@ class HierLayerTest {
       case HostTableType::NVHashMap: {
         std::vector<std::string> plugin_names{"nvhm"};
         load_host_table_plugins(plugin_names.begin(), plugin_names.end());
-        nlohmann::json mw_conf = {{"mask_size", 8},
+        nlohmann::json nvhm_conf = {{"mask_size", 8},
                                   {"key_size", sizeof(IndexT)},
                                   {"max_value_size", row_size},
                                   {"value_dtype", to_string(data_type)},
@@ -156,9 +156,9 @@ class HierLayerTest {
                                   {{"overflow_margin", (table_size / row_size)},
                                     {"handler", "evict_lru"},
                                     {"resolution_margin", 0.5}}}};
-        host_table_factory_ptr_t mw_fac{
+        host_table_factory_ptr_t nvhm_fac{
             create_host_table_factory(R"({"implementation": "nvhm_map"})"_json)};
-        m_host_tab = mw_fac->produce(4711, mw_conf);
+        m_host_tab = nvhm_fac->produce(4711, nvhm_conf);
         break;
       }
       case HostTableType::Redis: {

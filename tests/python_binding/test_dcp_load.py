@@ -43,7 +43,7 @@ class ToyModel(nn.Module):
         else:
             cache_size = 1024
             cache_type = nve_layers.CacheType.LinearUVM
-            remote_interface = nve_ps.NVLocalParameterServer(0, embedding_dim, torch.float32, None) if cache_type == nve_layers.CacheType.Hierarchical else None
+            remote_interface = nve_ps.NVEParameterServer(0, embedding_dim, torch.float32, None) if cache_type == nve_layers.CacheType.Hierarchical else None
             memblock = nve.LinearMemBlock(num_embeddings, embedding_dim, nve.DataType_t.Float32) if cache_type == nve_layers.CacheType.LinearUVM else None
             self.embed = nve_layers.NVEmbedding(num_embeddings, embedding_dim, torch.float32, memblock=memblock, cache_type=cache_type, remote_interface=remote_interface, gpu_cache_size=cache_size)
 

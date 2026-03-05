@@ -34,11 +34,11 @@ paths = ['third_party/nvhashmap/third_party/googletest/',
 comment = 'False positive of openjdk in gtest'
 nspect_ids = ['NSPECT-0FQ1-4XQA']
 
-# MW absl + phmap
+# NVHM absl + phmap
 [[oss.excluded.directories]]
 paths = ['third_party/nvhashmap/third_party/abseil-cpp/',
          'third_party/nvhashmap/third_party/parallel-hashmap/']
-comment = 'Unused code in nvHashMap (dependencies for MW benchmark)'
+comment = 'Unused code in nvHashMap (dependencies for NVHM benchmark)'
 nspect_ids = ['NSPECT-0FQ1-4XQA']
 
 # libspatialindex

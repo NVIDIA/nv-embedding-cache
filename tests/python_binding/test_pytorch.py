@@ -63,28 +63,28 @@ def functional(quiet : bool, data_type : torch.dtype, device : torch.device = to
     # create a regular embedding layer for reference
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, dtype=data_type, sparse=True, device=device)
 
-    # create the MW PS
-    mw_ps_init = nve_ps.SimpleInitializer(num_embeddings, embed_size, data_type, emb_layer.weight)
-    mw_ps = nve_ps.NVLocalParameterServer(
+    # create the NVHM PS
+    nvhm_ps_init = nve_ps.SimpleInitializer(num_embeddings, embed_size, data_type, emb_layer.weight)
+    nvhm_ps = nve_ps.NVEParameterServer(
             0, # Setting num_embeddings as 0 to disable eviction policy
             embed_size,
             data_type,
-            mw_ps_init
+            nvhm_ps_init
         )
 
     # create nv emb layer wrapping the nvHashMap as PS
-    nv_mw_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=mw_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
 
     # create a uvm backed nv emb layer
     nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, remote_interface=None, weight_init=emb_layer.weight, device=device)
 
-    # create nv emb layer wrapping the PS
+    # create nv emb gpu layer
     nv_gpu_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.NoCache, remote_interface=None, weight_init=emb_layer.weight, device=device)
 
     # from here the interface should be same for all layers as demonstrated by the loop function
 
     num_steps = 5
-    mw_ps_res = []
+    nvhm_ps_res = []
     torch_res = []
     uvm_res = []
     gpu_res = []
@@ -92,27 +92,27 @@ def functional(quiet : bool, data_type : torch.dtype, device : torch.device = to
     keys = torch.tensor([5, 4, 3, 100, 1024, 6], dtype=torch.int64, device=device)
     target = torch.randn(torch.numel(keys), embed_size, dtype=data_type, device=device)
     loop(emb_layer, [keys], None, torch_res, target)
-    loop(nv_mw_ps_emb_layer, [keys], None, mw_ps_res, target)
+    loop(nv_nvhm_ps_emb_layer, [keys], None, nvhm_ps_res, target)
     loop(nv_uvm_emb_layer, [keys], None, uvm_res, target)
     loop(nv_gpu_emb_layer, [keys], None, gpu_res, target)
 
 
     with nvtx.annotate("torch emb", color="green"):
         loop(emb_layer, [keys]*num_steps, None, torch_res, target)
-    with nvtx.annotate("mw ps emb", color="green"):    
-        loop(nv_mw_ps_emb_layer, [keys]*num_steps, None, mw_ps_res, target)
+    with nvtx.annotate("nvhm ps emb", color="green"):
+        loop(nv_nvhm_ps_emb_layer, [keys]*num_steps, None, nvhm_ps_res, target)
     with nvtx.annotate("uvm emb", color="green"):
         loop(nv_uvm_emb_layer, [keys]*num_steps, None, uvm_res, target)
     with nvtx.annotate("gpu emb", color="green"):
         loop(nv_gpu_emb_layer, [keys]*num_steps, None, gpu_res, target)
     if not quiet:
-        for mw_ps_output, uvm_output, torch_output, gpu_output in zip(mw_ps_res, uvm_res, torch_res, gpu_res):
+        for nvhm_ps_output, uvm_output, torch_output, gpu_output in zip(nvhm_ps_res, uvm_res, torch_res, gpu_res):
             print(f"torch_output={torch_output}")
-            print(f"mw_ps_output={mw_ps_output}")
+            print(f"nvhm_ps_output={nvhm_ps_output}")
             print(f"uvm_output={uvm_output}")
             print(f"gpu_output={gpu_output}")
             print("==========================================")
-    return mw_ps_res, uvm_res, torch_res, gpu_res
+    return nvhm_ps_res, uvm_res, torch_res, gpu_res
 
 def functional_bag(quiet : bool, data_type : torch.dtype, device : torch.device = torch.device("cuda")):
     num_embeddings = 10000
@@ -122,7 +122,7 @@ def functional_bag(quiet : bool, data_type : torch.dtype, device : torch.device 
     emb_layer = torch.nn.EmbeddingBag(num_embeddings, embed_size, sparse=True, mode='sum', dtype=data_type, include_last_offset=True, device=device)
 
     # TRTREC-47 pooling is not enabled yet for PS
-    # See functional() for how to test with PS based on MW
+    # See functional() for how to test with PS based on NVHM
     
     # create a uvm backed nv emb layer
     nv_uvm_emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, data_type, nve_layers.CacheType.LinearUVM, mode='sum', gpu_cache_size=cache_size, remote_interface=None, weight_init=emb_layer.weight, device=device)
@@ -232,16 +232,31 @@ def test_pytorch_init_gpu():
     gpu_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.NoCache,  weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
 
 @requires_nvhm
-def test_pytorch_init_hierarchical():
+def test_pytorch_init_hierarchical_nvhm():
+    num_embeddings = 100000
+    embed_size = 2
+    cache_size = 128*1024*1024
+
+    # create the NVHM PS
+    nvhm_ps = nve_ps.NVEParameterServer(
+            0, # Setting num_embeddings as 0 to disable eviction policy
+            embed_size,
+            torch.float32,
+        )
+    hierarchical_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, host_cache_size=cache_size, remote_interface=nvhm_ps, optimize_for_training=False)
+
+def test_pytorch_init_hierarchical_redis():
     num_embeddings = 100000
     embed_size = 2
     cache_size = 128*1024*1024
 
     # create the MW PS
-    mw_ps = nve_ps.NVLocalParameterServer(
-            0, # Setting num_embeddings as 0 to disable eviction policy
+    mw_ps = nve_ps.NVEParameterServer(
+            num_embeddings,
             embed_size,
             torch.float32,
+            ps_type = nve.Redis,
+            extra_params = {"plugin": {"address": "localhost:7001"}}
         )
     hierarchical_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, host_cache_size=cache_size, remote_interface=mw_ps, optimize_for_training=False)
 
@@ -254,9 +269,9 @@ def test_pytorch_init_memblock():
 
 @requires_nvhm
 def test_pytorch_concat():
-    mw_ps_list, uvm_list, torch_list, gpu_list = functional(True, torch.float16)
-    for mw_ps_output, uvm_output, torch_output, gpu_output in zip(mw_ps_list, uvm_list, torch_list, gpu_list):
-        assert all(torch.isclose(mw_ps_output, torch_output).tolist())
+    nvhm_ps_list, uvm_list, torch_list, gpu_list = functional(True, torch.float16)
+    for nvhm_ps_output, uvm_output, torch_output, gpu_output in zip(nvhm_ps_list, uvm_list, torch_list, gpu_list):
+        assert all(torch.isclose(nvhm_ps_output, torch_output).tolist())
         assert all(torch.isclose(uvm_output, torch_output).tolist())
         assert all(torch.isclose(gpu_output, torch_output).tolist())
 
@@ -299,7 +314,7 @@ def test_pytorch_load_from_binary_file():
     data_type = torch.float32
     device = torch.device("cuda")
 
-    mw_ps = nve_ps.NVLocalParameterServer(
+    nvhm_ps = nve_ps.NVEParameterServer(
             0, # Setting num_embeddings as 0 to disable eviction policy
             embed_size,
             data_type,
@@ -319,11 +334,11 @@ def test_pytorch_load_from_binary_file():
     with open(values_path, "wb") as f:
         f.write(values_array.tobytes())
 
-    mw_ps.load_from_file(keys_path, values_path)
+    nvhm_ps.load_from_file(keys_path, values_path)
 
-    nv_mw_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=mw_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
 
-    out = nv_mw_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
+    out = nv_nvhm_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
     assert torch.equal(out, torch.tensor([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=torch.float32, device=device))
 
 def test_pytorch_multi_layer():
@@ -352,7 +367,7 @@ def test_pytorch_load_from_numpy_file():
     data_type = torch.float32
     device = torch.device("cuda")
 
-    mw_ps = nve_ps.NVLocalParameterServer(
+    nvhm_ps = nve_ps.NVEParameterServer(
             0, # Setting num_embeddings as 0 to disable eviction policy
             embed_size,
             data_type,
@@ -371,11 +386,11 @@ def test_pytorch_load_from_numpy_file():
     with open(values_path, "wb") as f:
         np.save(f, values_array)
 
-    mw_ps.load_from_file(keys_path, values_path)
+    nvhm_ps.load_from_file(keys_path, values_path)
 
-    nv_mw_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=mw_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
 
-    out = nv_mw_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
+    out = nv_nvhm_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
     assert torch.equal(out, torch.tensor([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=torch.float32, device=device))
 
 def test_pytorch_update():
@@ -387,6 +402,44 @@ def test_pytorch_update():
     layer.update(keys, updates)
     out = layer(keys)
     assert torch.equal(out, updates.reshape(5, 2).to(device='cuda'))
+
+@requires_nvhm
+def test_pytorch_erase():
+    keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device='cuda')
+    values0 = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=torch.float32, device='cuda')
+    values1 = torch.tensor([11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0], dtype=torch.float32, device='cuda')
+
+    num_embeddings = 2**20
+    embed_size = 2
+    data_type = torch.float32
+    cache_size = 2**16
+    # create the NVHM PS
+    nvhm_ps_init = nve_ps.SimpleInitializer(num_embeddings, embed_size, data_type, torch.zeros(num_embeddings, embed_size, dtype=torch.float32))
+    nvhm_ps = nve_ps.NVEParameterServer(
+            num_embeddings,
+            embed_size,
+            data_type,
+            nvhm_ps_init
+        )
+
+    # create nv emb layer wrapping the nvHashMap as PS
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=torch.device('cuda'))
+
+    # Inserting different values on tables
+    # This is an intentional inconsistency for testing purposes.
+    layer.insert(keys, values0, table_id=0)
+    layer.insert(keys, values1, table_id=1)
+
+    # After this insert we expect to get values0 (all hits in table 0)
+    out = layer(keys)
+    assert torch.equal(out, values0.reshape(5, 2).to(device='cuda'))
+
+    # Now erase from table 0
+    layer.erase(keys, table_id=0)
+
+    # After erase, looking up the keys should return the values from table 1 (after cache misses in the table 0)
+    out_after_erase = layer(keys)
+    assert torch.equal(out_after_erase, values1.reshape(5, 2).to(device='cuda'))
 
 def test_pytorch_pooling():
     #right now we are testing unweighted sum. If other pooling types are tested,
@@ -451,9 +504,9 @@ def test_pytorch_training_loop_non_default_device():
         print("Skipping multi-GPU test as only one GPU is available")
         return
     device = torch.device("cuda:1")
-    mw_ps_list, uvm_list, torch_list, gpu_list = functional(True, torch.float32, device)
-    for mw_ps_output, uvm_output, torch_output, gpu_output in zip(mw_ps_list, uvm_list, torch_list, gpu_list):
-        assert all(torch.isclose(mw_ps_output, torch_output).tolist())
+    nvhm_ps_list, uvm_list, torch_list, gpu_list = functional(True, torch.float32, device)
+    for nvhm_ps_output, uvm_output, torch_output, gpu_output in zip(nvhm_ps_list, uvm_list, torch_list, gpu_list):
+        assert all(torch.isclose(nvhm_ps_output, torch_output).tolist())
         assert all(torch.isclose(uvm_output, torch_output).tolist())
         assert all(torch.isclose(gpu_output, torch_output).tolist())
     
@@ -536,6 +589,29 @@ def test_pytorch_simple_sample_linear():
     sys.path.append(f"{dir_path}/../../samples/pytorch/simple_sample")
     import simple_linear_embedding
     simple_linear_embedding.main()
+
+def load_sample_parse_args(args: list[str]):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--torchrec_checkpoint", action="store_true")
+    parser.add_argument("--checkpoint_dir", type=str)
+    return parser.parse_args(args)
+
+def test_pytorch_load_checkpoint_sample_torchrec():
+    sys.path.append(f"{dir_path}/../../samples/pytorch/load_checkpoint_sample")
+    import load_sample
+    import argparse
+
+    args = load_sample_parse_args(["--torchrec_checkpoint", "--checkpoint_dir", "/tmp/checkpoint"])
+    load_sample.save_model(0, 1, args)
+    load_sample.load_model(0, 1, args)
+
+def test_pytorch_load_checkpoint_sample_torch():
+    sys.path.append(f"{dir_path}/../../samples/pytorch/load_checkpoint_sample")
+    import load_sample
+    import argparse
+    args = load_sample_parse_args(["--checkpoint_dir", "/tmp/checkpoint"])
+    load_sample.save_model(0, 1, args)
+    load_sample.load_model(0, 1, args)
 
 @requires_nvhm
 def test_pytorch_simple_sample_hierarchical():
@@ -699,9 +775,9 @@ def test_pytorch_multi_thread_multi_device_training():
     num_threads = torch.cuda.device_count()
 
     def thread_func(device):
-        mw_ps_res, uvm_res, torch_res, gpu_res = functional(True, torch.float32, device)
-        for mw_ps_output, uvm_output, torch_output, gpu_output in zip(mw_ps_res, uvm_res, torch_res, gpu_res):
-            assert all(torch.isclose(mw_ps_output, torch_output).tolist())
+        nvhm_ps_res, uvm_res, torch_res, gpu_res = functional(True, torch.float32, device)
+        for nvhm_ps_output, uvm_output, torch_output, gpu_output in zip(nvhm_ps_res, uvm_res, torch_res, gpu_res):
+            assert all(torch.isclose(nvhm_ps_output, torch_output).tolist())
             assert all(torch.isclose(uvm_output, torch_output).tolist())
             assert all(torch.isclose(gpu_output, torch_output).tolist())
 

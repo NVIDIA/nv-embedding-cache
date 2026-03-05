@@ -1,0 +1,32 @@
+name: "hstu_model"
+backend: "python"
+max_batch_size: 128
+
+input [
+  {
+    name: "indices"
+    data_type: TYPE_INT64
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "predictions"
+    data_type: TYPE_FP32
+    dims: [ -1 ]
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [ 32, 64, 128 ]
+  max_queue_delay_microseconds: 100
+}
+
+parameters: {
+  key: "checkpoint_path"
+  value: {
+    string_value: "../../trained_models"
+  }
+}
+

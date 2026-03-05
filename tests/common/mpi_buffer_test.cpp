@@ -61,6 +61,7 @@ static bool IsKernelSupportsPidfd() {
 // Fixture for MPI tests
 struct TestCase {
   size_t table_size;
+  nve::BufferLocation location;
 };
 class MPIBufferTest : public ::testing::TestWithParam<TestCase> {};
 
@@ -75,11 +76,11 @@ TEST_P(MPIBufferTest, InitBuffer) {
   }
   const auto tc = GetParam();
   auto mpi_env = std::make_shared<nve::MPIEnv>();
-  auto shared_buf = std::make_shared<nve::CUDADistributedBuffer>(tc.table_size, mpi_env);
+  auto shared_buf = std::make_shared<nve::CUDADistributedBuffer>(tc.table_size, mpi_env, tc.location);
 }
 
-void TestDistBuffer(size_t table_size, std::shared_ptr<nve::MPIEnv> mpi_env) {
-  auto shared_buf = std::make_shared<nve::CUDADistributedBuffer>(table_size, mpi_env);
+void TestDistBuffer(TestCase tc, std::shared_ptr<nve::MPIEnv> mpi_env) {
+  auto shared_buf = std::make_shared<nve::CUDADistributedBuffer>(tc.table_size, mpi_env, tc.location);
 
   // Write to local shard
   const auto rank = mpi_env->rank();
@@ -111,7 +112,7 @@ TEST_P(MPIBufferTest, ReadWrite) {
   }
   const auto tc = GetParam();
   auto mpi_env = std::make_shared<nve::MPIEnv>();
-  TestDistBuffer(tc.table_size, mpi_env);
+  TestDistBuffer(tc, mpi_env);
 }
 
 TEST_P(MPIBufferTest, ReadWrite_PartialGroup) {
@@ -134,15 +135,16 @@ TEST_P(MPIBufferTest, ReadWrite_PartialGroup) {
   auto mpi_env_partial = std::make_shared<nve::MPIEnv>(ranks, devices);
 
   const auto tc = GetParam();
-  TestDistBuffer(tc.table_size, mpi_env_partial);
+  TestDistBuffer(tc, mpi_env_partial);
 }
 
 INSTANTIATE_TEST_SUITE_P(
   ShardedBuffer,
   MPIBufferTest,
   ::testing::Values(
-    TestCase({size_t(1) << 10}),
-    TestCase({size_t(1) << 20}),
-    TestCase({size_t(1) << 30})
+    TestCase({size_t(1) << 10, nve::BufferLocation::ALLOCATION_GPU_MEM}),
+    TestCase({size_t(1) << 20, nve::BufferLocation::ALLOCATION_GPU_MEM}),
+    TestCase({size_t(1) << 30, nve::BufferLocation::ALLOCATION_GPU_MEM}),
+    TestCase({size_t(1) << 30, nve::BufferLocation::ALLOCATION_SYS_MEM})
   )
 );

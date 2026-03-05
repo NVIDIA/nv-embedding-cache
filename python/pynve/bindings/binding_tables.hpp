@@ -33,67 +33,69 @@ class PyNVETable : public Table {
 public:
     PyNVETable(table_ptr_t table);
     
-    void clear(context_ptr_t& ctx) override;
-    void erase(context_ptr_t& ctx, int64_t n, const void* keys) override;
-    void find(context_ptr_t& ctx, 
-              int64_t n,
-              const void* keys, 
-              max_bitmask_repr_t* hit_mask,
-              int64_t value_stride, 
-              void* values, 
-              int64_t* value_sizes) const override;
-    void insert(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-                int64_t value_size, const void* values) override;
-    void update(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-                   int64_t value_size, const void* values) override;
-    void update_accumulate(context_ptr_t& ctx,
-                            int64_t n,
-                            const void* keys,
-                            int64_t update_stride,
-                            int64_t update_size,
-                            const void* updates,
-                            DataType_t update_dtype) override;
-    void set_table(table_ptr_t table);
+    virtual void clear(context_ptr_t& ctx) override;
+    virtual void erase(context_ptr_t& ctx, int64_t n, const void* keys) override;
+    virtual void find(context_ptr_t& ctx, 
+                      int64_t n,
+                      const void* keys, 
+                      max_bitmask_repr_t* hit_mask,
+                      int64_t value_stride, 
+                      void* values, 
+                      int64_t* value_sizes) const override;
+    virtual void insert(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
+                        int64_t value_size, const void* values) override;
+    virtual void update(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
+                        int64_t value_size, const void* values) override;
+    virtual void update_accumulate(context_ptr_t& ctx,
+                                   int64_t n,
+                                   const void* keys,
+                                   int64_t update_stride,
+                                   int64_t update_size,
+                                   const void* updates,
+                                   DataType_t update_dtype) override;
+    virtual void set_table(table_ptr_t table);
     
-    int32_t get_device_id() const override;
-    int64_t get_max_row_size() const override;
-    void reset_lookup_counter(context_ptr_t& ctx) override;
-    void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) override;
-    bool lookup_counter_hits() override;
+    virtual int32_t get_device_id() const override;
+    virtual int64_t get_max_row_size() const override;
+    virtual void reset_lookup_counter(context_ptr_t& ctx) override;
+    virtual void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) override;
+    virtual bool lookup_counter_hits() override;
 
-    void erase_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
-    void find_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, buffer_ptr<max_bitmask_repr_t> hit_mask,
-                 int64_t value_stride, buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override;
-    void insert_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
-                   int64_t value_size, buffer_ptr<const void> values) override;
-    void update_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
-                   int64_t value_size, buffer_ptr<const void> values) override;
-    void update_accumulate_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
-                              int64_t update_stride, int64_t update_size, buffer_ptr<const void> updates,
-                              DataType_t update_dtype) override;
+    virtual void erase_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
+    virtual void find_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, buffer_ptr<max_bitmask_repr_t> hit_mask,
+                         int64_t value_stride, buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override;
+    virtual void insert_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
+                           int64_t value_size, buffer_ptr<const void> values) override;
+    virtual void update_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
+                           int64_t value_size, buffer_ptr<const void> values) override;
+    virtual void update_accumulate_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+                                      int64_t update_stride, int64_t update_size, buffer_ptr<const void> updates,
+                                      DataType_t update_dtype) override;
 
+    virtual uint64_t get_num_rows() const;
 private:
     table_ptr_t table_;
 };
 
-class LocalParameterServer final : public nve::PyNVETable {
+class ParameterServerTable final : public nve::PyNVETable {
 public:
     enum class PSType_t : uint64_t {
         NVHashMap,
         Abseil,
         ParallelHash,
+        Redis,
     };
 
     // num_rows = 0, means no eviction
-    LocalParameterServer(uint64_t num_rows, uint64_t row_elements, nve::DataType_t data_type, uint64_t initial_size, PSType_t ps_type);
-    ~LocalParameterServer();
+    ParameterServerTable(uint64_t num_rows, uint64_t row_elements, nve::DataType_t data_type, uint64_t initial_size, PSType_t ps_type, const std::string& extra_params);
+    ~ParameterServerTable();
     void insert_keys(size_t num_keys, uintptr_t keys, uintptr_t values);
     void erase_keys(size_t num_keys, uintptr_t keys);
     void clear_keys();
     void insert_keys_from_numpy_file(py::object keys_stream, py::object values_stream, uint64_t batch_size);
     void insert_keys_from_binary_file(py::object keys_stream, py::object values_stream, uint64_t batch_size);
     void insert_keys_from_filepath(const std::string& keys_path, const std::string& values_path, uint64_t batch_size);
-    
+    uint64_t get_num_rows() const override;
 private:
     // internal function to insert keys from tensor files
     void insert_keys_from_tensor_file(std::shared_ptr<TensorFileFormatBase> keys_file_reader, std::shared_ptr<TensorFileFormatBase> values_file_reader, uint64_t batch_size);

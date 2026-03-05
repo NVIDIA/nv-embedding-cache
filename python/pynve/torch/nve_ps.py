@@ -18,6 +18,7 @@ import pynve.nve as nve
 from typing import Optional
 from collections.abc import Iterator
 import warnings
+from json import dumps
 
 class SimpleInitializer (Iterator):
     def __init__(self,
@@ -48,22 +49,25 @@ class SimpleInitializer (Iterator):
         self.current_row = end_row
         return keys, values
 
-class NVLocalParameterServer ():
-    """Class for a local parameter server in system memory.
+class NVEParameterServer ():
+    """Wrapper class for a parameter server (can be local or remote).
 
     This class is meant to be used by NVEmbedding of type CacheType.Hierarchical.
     It can be used as a secondary cache, between the GPU cache and a remote parameter server, or as a
     local key-vector storage to back the GPU cache.
 
     Args:
-        num_embeddings (int): Size of the embedding dictionary, when set to 0, the local storage will increase until OOM
+        num_embeddings (int): Size of the embedding dictionary, when set to 0, storage will increase until OOM
                               Use erase or clear to manually remove data.
         embedding_size (int): Size of each embedding vector (in elements)
         data_type (torch.dtype): Data type of embedding vectors (float32 or float16)
-        initializer (Optional[Iterator]): Initializer for the local data.
+        initializer (Optional[Iterator]): Initializer for the data.
                                           Iterator must return a tuple of tensors, keys(int64) and values(vector with embedding_size elements of data_type per key)
-        initial_size (Optional[int]): initial amount of embeddings to allocate
-        ps_type (Optional[nve.PSType_t]): type of parameter server backend to use
+        initial_size (Optional[int]): Initial amount of embeddings to allocate
+        ps_type (Optional[nve.PSType_t]): Type of parameter server backend to use
+        extra_params: Optional[dict]: Additional paramters for the PS in dict format. plugin params under "plugin" node, table params under "table" node.
+                                      Valid parameters will depend on ps_type.
+                                      E.g. when using a Redis PS, use the following to set the server address {"plugin": {"address": "localhost:12345"}}
     """
     def __init__(self, 
                  num_embeddings: int,
@@ -71,7 +75,8 @@ class NVLocalParameterServer ():
                  data_type: torch.dtype,
                  initializer: Optional[Iterator] = None,
                  initial_size: Optional[int] = 1024,
-                 ps_type: Optional[nve.PSType_t] = nve.NVHashMap):
+                 ps_type: Optional[nve.PSType_t] = nve.NVHashMap,
+                 extra_params: Optional[dict] = {}):
         self.num_embeddings = num_embeddings
         self.embedding_size = embedding_size
         if data_type == torch.float32:
@@ -80,7 +85,8 @@ class NVLocalParameterServer ():
             self.layer_data_type = nve.DataType_t.Float16
         else:
             raise ValueError(f"Invalid data type: {data_type}")
-        self.local_parameter_server = nve.LocalParameterServer(self.num_embeddings, self.embedding_size, self.layer_data_type, initial_size, ps_type)
+        extra_params_str = dumps(extra_params)
+        self.parameter_server = nve.ParameterServerTable(self.num_embeddings, self.embedding_size, self.layer_data_type, initial_size, ps_type, extra_params_str)
 
         if initializer:
             while True:
@@ -98,13 +104,13 @@ class NVLocalParameterServer ():
             values (torch.Tensor): Tensor of value vectors (containing embedding_size elements each), matching the given keys
         """
         if keys.dtype is not torch.int64:
-            warnings.warn(f"Keys provided to NVLocalParameterServer were of type {keys.dtype} instead of int64 (converting on the fly)")
+            warnings.warn(f"Keys provided to NVEParameterServer were of type {keys.dtype} instead of int64 (converting on the fly)")
             keys = keys.long()
         values_size = torch.numel(values)
         values_needed = torch.numel(keys) * self.embedding_size
         if values_size < values_needed:
             raise ValueError(f"Values tensor has too few elements, expected {values_needed} - got {values_size}")
-        self.local_parameter_server.insert_keys(torch.numel(keys), keys.data_ptr(), values.data_ptr())
+        self.parameter_server.insert_keys(torch.numel(keys), keys.data_ptr(), values.data_ptr())
 
     def load_from_file(self, keys_path: str, values_path: str, batch_size: Optional[int] = 1024*1024):
         """Method to load key-value pairs from a numpy file.
@@ -115,7 +121,7 @@ class NVLocalParameterServer ():
             batch_size (int): Number of keys to load from the file at a time
         """
         
-        self.local_parameter_server.insert_keys_from_filepath(keys_path, values_path, batch_size)
+        self.parameter_server.insert_keys_from_filepath(keys_path, values_path, batch_size)
 
     def erase(self, keys: torch.Tensor):
         """Method to erase key-value pairs from the parameter server.
@@ -124,11 +130,11 @@ class NVLocalParameterServer ():
             keys (torch.Tensor): Tensor of int64 keys to erase
         """
         if keys.dtype is not torch.int64:
-            warnings.warn(f"Keys provided to NVLocalParameterServer were of type {keys.dtype} instead of int64 (converting on the fly)")
+            warnings.warn(f"Keys provided to NVEParameterServer were of type {keys.dtype} instead of int64 (converting on the fly)")
             keys = keys.long()
-        self.local_parameter_server.erase_keys(torch.numel(keys), keys.data_ptr())
+        self.parameter_server.erase_keys(torch.numel(keys), keys.data_ptr())
 
     def clear(self):
         """Method to clear all keys from the parameter server.
         """
-        self.local_parameter_server.clear_keys()
+        self.parameter_server.clear_keys()

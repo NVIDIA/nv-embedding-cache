@@ -310,7 +310,7 @@ public:
 
     ECError lookup_sort_gather(const LookupContextHandle& /*h_lookup*/, const IndexT* /*d_keys*/, const size_t /*len*/,
                                             int8_t* /*d_values*/, const int8_t* /*d_table*/, int8_t* /*d_auxiliary_buffer*/, size_t& /*auxiliary_buffer_bytes*/, 
-                                            uint32_t /*curr_table*/, size_t /*stride*/, cudaStream_t /*stream*/)
+                                            uint32_t /*curr_table*/, size_t /*stride*/, int64_t /*block_size*/, cudaStream_t /*stream*/)
     {
         return ECERROR_NOT_IMPLEMENTED;
     }

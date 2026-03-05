@@ -1,0 +1,4 @@
+# PyNVE Triton Server Sample Requirements
+tritonclient[all]>=2.40.0
+numpy
+

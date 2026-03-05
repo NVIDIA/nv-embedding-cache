@@ -71,6 +71,12 @@ usage:
 this will run an inference for a 1000 iterations each of 1024 bags of 32 keys using linearUVM with a cache of size 1024 bytes.
 See [inference_sample.py](../samples/pytorch/inference_sample/inference_sample.py)
 
+## Loading Checkpoint
+Loading a dcp checkpoint is straightforward. When calling dcp.load, the user is required to supply a map from a saved tensor name to NVEmbedding.weight.
+Special consideration is required when loading into a multi-process environment with "Distributed Memblock"; since all processes share the same NVEmbedding.weight underlying physical memory, only one rank should load the tensor (usually rank 0).
+See [load_sample.py](../samples/pytorch/load_checkpoint_sample/load_sample.py)
+
+
 
 
 

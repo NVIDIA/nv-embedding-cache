@@ -23,8 +23,8 @@ def is_nvhm_plugin_available():
     try:
         import torch
         from pynve.torch import nve_ps
-        # Try to create a minimal NVLocalParameterServer - this loads the nvhm plugin
-        ps = nve_ps.NVLocalParameterServer(0, 1, torch.float32)
+        # Try to create a minimal NVEParameterServer - this loads the nvhm plugin
+        ps = nve_ps.NVEParameterServer(0, 1, torch.float32)
         del ps
         return True
     except Exception:

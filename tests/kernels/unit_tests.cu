@@ -64,13 +64,14 @@ class EmbeddingCacheRefTest : public ::testing::Test {
         CHECK_CUDA_ERROR(m_cache_ptr->modify_context_destroy(m_handle_modify));
     }
 
-    void LaunchTest(uint64_t num_rows, uint32_t num_elements, uint32_t batch, uint32_t hotness, bool allocDataOnHost) {
+    void LaunchTest(uint64_t num_rows, uint32_t num_elements, uint32_t batch, uint32_t hotness, bool allocDataOnHost, int64_t kernel_param = 0) {
         m_num_rows = num_rows;
         m_num_elements = num_elements;
         m_batch = batch;
         m_hotness = hotness;
         m_num_keys = static_cast<IndexType>(m_batch) * static_cast<IndexType>(m_hotness);
         m_allocDataOnHost = allocDataOnHost;
+        m_kernel_param = kernel_param;
         AllocateTable();
         InitCache();
         InitTestExtras();
@@ -92,6 +93,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     uint32_t m_hotness{0};
     IndexType m_num_keys{0};
     bool m_allocDataOnHost{false};
+    int64_t m_kernel_param{0};
   protected:
   
     ElemType* syncTable() {
@@ -1015,6 +1017,7 @@ class EmbeddingCacheLookupSortGatherRefTest : public EmbeddingCacheRefTest<T> {
             bytes,
             this->m_batch * this->m_hotness, 
             this->m_num_elements * sizeof(ElemType), 
+            this->m_kernel_param,
             cache_data, 
             this->m_stream)));
         ASSERT_TRUE(bytes > 0 && bytes != static_cast<size_t>(-1));
@@ -1032,6 +1035,7 @@ class EmbeddingCacheLookupSortGatherRefTest : public EmbeddingCacheRefTest<T> {
             bytes,
             this->m_batch * this->m_hotness, 
             this->m_num_elements * sizeof(ElemType), 
+            1024,
             cache_data, 
             this->m_stream)));
 
@@ -1065,8 +1069,10 @@ TYPED_TEST_P(EmbeddingCacheLookupSortGatherRefTest, TestSortGather) {
         for (const auto hotness : {1}) {
             for (const auto num_elements : {128, 1, 31}) {
                 for(const auto allocOnHost: {false}){
-                    NVE_DEBUG_PRINTF_("running test on batch %d hotness %d num_elements %d allocateDataOn: %s\n", batch, hotness, num_elements, allocOnHost?"host":"device");
-                    this->LaunchTest(262144, num_elements, batch, hotness, allocOnHost);
+                    for (const auto kernel_param : {1, 17, 32, 4096}) {
+                        NVE_DEBUG_PRINTF_("running test on batch %d hotness %d num_elements %d allocateDataOn: %s kernel_param %d\n", batch, hotness, num_elements, allocOnHost?"host":"device", kernel_param);
+                        this->LaunchTest(262144, num_elements, batch, hotness, allocOnHost, kernel_param);
+                    }
                 }
             }
         }

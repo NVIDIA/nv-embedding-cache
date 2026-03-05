@@ -151,7 +151,7 @@ MPIMemBlock::MPIMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t
 
 MPIMemBlock::MPIMemBlock(size_t size_to_alloc, const std::vector<size_t> ranks, const std::vector<int> devices) : MemBlock(MemBlockType::MPI) {
     auto mpi_env = std::make_shared<nve::MPIEnv>(ranks, devices);
-    mpi_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, mpi_env);
+    mpi_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, mpi_env, nve::BufferLocation::ALLOCATION_GPU_MEM);
     NVE_CHECK_(mpi_buffer_->ptr() != nullptr);
 }
 
@@ -162,11 +162,22 @@ void* MPIMemBlock::get_ptr() const {
 DistMemBlock::DistMemBlock(std::shared_ptr<DistributedEnv> env, size_t row_size, size_t num_embeddings, nve::DataType_t dtype) 
     : MemBlock(MemBlockType::MPI) {
     auto size_to_alloc = row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype));
-    dist_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, env);
+    dist_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, env, nve::BufferLocation::ALLOCATION_GPU_MEM);
     NVE_CHECK_(dist_buffer_->ptr() != nullptr);
 }
 
 void* DistMemBlock::get_ptr() const {
+    return dist_buffer_->ptr();
+}
+
+DistHostMemBlock::DistHostMemBlock(std::shared_ptr<DistributedEnv> env, size_t row_size, size_t num_embeddings, nve::DataType_t dtype) 
+    : MemBlock(MemBlockType::MPI) {
+    auto size_to_alloc = row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype));
+    dist_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, env, nve::BufferLocation::ALLOCATION_SYS_MEM);
+    NVE_CHECK_(dist_buffer_->ptr() != nullptr);
+}
+
+void* DistHostMemBlock::get_ptr() const {
     return dist_buffer_->ptr();
 }
 

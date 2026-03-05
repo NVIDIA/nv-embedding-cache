@@ -221,7 +221,7 @@ int main(int argc, char* argv[]) {
         const int64_t keys_per_partition = host_cache_size / row_size / num_partitions;
 
         std::vector<std::string> plugin_names{"nvhm"};
-        nlohmann::json mw_conf = {
+        nlohmann::json nvhm_conf = {
           {"key_size", sizeof(IndexT)},
           {"max_value_size", row_size},
           {"num_partitions", num_partitions},
@@ -236,7 +236,7 @@ int main(int argc, char* argv[]) {
           }
         };
         nve::load_host_table_plugins(plugin_names.begin(), plugin_names.end());
-        nve::host_table_factory_ptr_t mw_fac{
+        nve::host_table_factory_ptr_t nvhm_fac{
           nve::create_host_table_factory(R"({"implementation": "nvhm_map"})"_json)};
           
         using layer_type = nve::HierarchicalEmbeddingLayer<IndexT>;
@@ -247,7 +247,7 @@ int main(int argc, char* argv[]) {
           auto gpu_tab = std::make_shared<nve::GpuTable<IndexT>>(gpu_cfg);
     
           // Create host cache
-          auto mw_tab = mw_fac->produce(4711, mw_conf);
+          auto nvhm_tab = nvhm_fac->produce(4711, nvhm_conf);
     
           // Create mock ps
           nve::HostTableConfig remote_cfg;
@@ -261,7 +261,7 @@ int main(int argc, char* argv[]) {
             insert_target_hitrate > 0.f ?
             std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>{insert_target_hitrate, insert_target_hitrate, insert_target_hitrate}) :
             nullptr;
-          std::vector<std::shared_ptr<nve::Table>> tables{gpu_tab, mw_tab, mock_remote};
+          std::vector<std::shared_ptr<nve::Table>> tables{gpu_tab, nvhm_tab, mock_remote};
           auto emb_layer = std::make_shared<layer_type>(layer_cfg, tables);
           layers.push_back(emb_layer);
         }

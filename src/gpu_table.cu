@@ -251,7 +251,6 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
   
   auto lookup_ctx{gpu_table_ctx->lookup_context()};
   KernelType mode = get_kernel_mode(config, num_keys);
-  
   switch (mode) {
     case KernelType::DynamicKernel: 
     {
@@ -274,6 +273,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
     case KernelType::SortGather:
     {
       size_t aux_buffer_size = 0;
+      int64_t tile_size = config.kernel_mode_value > 0 ? config.kernel_mode_value : 1024;
       NVE_CHECK_(cache->lookup_sort_gather(
         lookup_ctx,
         reinterpret_cast<const KeyType*>(keys),
@@ -284,6 +284,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
         aux_buffer_size,
         0, /*currTable*/
         value_stride,
+        tile_size,
         stream));
       int8_t* aux_buffer = (int8_t*)gpu_table_ctx->get_buffer("d_aux_buffer", aux_buffer_size, false);
       NVE_CHECK_(cache->lookup_sort_gather(
@@ -296,6 +297,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
         aux_buffer_size, 
         0, /*currTable*/
         value_stride, 
+        tile_size,
         stream));
       break;
     }

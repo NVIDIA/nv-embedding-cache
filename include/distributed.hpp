@@ -40,9 +40,14 @@ public:
   virtual void all_gather(uintptr_t send_buffer, uintptr_t recv_buffer, size_t size) = 0;
 };
 
+enum class BufferLocation {
+  ALLOCATION_GPU_MEM,
+  ALLOCATION_SYS_MEM,
+};
+
 class CUDADistributedBuffer{
 public:
-  CUDADistributedBuffer(uint64_t size, std::shared_ptr<DistributedEnv> dist_env);
+  CUDADistributedBuffer(uint64_t size, std::shared_ptr<DistributedEnv> dist_env, BufferLocation location);
   ~CUDADistributedBuffer();
 
   std::byte* ptr() const { return buffer_; }
@@ -62,7 +67,7 @@ private:
   std::vector<int> all_devices_;
   
   size_t get_device_granularity(CUmemAllocationProp prop);
-  void init_single_host(uint64_t size);
+  void init_single_host(uint64_t size, BufferLocation location);
   void init_multi_host(uint64_t size);
   bool check_imex();
   uint64_t collect_devices(std::vector<int>& all_devices);

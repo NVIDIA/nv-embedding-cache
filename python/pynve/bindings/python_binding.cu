@@ -58,7 +58,8 @@ PYBIND11_MODULE(nve, m) {
         .def("pooling_backprop", &NVEmbedBinding<IndexT>::pooling_backprop, py::call_guard<py::gil_scoped_release>())
         .def("update", &NVEmbedBinding<IndexT>::update, py::call_guard<py::gil_scoped_release>())
         .def("insert", &NVEmbedBinding<IndexT>::insert, py::call_guard<py::gil_scoped_release>())
-        .def("clear", &NVEmbedBinding<IndexT>::clear, py::call_guard<py::gil_scoped_release>());
+        .def("clear", &NVEmbedBinding<IndexT>::clear, py::call_guard<py::gil_scoped_release>())
+        .def("erase", &NVEmbedBinding<IndexT>::erase, py::call_guard<py::gil_scoped_release>());
 
     py::class_<HierarchicalEmbedding<IndexT>, NVEmbedBinding<IndexT>> (m, "HierarchicalEmbedding")
         .def(py::init<size_t, nve::DataType_t, uint64_t, uint64_t, table_ptr_t, bool, int, EmbedLayerConfig>())
@@ -76,7 +77,9 @@ PYBIND11_MODULE(nve, m) {
     py::class_<EmbedLayerConfig>(m, "EmbedLayerConfig")
         .def(py::init<>())
         .def_readwrite("logging_interval", &EmbedLayerConfig::logging_interval)
-        .def_readwrite("kernel_mode", &EmbedLayerConfig::kernel_mode);
+        .def_readwrite("kernel_mode", &EmbedLayerConfig::kernel_mode)
+        .def_readwrite("kernel_mode_value_1", &EmbedLayerConfig::kernel_mode_value_1)
+        .def_readwrite("kernel_mode_value_2", &EmbedLayerConfig::kernel_mode_value_2);
 
     py::class_<nve::Table, std::shared_ptr<nve::Table>>(m, "Table");
 
@@ -122,31 +125,36 @@ PYBIND11_MODULE(nve, m) {
     py::class_<DistMemBlock, MemBlock, std::shared_ptr<DistMemBlock>>(m, "DistMemBlock")
         .def(py::init<std::shared_ptr<DistributedEnv>, size_t, size_t, nve::DataType_t>());
 
+    py::class_<DistHostMemBlock, MemBlock, std::shared_ptr<DistHostMemBlock>>(m, "DistHostMemBlock")
+        .def(py::init<std::shared_ptr<DistributedEnv>, size_t, size_t, nve::DataType_t>());
+
     py::class_<UserMemBlock, MemBlock, std::shared_ptr<UserMemBlock>>(m, "UserMemBlock")
         .def(py::init<uint64_t>());
 
     py::class_<ManagedMemBlock, MemBlock, std::shared_ptr<ManagedMemBlock>>(m, "ManagedMemBlock")
         .def(py::init<size_t, size_t, nve::DataType_t, std::vector<int>>());
 
-    py::enum_<LocalParameterServer::PSType_t>(m, "PSType_t")
-        .value("NVHashMap", LocalParameterServer::PSType_t::NVHashMap)
-        .value("Abseil", LocalParameterServer::PSType_t::Abseil)
-        .value("ParallelHash", LocalParameterServer::PSType_t::ParallelHash)
+    py::enum_<ParameterServerTable::PSType_t>(m, "PSType_t")
+        .value("NVHashMap", ParameterServerTable::PSType_t::NVHashMap)
+        .value("Abseil", ParameterServerTable::PSType_t::Abseil)
+        .value("ParallelHash", ParameterServerTable::PSType_t::ParallelHash)
+        .value("Redis", ParameterServerTable::PSType_t::Redis)
         .export_values();
 
-    py::class_<LocalParameterServer, nve::Table, std::shared_ptr<LocalParameterServer> /* <- holder type */>(m, "LocalParameterServer")
-        .def(py::init<uint64_t, uint64_t, nve::DataType_t, uint64_t, LocalParameterServer::PSType_t>(),
+    py::class_<ParameterServerTable, nve::Table, std::shared_ptr<ParameterServerTable> /* <- holder type */>(m, "ParameterServerTable")
+        .def(py::init<uint64_t, uint64_t, nve::DataType_t, uint64_t, ParameterServerTable::PSType_t, std::string>(),
             py::arg("num_rows"),
             py::arg("row_elements"),
             py::arg("data_type"),
             py::arg("initial_size") = 0,
-            py::arg("ps_type") = LocalParameterServer::PSType_t::NVHashMap)
-        .def("insert_keys", &LocalParameterServer::insert_keys)
-        .def("erase_keys", &LocalParameterServer::erase_keys)
-        .def("clear_keys", &LocalParameterServer::clear_keys)
-        .def("insert_keys_from_numpy_file", &LocalParameterServer::insert_keys_from_numpy_file)
-        .def("insert_keys_from_filepath", &LocalParameterServer::insert_keys_from_filepath)
-        .def("insert_keys_from_binary_file", &LocalParameterServer::insert_keys_from_binary_file);
+            py::arg("ps_type") = ParameterServerTable::PSType_t::NVHashMap,
+            py::arg("extra_params") = std::string())
+        .def("insert_keys", &ParameterServerTable::insert_keys)
+        .def("erase_keys", &ParameterServerTable::erase_keys)
+        .def("clear_keys", &ParameterServerTable::clear_keys)
+        .def("insert_keys_from_numpy_file", &ParameterServerTable::insert_keys_from_numpy_file)
+        .def("insert_keys_from_filepath", &ParameterServerTable::insert_keys_from_filepath)
+        .def("insert_keys_from_binary_file", &ParameterServerTable::insert_keys_from_binary_file);
 
     py::class_<DistributedEnv, PyDistributedEnv /* <--- trampoline */, py::smart_holder>(m, "DistributedEnv")
         .def(py::init<>())

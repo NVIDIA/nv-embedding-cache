@@ -17,8 +17,10 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <iostream>
@@ -66,6 +68,15 @@ class DefaultLoggerBackend : public LoggerBackend {
   ~DefaultLoggerBackend() override {}
   void log(const LogLevel_t level, const std::string_view& msg) noexcept override {
     std::ostringstream o;
+    const auto now = std::chrono::system_clock::now();
+    const auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()) % 1000000;
+    std::tm tm_buf;
+    localtime_r(&time_t_now, &tm_buf);
+    o << '[' << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << '.'
+      << std::setfill('0') << std::setw(6) << us.count() << ']';
+
     o << prefix_ << '[';
     switch (level) {
       case LogLevel_t::Critical:

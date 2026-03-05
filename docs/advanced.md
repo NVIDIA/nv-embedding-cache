@@ -47,4 +47,8 @@ To run the PyTest tests use:
 ```bash
 pytest tests
 ```
-* Note: make sure to run ```pip install .``` before testing.
+* Note: make sure to install the python bindings and required packages before testing, using:
+    ```bash
+    pip install .
+    PIP_CONSTRAINT="" pip install -r benchmarks/requirements.txt
+    ```

@@ -535,13 +535,14 @@ public:
      * @param auxiliary_buffer_bytes - Size of the auxiliry buffer; if d_auxiliary_buffer isn't nullptr the function will validate this is large enough, if d_auxiliary_buffer is nullptr the function will return the required size
      * @param curr_table – Index of the table to perform the query on. 
      * @param stride – The length in bytes between two consecutive “rows” in d_values array.
+     * @param block_value - The size of the block that kernel will use.
      * @param stream -  A cuda stream to perform the operation on.
      * 
      * @return #ECERROR_SUCCESS on success, might return different values based on implementation
     */
 
     virtual ECError lookup_sort_gather(const LookupContextHandle& lookup_handle, const IndexT* d_keys, const size_t len,
-                                            int8_t* d_values, const int8_t* d_table, int8_t* d_auxiliary_buffer, size_t& auxiliary_buffer_bytes, uint32_t curr_table, size_t stride, cudaStream_t stream) = 0;
+                                            int8_t* d_values, const int8_t* d_table, int8_t* d_auxiliary_buffer, size_t& auxiliary_buffer_bytes, uint32_t curr_table, size_t stride, int64_t block_size, cudaStream_t stream) = 0;
 
 
     /**

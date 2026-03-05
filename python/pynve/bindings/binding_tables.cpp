@@ -143,12 +143,17 @@ void PyNVETable::update_accumulate_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<
     table_->update_accumulate_bw(ctx, n, keys, update_stride, update_size, updates, update_dtype);
 }
 
-LocalParameterServer::LocalParameterServer(
+uint64_t PyNVETable::get_num_rows() const {
+    return 0;
+}
+
+ParameterServerTable::ParameterServerTable(
     uint64_t num_rows,
     uint64_t row_elements,
     nve::DataType_t data_type,
     uint64_t initial_size,
-    LocalParameterServer::PSType_t ps_type) :
+    ParameterServerTable::PSType_t ps_type,
+    const std::string& extra_params) :
     PyNVETable({}), num_rows_(num_rows), row_elements_(row_elements), data_type_(data_type) {
     row_bytes_ = row_elements_ * static_cast<uint64_t>(dtype_size(data_type_));
     const int64_t num_partitions = 1; // Single partition is better for inference
@@ -177,40 +182,81 @@ LocalParameterServer::LocalParameterServer(
         cfg["partitioner"] = "always_zero";
     }
 
+    // An empty json, instead of a null json (the default c'tor)
+    // Since merge_patch() with a null json results with a null json, regardless of the other json
+    const auto empty_json = nlohmann::json(nlohmann::json::value_t::object);
+    auto json_extra_params = (extra_params.length() > 0) ? nlohmann::json::parse(extra_params) : empty_json;
+    nlohmann::json extra_params_plugin(empty_json);
+    nlohmann::json extra_params_table(empty_json);
+    auto constexpr PLUGIN_CFG = "plugin";
+    auto constexpr TABLE_CFG = "table";
+
+    if (json_extra_params.contains(PLUGIN_CFG)) {
+        extra_params_plugin = json_extra_params[PLUGIN_CFG];
+    }
+    if (json_extra_params.contains(TABLE_CFG)) {
+        extra_params_table = json_extra_params[TABLE_CFG];
+    }
+    cfg.merge_patch(extra_params_table);
+
     switch (ps_type) {
         default:
         {
             NVE_LOG_WARNING_("Invalid ps_type, defaulting to NVHashMap");
             [[fallthrough]];
         }
-        case LocalParameterServer::PSType_t::NVHashMap:
+        case ParameterServerTable::PSType_t::NVHashMap:
         {
             load_host_table_plugin("nvhm");
-            auto mw_fac = nve::create_host_table_factory(R"({"implementation": "nvhm_map"})"_json);
-            NVE_CHECK_(mw_fac != nullptr, "Failed to initialize MW factory");
-            auto mw_tab = mw_fac->produce(0, cfg);
-            NVE_CHECK_(mw_tab != nullptr, "Failed to produce MW table");
-            set_table(std::dynamic_pointer_cast<nve::Table>(mw_tab));
+            auto nvhm_fac = nve::create_host_table_factory(R"({"implementation": "nvhm_map"})"_json);
+            NVE_CHECK_(nvhm_fac != nullptr, "Failed to initialize NVHM factory");
+            auto nvhm_tab = nvhm_fac->produce(100, cfg);
+            NVE_CHECK_(nvhm_tab != nullptr, "Failed to produce NVHM table");
+            set_table(std::dynamic_pointer_cast<nve::Table>(nvhm_tab));
         }
         break;
-        case LocalParameterServer::PSType_t::Abseil:
+        case ParameterServerTable::PSType_t::Abseil:
         {
             load_host_table_plugin("abseil");
             auto abs_fac = nve::create_host_table_factory(R"({"implementation": "abseil_flat_map"})"_json);
             NVE_CHECK_(abs_fac != nullptr, "Failed to initialize Abseil factory");
-            auto abs_tab = abs_fac->produce(0, cfg);
+            auto abs_tab = abs_fac->produce(200, cfg);
             NVE_CHECK_(abs_tab != nullptr, "Failed to produce Abseil table");
             set_table(std::dynamic_pointer_cast<nve::Table>(abs_tab));
         }
         break;
-        case LocalParameterServer::PSType_t::ParallelHash:
+        case ParameterServerTable::PSType_t::ParallelHash:
         {
             load_host_table_plugin("phmap");
             auto ph_fac = nve::create_host_table_factory(R"({"implementation": "phmap_flat_map"})"_json);
             NVE_CHECK_(ph_fac != nullptr, "Failed to initialize PH factory");
-            auto ph_tab = ph_fac->produce(0, cfg);
+            auto ph_tab = ph_fac->produce(300, cfg);
             NVE_CHECK_(ph_tab != nullptr, "Failed to produce PH table");
             set_table(std::dynamic_pointer_cast<nve::Table>(ph_tab));
+        }
+        break;
+        case ParameterServerTable::PSType_t::Redis:
+        {
+            load_host_table_plugin("redis");
+            auto redis_fac_cfg = R"(
+                {
+                "address": "localhost:7000",
+                "implementation": "redis_cluster"
+                })"_json;
+            redis_fac_cfg.merge_patch(extra_params_plugin);
+            host_table_factory_ptr_t redis_fac{create_host_table_factory(redis_fac_cfg)};
+            NVE_CHECK_(redis_fac != nullptr, "Failed to initialize Redis factory");
+
+            nlohmann::json redis_cfg = {
+                {"mask_size", sizeof(uint64_t)},
+                {"key_size", sizeof(KeyType)},
+                {"max_value_size", row_bytes_},
+                {"value_dtype", to_string(data_type)},
+            };
+            redis_cfg.merge_patch(extra_params_table);
+            auto redis_tab = redis_fac->produce(400, redis_cfg);
+            NVE_CHECK_(redis_tab != nullptr, "Failed to produce Redis table");
+            set_table(std::dynamic_pointer_cast<nve::Table>(redis_tab));
         }
         break;
     }
@@ -219,11 +265,11 @@ LocalParameterServer::LocalParameterServer(
     ctx_ = create_execution_context(0, 0, nullptr, nullptr);
 }
 
-LocalParameterServer::~LocalParameterServer() {
+ParameterServerTable::~ParameterServerTable() {
     ctx_.reset();
 }
 
-void LocalParameterServer::insert_keys(size_t num_keys, uintptr_t keys, uintptr_t values) {
+void ParameterServerTable::insert_keys(size_t num_keys, uintptr_t keys, uintptr_t values) {
     NVE_CHECK_(keys != 0, "Invalid Keys tensor");
     NVE_CHECK_(values != 0, "Invalid Values tensor");
     const auto keys_buffer_size = num_keys * sizeof(KeyType);
@@ -238,7 +284,7 @@ void LocalParameterServer::insert_keys(size_t num_keys, uintptr_t keys, uintptr_
                 values_bw);
 }
 
-void LocalParameterServer::insert_keys_from_tensor_file(std::shared_ptr<TensorFileFormatBase> keys_file_reader, std::shared_ptr<TensorFileFormatBase> values_file_reader, uint64_t batch_size) {
+void ParameterServerTable::insert_keys_from_tensor_file(std::shared_ptr<TensorFileFormatBase> keys_file_reader, std::shared_ptr<TensorFileFormatBase> values_file_reader, uint64_t batch_size) {
     auto keys_num_rows = keys_file_reader->get_num_rows();
     auto values_num_rows = values_file_reader->get_num_rows();
     NVE_CHECK_(keys_num_rows == values_num_rows, "Keys/Values number of rows mismatch");
@@ -273,7 +319,7 @@ std::string getFileExtension(const std::string& filepath) {
     return extension;
 }
 
-void LocalParameterServer::insert_keys_from_numpy_file(py::object keys_stream, py::object values_stream, uint64_t batch_size) {
+void ParameterServerTable::insert_keys_from_numpy_file(py::object keys_stream, py::object values_stream, uint64_t batch_size) {
     std::shared_ptr<StreamWrapperBase> keys_stream_wrapper = std::make_shared<PyStreamWrapper>(keys_stream);
     std::shared_ptr<StreamWrapperBase> values_stream_wrapper = std::make_shared<PyStreamWrapper>(values_stream);
 
@@ -286,7 +332,7 @@ void LocalParameterServer::insert_keys_from_numpy_file(py::object keys_stream, p
     insert_keys_from_tensor_file(keys_file_reader, values_file_reader, batch_size);
 }
 
-void LocalParameterServer::insert_keys_from_binary_file(py::object keys_stream, py::object values_stream, uint64_t batch_size) {
+void ParameterServerTable::insert_keys_from_binary_file(py::object keys_stream, py::object values_stream, uint64_t batch_size) {
     std::shared_ptr<StreamWrapperBase> keys_stream_wrapper = std::make_shared<PyStreamWrapper>(keys_stream);
     std::shared_ptr<StreamWrapperBase> values_stream_wrapper = std::make_shared<PyStreamWrapper>(values_stream);
     std::shared_ptr<BinaryTensorFileFormat> keys_file_reader = std::make_shared<BinaryTensorFileFormat>(keys_stream_wrapper, sizeof(KeyType));
@@ -294,7 +340,7 @@ void LocalParameterServer::insert_keys_from_binary_file(py::object keys_stream, 
     insert_keys_from_tensor_file(keys_file_reader, values_file_reader, batch_size);
 }
 
-void LocalParameterServer::insert_keys_from_filepath(const std::string& keys_path, const std::string& values_path, uint64_t batch_size) {
+void ParameterServerTable::insert_keys_from_filepath(const std::string& keys_path, const std::string& values_path, uint64_t batch_size) {
     std::shared_ptr<StreamWrapperBase> keys_stream_wrapper = std::make_shared<InputFileStreamWrapper>(keys_path);
     std::shared_ptr<StreamWrapperBase> values_stream_wrapper = std::make_shared<InputFileStreamWrapper>(values_path);
     std::string keys_extension = getFileExtension(keys_path);
@@ -321,15 +367,20 @@ void LocalParameterServer::insert_keys_from_filepath(const std::string& keys_pat
     }
 }
 
-void LocalParameterServer::erase_keys(size_t num_keys, uintptr_t keys) {
+void ParameterServerTable::erase_keys(size_t num_keys, uintptr_t keys) {
     NVE_CHECK_(keys != 0, "Invalid Keys tensor");
     const auto keys_buffer_size = num_keys * sizeof(KeyType);
     auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "keys", reinterpret_cast<const void*>(keys), keys_buffer_size);
     erase_bw(ctx_, static_cast<int64_t>(num_keys), keys_bw);
 }
 
-void LocalParameterServer::clear_keys() {
+void ParameterServerTable::clear_keys() {
     clear(ctx_);
+}
+
+uint64_t ParameterServerTable::get_num_rows() const
+{
+    return num_rows_;
 }
 
 } // namespace nve

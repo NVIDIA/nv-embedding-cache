@@ -45,6 +45,10 @@ def config_to_nve_config(config: dict):
         embed_config.kernel_mode = config["kernel_mode"]
     if "logging_interval" in config:
         embed_config.logging_interval = config["logging_interval"]
+    if "kernel_mode_value_1" in config:
+        embed_config.kernel_mode_value_1 = config["kernel_mode_value_1"]
+    if "kernel_mode_value_2" in config:
+        embed_config.kernel_mode_value_2 = config["kernel_mode_value_2"]
     return embed_config
 
 class CacheType(Enum):
@@ -101,7 +105,7 @@ class NVEmbeddingBase(torch.nn.Module):
         cache_type (CacheType): Type of caching strategy to use, see CacheType enum for more details
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Required for LinearUVM and Hierarchical. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
-        remote_interface (Optional[nve.Table | nve_ps.NVLocalParameterServer], optional): Interface for remote storage. Required for Hierarchical. Defaults to None.
+        remote_interface (Optional[nve.Table | nve_ps.NVEParameterServer], optional): Interface for remote storage. Required for Hierarchical. Defaults to None.
         weight_init (Optional[torch.Tensor], optional): Initial values for embeddings. Not supported with Hierarchical. Defaults to None.
         memblock (Optional[nve.MemBlock], optional): Memblock for LinearUVM. Defaults to None.
         optimize_for_training (bool, optional): Whether to optimize caching for training vs inference. Defaults to True.
@@ -115,14 +119,13 @@ class NVEmbeddingBase(torch.nn.Module):
                  cache_type: CacheType, * ,  
                  gpu_cache_size: int = 0, 
                  host_cache_size: int = 0,
-                 remote_interface: Optional[nve.Table | nve_ps.NVLocalParameterServer] = None, 
+                 remote_interface: Optional[nve.Table | nve_ps.NVEParameterServer] = None, 
                  weight_init: Optional[torch.Tensor] = None, 
                  memblock: Optional[nve.MemBlock] = None,
                  optimize_for_training: bool = True, 
                  device : Optional[torch.device] = None, 
                  id : Optional[int] = None,
                  config: Optional[dict] = None):
-        
         super().__init__()
 
         self.config = config_to_nve_config(config)
@@ -140,13 +143,15 @@ class NVEmbeddingBase(torch.nn.Module):
             raise ValueError("NV Embedding only supports cuda devices")
         self.device_index = self.device.index if self.device.index is not None else torch.cuda.current_device()
         self.id = _NVENameManager.get_id(id)
-        
+        self.table_ids = {}
+
         if cache_type == CacheType.NoCache:
             if (weight_init != None):
                 tensor_storage = weight_init.detach().clone().to(self.device)
             else:
                 tensor_storage = torch.empty(num_embeddings, embedding_size, dtype=data_type, device=self.device)
             self.emb_layer = nve.GPUEmbedding(embedding_size, num_embeddings, self.layer_data_type, tensor_storage.data_ptr(), self.device_index, self.config)
+            self.table_ids = {0: 'gpu'}
         elif cache_type == CacheType.LinearUVM:
             if gpu_cache_size == 0:
                 raise ValueError("GPU cache size > 0 is required for UVM embedding")
@@ -156,6 +161,7 @@ class NVEmbeddingBase(torch.nn.Module):
             tensor_storage = torch.utils.dlpack.from_dlpack(self.emb_layer.get_dl_tensor(self.layer_data_type))
             if (weight_init != None):
                 tensor_storage.copy_(weight_init)
+            self.table_ids = {0: 'gpu_cache'}
         elif cache_type == CacheType.Hierarchical:
             if remote_interface == None:
                 raise ValueError("Remote interface is required for hierarchical embedding")
@@ -163,12 +169,14 @@ class NVEmbeddingBase(torch.nn.Module):
                 raise ValueError("GPU cache size > 0 is required for hierarchical embedding")
             if weight_init != None:
                 raise ValueError("Weight init is not supported for hierarchical embedding")
-            if isinstance(remote_interface, nve_ps.NVLocalParameterServer):
-                remote_interface = remote_interface.local_parameter_server
+            if isinstance(remote_interface, nve_ps.NVEParameterServer):
+                remote_interface = remote_interface.parameter_server
             self.emb_layer = nve.HierarchicalEmbedding(embedding_size, self.layer_data_type, gpu_cache_size, host_cache_size, remote_interface, optimize_for_training, self.device_index, self.config)
             tensor_storage = torch.sparse_coo_tensor(size=(num_embeddings, embedding_size), dtype=data_type, device=self.device)
         self.weight = CachedTable(tensor_storage, cache=self.emb_layer)
-    
+        self.table_ids = {0: 'gpu_cache'}
+        self.table_ids |= {1: 'host_cache', 2: 'remote_ps'} if host_cache_size > 0 else {1: 'remote_ps'}
+
     def to(self, *args, **kwargs):
         # since the weights need to remain on cpu in case of non dummy weight need to hijack this function 
         # and keep weights on the cpu
@@ -218,6 +226,19 @@ class NVEmbeddingBase(torch.nn.Module):
     def clear(self):
         self.emb_layer.clear(torch.cuda.current_stream(self.device).cuda_stream)
 
+    def erase(self, keys : torch.Tensor, table_id : int):
+        """Erase keys from a table in the embedding layer.
+
+        Keys not resident in the table will be ignored.
+        It uses the current CUDA stream to ensure proper synchronization.
+        The erase is asynchronous and might not be visible to the host immediately.
+
+        Args:
+            keys (torch.Tensor): Tensor of integer keys to erase
+            table_id (int): Index of the table in the layer to erase from
+        """
+        self.emb_layer.erase(torch.numel(keys), keys.data_ptr(), table_id, torch.cuda.current_stream(self.device).cuda_stream)
+
     def load_from_stream(self, stream):
         self.emb_layer.load_tensor_from_stream(stream, self.id)
 
@@ -239,7 +260,7 @@ class NVEmbedding(NVEmbeddingBase):
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
         memblock (Optional[nve.MemBlock]): Memblock for LinearUVM. Defaults to None.
-        remote_interface (Optional[nve.Table | nve_ps.NVLocalParameterServer]): Interface for remote storage. Required for hierarchical embedding. Defaults to None.
+        remote_interface (Optional[nve.Table | nve_ps.NVEParameterServer]): Interface for remote storage. Required for hierarchical embedding. Defaults to None.
         weight_init (Optional[torch.Tensor]): Initial values for embedding weights. Not supported for hierarchical embedding. Defaults to None.
         optimize_for_training (bool): Whether to optimize caching for training vs inference. Defaults to True.
         id (int, optional): Identifier for the embedding layer. Defaults to None, if None the layer will be assigned a Id automatically. Ids must be unique inside a nested model, in order for serialization to work.
@@ -254,7 +275,7 @@ class NVEmbedding(NVEmbeddingBase):
                     gpu_cache_size: int = 0, 
                     host_cache_size: int = 0,
                     memblock: Optional[nve.MemBlock] = None, 
-                    remote_interface: Optional[nve.Table | nve_ps.NVLocalParameterServer] = None, 
+                    remote_interface: Optional[nve.Table | nve_ps.NVEParameterServer] = None, 
                     weight_init: Optional[torch.Tensor] = None, 
                     optimize_for_training: bool = True, 
                     device : Optional[torch.device] = None, 
@@ -300,7 +321,7 @@ class NVEmbeddingBag(NVEmbeddingBase):
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
         memblock (Optional[nve.MemBlock]): Memblock for LinearUVM. Defaults to None.
-        remote_interface (Optional[nve.Table | nve_ps.NVLocalParameterServer]): Interface for remote storage. Required for hierarchical embedding. Defaults to None.
+        remote_interface (Optional[nve.Table | nve_ps.NVEParameterServer]): Interface for remote storage. Required for hierarchical embedding. Defaults to None.
         weight_init (Optional[torch.Tensor]): Initial values for embedding weights. Not supported for hierarchical embedding. Defaults to None.
         optimize_for_training (bool): Whether to optimize caching for training vs inference. Defaults to True.
         device (torch.device, optional): Device to use for the embedding layer. Defaults to 'cuda', note gpu cache currently unable to move between devices
@@ -314,7 +335,7 @@ class NVEmbeddingBag(NVEmbeddingBase):
                  mode : str, * ,  
                  gpu_cache_size: int = 0, 
                  host_cache_size: int = 0, 
-                 remote_interface: Optional[nve.Table | nve_ps.NVLocalParameterServer] = None, 
+                 remote_interface: Optional[nve.Table | nve_ps.NVEParameterServer] = None, 
                  memblock: Optional[nve.MemBlock] = None, 
                  weight_init: Optional[torch.Tensor] = None, 
                  optimize_for_training: bool = True, 
