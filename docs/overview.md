@@ -1,6 +1,6 @@
 # Overview
 
-The NV Embedding Cache SDK aims to accelerate all manner of embedding ops (similar to [torch.nn.Embedding](https://pytorch.org/docs/stable/generated/torch.nn.Embedding.html) or [torch.nn.EmbeddingBag](https://pytorch.org/docs/stable/generated/torch.nn.EmbeddingBag.html)), typically used in recommender system models. The SDK includes optimized CUDA kernels and various caching mechanisms, on GPU and CPU. Several embedding implementations are available for handling different sizes of embeddings, from pure GPU implementations suitable for smaller embeddings to hierarchical combination of GPU cache, CPU cache and remote parameter server, suitable for extermely large embeddings. The bulk of the code is in C++ with python bindings for easy integration with [PyTorch](https://pytorch.org/). See additional API details in: [cpp_api.md](cpp_api.md) and [python_api.md](python_api.md).
+The NV Embedding Cache SDK aims to accelerate all manner of embedding ops (similar to [torch.nn.Embedding](https://pytorch.org/docs/stable/generated/torch.nn.Embedding.html) or [torch.nn.EmbeddingBag](https://pytorch.org/docs/stable/generated/torch.nn.EmbeddingBag.html)), typically used in recommender system models. The SDK includes optimized CUDA kernels and various caching mechanisms, on GPU and CPU. Several embedding implementations are available for handling different sizes of embeddings, from pure GPU implementations suitable for smaller embeddings to hierarchical combination of GPU cache, CPU cache and remote parameter server, suitable for extermely large embeddings. The bulk of the code is in C++ with python bindings for easy integration with [PyTorch](https://pytorch.org/). See additional API details in: [cpp_api.md](cpp_api.md), [c_api.md](c_api.md) and [python_api.md](python_api.md).
 The SDK leverages other NVIDIA libraries such as [cuEmbed](../third_party/cuembed/README.md) and [nvHashMap](../third_party/nvhashmap/README.md) as well as several 3rd party libraries, all of which can be found at [third_party/](../third_party/) (detailed list in the main [README.md](../README.md#3rd-party-dependencies))
 
 The main focus is on inference, training support is limited.
@@ -97,6 +97,7 @@ For example:
 
 ## Additional resources
 * [C++ API](cpp_api.md)
+* [C API](c_api.md)
 * [Python API](python_api.md)
 * [Samples](samples.md)
 * [Advanced topics](advanced.md)

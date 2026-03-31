@@ -91,7 +91,8 @@ class Table {
                     int64_t value_stride, void* values, int64_t* value_sizes) const = 0;
 
   /**
-   * Insert key/value pairs into the table. If a key already exists, its value is replaced.
+   * Insert key/value pairs into the table. If a key already exists, its value may be replaced
+   * or ignored.
    *
    * Note: This is a best effort operation. If an overflow condition is triggered during the
    * insertion procedure, some of the freshly inserted keys might immediately be evicted in

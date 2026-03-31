@@ -15,7 +15,7 @@ Where:
 To run the benchmarks, follow the instructions in the [installation](../README.md#installation) section.
 After installing NVE, you also need to install the benchmarks' requirements, using:
 ```bash
-PIP_CONSTRAINT="" pip install -r benchmarks/requirements.txt
+pip install -r benchmarks/requirements.txt
 ```
 The examples below were measured on GB200 using driver version: 590.48.01
 

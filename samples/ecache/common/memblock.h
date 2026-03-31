@@ -158,8 +158,17 @@ public:
   {
     m_totalBytes = szToAllocate;
     gpuErrChk(cudaMallocManaged(&m_ptr, szToAllocate));
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 13000
+    cudaMemLocation loc;
+    loc.id = 0;
+    loc.type = cudaMemLocationTypeDevice;
+    gpuErrChk(cudaMemAdvise(m_ptr, szToAllocate, cudaMemAdviseSetAccessedBy, loc));
+    loc.type = cudaMemLocationTypeHost;
+    gpuErrChk(cudaMemAdvise(m_ptr, szToAllocate, cudaMemAdviseSetPreferredLocation, loc));
+#else
     gpuErrChk(cudaMemAdvise(m_ptr, szToAllocate, cudaMemAdviseSetAccessedBy, 0));
     gpuErrChk(cudaMemAdvise(m_ptr, szToAllocate, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId));
+#endif
   }
 
   ~MemBlockManaged()

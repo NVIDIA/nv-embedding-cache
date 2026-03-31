@@ -13,7 +13,7 @@
 #  -v $(pwd)/samples/triton_server_sample/:/triton_server_sample \
 #  hstu_triton
 
-FROM nvcr.io/nvidia/tritonserver:25.06-py3
+FROM nvcr.io/nvidia/tritonserver:26.01-py3
 
 # Install build dependencies for pynve
 RUN apt-get update && apt-get install -y \

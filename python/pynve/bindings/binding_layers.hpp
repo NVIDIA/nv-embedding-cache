@@ -396,7 +396,7 @@ public:
         std::vector<float> insert_heuristic_thresholds;
         auto gpu_table = std::make_shared<nve::GpuTable<IndexT>>(cfg, nullptr /* using default allocator for device 0*/);
         tables.push_back(gpu_table);
-        insert_heuristic_thresholds.push_back(0.75f);
+        insert_heuristic_thresholds.push_back(DefaultInsertHeuristic::DEFAULT_THRESHOLD);
 
         if (host_cache_size > 0) {
             host_table_ptr_t nvhm_table = create_nvhm_table(host_cache_size, this->row_size_in_bytes_, dtype);
@@ -527,7 +527,7 @@ private:
         
         auto gpu_table = std::make_shared<nve::GpuTable<IndexT>>(cfg, nullptr /* using default allocator for device 0*/);
         
-        typename layer_type::Config layer_cfg = {"uvm_layer", std::make_shared<DefaultInsertHeuristic>(std::vector<float>{0.75})};
+        typename layer_type::Config layer_cfg = {"uvm_layer", std::make_shared<DefaultInsertHeuristic>(std::vector<float>{DefaultInsertHeuristic::DEFAULT_THRESHOLD})};
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, gpu_table, nullptr /* using default allocator for device 0*/);
 
         uvm_table_.col = row_size;

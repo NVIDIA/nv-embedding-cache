@@ -137,6 +137,8 @@ class UVMLayerTest {
         cfg.insert_heuristic = std::make_shared<TestInsertHeuristic>();
         cfg.min_insert_freq_gpu = 0;
         cfg.min_insert_size_gpu = 1024;
+      } else {
+        cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
       }
       m_layer = std::make_shared<LinearUVMEmbeddingLayer<IndexT>>(cfg, m_gpu_tab);
     }

@@ -391,14 +391,17 @@ def main():
                 total_kps += rank_kps
                 total_gbps += rank_gbps
                 total_ranks += 1
-        print(f"[Average]  Time: {total_runtime/total_ranks:.3f}, MKPS: {(total_kps/total_ranks/1e6):.2f}, Algo BW: {total_gbps/total_ranks:.2f} GB/s")
+        average_runtime = total_runtime/total_ranks
+        average_mkps = total_kps/total_ranks/1e6
+        average_gbps = total_gbps/total_ranks
+        print(f"[Average]  Time: {average_runtime:.3f}, MKPS: {average_mkps:.2f}, Algo BW: {average_gbps:.2f} GB/s")
         if args.csv_filename:
             write_benchmark_csv(
                 args.csv_filename,
                 args,
-                time_sec=f"{total_runtime:.2f}",
-                mkps=f"{(total_kps/1e6):.2f}",
-                gbps=f"{total_gbps:.2f}"
+                time_sec=f"{average_runtime:.2f}",
+                mkps=f"{average_mkps:.2f}",
+                gbps=f"{average_gbps:.2f}"
             )
 
 if __name__ == "__main__":

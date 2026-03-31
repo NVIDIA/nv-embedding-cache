@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:25.06-py3
+FROM nvcr.io/nvidia/pytorch:26.01-py3
 
 # Install useful dev tools
 RUN apt-get update && apt-get -y install sudo nano gdb time htop nvtop redis
@@ -22,7 +22,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Relax image constraint for torch
-RUN sed -i '/^torch==/c\torch>=2.7' /etc/pip/constraint.txt
+RUN sed -i '/^torch==/c\torch>=2.10' /etc/pip/constraint.txt
 
 USER $USERNAME
 

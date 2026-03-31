@@ -139,11 +139,11 @@ int main(int argc, char* argv[]) {
     // Create hierarchical embedding layer
     LogVerbose(verbose, std::string("Creating Hierarchical embedding layer"));
     nve::HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
-    // We keep layer_cfg.insert_heuristic as nullptr to disable GPU cache from auto-inserting, so we can verify we only hit in the host table
-    // To allow the gpu table to auto-insert, provide some inset heuristic.
+    // We use NeverInsertHeuristic to disable GPU cache from auto-inserting, so we can verify we only hit in the host table
+    // To allow the gpu table to auto-insert, provide some insert heuristic (or leave as nullptr for the default).
     // For example this would use the default insert heuristic
     // layer_cfg.insert_heuristic = std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>{0.75f, 0.75f});
-    layer_cfg.insert_heuristic = nullptr;
+    layer_cfg.insert_heuristic = std::make_shared<nve::NeverInsertHeuristic>();
     std::vector<std::shared_ptr<nve::Table>> tables{gpu_tab, host_tab};
     auto emb_layer = std::make_shared<nve::HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
 

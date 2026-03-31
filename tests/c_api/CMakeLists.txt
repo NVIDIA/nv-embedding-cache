@@ -13,17 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-include_directories(
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# Unit level tests
-add_subdirectory(common)
-add_subdirectory(gpu_table)
-add_subdirectory(embedding_layer)
-add_subdirectory(host_table)
-add_subdirectory(ecache)
-add_subdirectory(kernels)
-add_subdirectory(sample_sanity)
-add_subdirectory(linear_host_table)
-add_subdirectory(c_api)
+add_executable(c_api_tests c_api_basic_test.cpp c_api_layers_test.cpp)
+target_link_libraries(c_api_tests nve-common gtest gtest_main CUDA::cudart)

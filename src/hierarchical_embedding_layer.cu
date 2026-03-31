@@ -74,21 +74,39 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
     }
     NVE_CHECK_(table->get_max_row_size() == tables_.at(0)->get_max_row_size(), "All layer tables must have the same row size");
   }
-  if (config_.insert_heuristic) {
-    for (size_t i=0 ; i < tables_.size() ; i++) {
-      auto table = tables_.at(i);
-      bool gpu_table = (table->get_device_id() >= 0);
-      auto_insert_handlers_.push_back(std::make_shared<AutoInsertHandler>(
-        config_.insert_heuristic,
-        table,
-        i,
-        allocator_,
-        gpu_table ? config_.min_insert_freq_gpu : config_.min_insert_freq_host,
-        gpu_table ? config_.min_insert_size_gpu : config_.min_insert_size_host,
-        sizeof(KeyType),
-        gpu_device_
-      ));
+  auto heuristic = config_.insert_heuristic;
+  if (!heuristic) {
+    // Build default thresholds: DEFAULT_THRESHOLD for GPU and host tables, 0.0 for the last host table
+    std::vector<float> thresholds;
+    size_t last_host_idx = tables_.size(); // sentinel: no host tables
+    for (size_t i = tables_.size(); i > 0; --i) {
+      if (tables_.at(i - 1)->get_device_id() < 0) {
+        last_host_idx = i - 1;
+        break;
+      }
     }
+    for (size_t i = 0; i < tables_.size(); i++) {
+      if (i == last_host_idx) {
+        thresholds.push_back(0.0f);
+      } else {
+        thresholds.push_back(DefaultInsertHeuristic::DEFAULT_THRESHOLD);
+      }
+    }
+    heuristic = std::make_shared<DefaultInsertHeuristic>(thresholds);
+  }
+  for (size_t i=0 ; i < tables_.size() ; i++) {
+    auto table = tables_.at(i);
+    bool gpu_table = (table->get_device_id() >= 0);
+    auto_insert_handlers_.push_back(std::make_shared<AutoInsertHandler>(
+      heuristic,
+      table,
+      i,
+      allocator_,
+      gpu_table ? config_.min_insert_freq_gpu : config_.min_insert_freq_host,
+      gpu_table ? config_.min_insert_size_gpu : config_.min_insert_size_host,
+      sizeof(KeyType),
+      gpu_device_
+    ));
   }
 }
 
@@ -216,7 +234,7 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   }
 
   // Handle automatic inserts
-  if (config_.insert_heuristic != nullptr) {
+  if (!auto_insert_handlers_.empty()) {
     for (size_t i=0; i<table_hits.size(); i++) {
       auto_insert_handlers_.at(i)->auto_insert(layer_ctx, keys_bw, output_bw, table_hitrates[i], num_keys, output_stride);
     }
@@ -286,11 +304,11 @@ void HierarchicalEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64
     auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
     auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx, "values", values, values_buffer_size);
 
-    if (config_.insert_heuristic) {
+    if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
     table->update_bw(table_ctx, num_keys, keys_bw, value_stride, value_size, values_bw);
-    if (config_.insert_heuristic) {
+    if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
   }
@@ -319,11 +337,11 @@ void HierarchicalEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const i
     auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
     auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx, "values", values, values_buffer_size);
 
-    if (config_.insert_heuristic) {
+    if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
     table->update_accumulate_bw(table_ctx, num_keys, keys_bw, value_stride, value_size, values_bw, value_type);
-    if (config_.insert_heuristic) {
+    if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
   }
@@ -339,11 +357,11 @@ void HierarchicalEmbeddingLayer<KeyType>::clear(context_ptr_t& ctx) {
     auto table_ctx = layer_ctx->table_contexts_.at(i);
     NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
 
-    if (config_.insert_heuristic) {
+    if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
     table->clear(table_ctx);
-    if (config_.insert_heuristic) {
+    if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
   }
@@ -377,11 +395,11 @@ void HierarchicalEmbeddingLayer<KeyType>::erase(context_ptr_t& ctx, const int64_
   const auto keys_buffer_size = sizeof(KeyType) * num_keys;
   auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, keys_buffer_size);
 
-  if (config_.insert_heuristic) {
+  if (!auto_insert_handlers_.empty()) {
     auto_insert_handlers_.at(table_id)->lock_modify();
   }
   table->erase_bw(table_ctx, num_keys, keys_bw);
-  if (config_.insert_heuristic) {
+  if (!auto_insert_handlers_.empty()) {
     auto_insert_handlers_.at(table_id)->unlock_modify();
   }
 }

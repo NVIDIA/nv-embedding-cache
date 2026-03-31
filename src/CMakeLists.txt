@@ -17,9 +17,15 @@ cmake_minimum_required(VERSION 3.18)
 
 find_package(MPI REQUIRED)
 
-file(GLOB_RECURSE common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.cpp *.cu)
+file(GLOB common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.cpp *.cu)
 add_library(nve-common SHARED ${common_src})
 target_compile_features(nve-common PUBLIC cxx_std_17)
+
+target_compile_definitions(nve-common PRIVATE
+  NVE_VERSION_MAJOR=${CMAKE_PROJECT_VERSION_MAJOR}
+  NVE_VERSION_MINOR=${CMAKE_PROJECT_VERSION_MINOR}
+  NVE_VERSION_PATCH=${CMAKE_PROJECT_VERSION_PATCH}
+)
 
 target_include_directories(nve-common PRIVATE
   ${MPI_INCLUDE_PATH}

@@ -23,6 +23,7 @@
 #include <linear_host_table.hpp>
 #include <gpu_table.hpp>
 #include <host_table.hpp>
+#include <insert_heuristic.hpp>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -257,10 +258,11 @@ int main(int argc, char* argv[]) {
     
           // Create embedding layer
           layer_type::Config layer_cfg;
-          layer_cfg.insert_heuristic = 
-            insert_target_hitrate > 0.f ?
-            std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>{insert_target_hitrate, insert_target_hitrate, insert_target_hitrate}) :
-            nullptr;
+          if (insert_target_hitrate > 0.f) {
+            layer_cfg.insert_heuristic = std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>{insert_target_hitrate, insert_target_hitrate, insert_target_hitrate});
+          } else {
+            layer_cfg.insert_heuristic = std::make_shared<nve::NeverInsertHeuristic>();
+          }
           std::vector<std::shared_ptr<nve::Table>> tables{gpu_tab, nvhm_tab, mock_remote};
           auto emb_layer = std::make_shared<layer_type>(layer_cfg, tables);
           layers.push_back(emb_layer);
@@ -298,10 +300,11 @@ int main(int argc, char* argv[]) {
 
           // Create embedding layer
           typename nve::LinearUVMEmbeddingLayer<IndexT>::Config layer_cfg;
-          layer_cfg.insert_heuristic = 
-            insert_target_hitrate > 0.f ?
-            std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>({insert_target_hitrate, insert_target_hitrate, insert_target_hitrate})) :
-            nullptr;
+          if (insert_target_hitrate > 0.f) {
+            layer_cfg.insert_heuristic = std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>({insert_target_hitrate, insert_target_hitrate, insert_target_hitrate}));
+          } else {
+            layer_cfg.insert_heuristic = std::make_shared<nve::NeverInsertHeuristic>();
+          }
           auto emb_layer = std::make_shared<nve::LinearUVMEmbeddingLayer<IndexT>>(layer_cfg, gpu_tab);
           layers.push_back(emb_layer);
         }
@@ -335,7 +338,7 @@ int main(int argc, char* argv[]) {
           // Create an embedding layer
           using layer_type = nve::HierarchicalEmbeddingLayer<IndexT>;
           layer_type::Config layer_cfg;
-          layer_cfg.insert_heuristic = nullptr; // No insert for the linear host table
+          layer_cfg.insert_heuristic = std::make_shared<nve::NeverInsertHeuristic>(); // No insert for the linear host table
           std::vector<std::shared_ptr<nve::Table>> tables{host_tab};
           auto emb_layer = std::make_shared<layer_type>(layer_cfg, tables);
           layers.push_back(emb_layer);

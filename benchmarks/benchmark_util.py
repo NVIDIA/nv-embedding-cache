@@ -24,9 +24,9 @@ def benchmark_arg_parser():
     Create ArgumentParser with shared args across benchmarks.
     """
     parser = ArgumentParser()
-    parser.add_argument("--batch", default=1024, help="Batch size (default: 1024)", type=int)
+    parser.add_argument("--batch", "-b", default=1024, help="Batch size (default: 1024)", type=int)
     parser.add_argument("--hotness", default=1024 ,help="Hotness (default: 1024)", type=int)
-    parser.add_argument("--data_type", default='float32', choices=['float32', 'float16'] ,help="Data type (default: float32)")
+    parser.add_argument("--data_type", "-dt", default='float32', choices=['float32', 'float16'] ,help="Data type (default: float32)")
     parser.add_argument("--num_table_rows", "-nr", default=1_000_000 ,help="Number of rows in the embedding table (default: 1000000)", type=int)
     parser.add_argument("--load_factor", "-lf", default=0.01 ,help="Load factor of the GPU cache(default: 0.01)", type=float)
     parser.add_argument("--num_steps", "-ns", default=100, help="Number of inference steps (default: 100)", type=int)

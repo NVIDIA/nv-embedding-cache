@@ -212,4 +212,8 @@ bool StatisticalInsertHeuristic::insert_needed(const float hitrate, const size_t
     }
 }
 
+bool NeverInsertHeuristic::insert_needed(const float /*hitrate*/, const size_t /*table_id*/) {
+    return false;
+}
+
 } // namespace nve

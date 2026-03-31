@@ -28,7 +28,12 @@ Embeddings can span multiple devices/nodes by way of sharding. This is accomplis
 The user can either create this allocation on their own or use the CUDADistributedBuffer class (see: [../include/distributed.hpp](../include/distributed.hpp)). Similarily, the python MPIMemBlock class can be used to share such a buffer across MPI process group.
 
 ## Insert heuristic
-The embedding layers that use a cache, can choose when it's time to update the cache residency and insert new cache lines by calling an InsertHeuristic object that determines when to initiate this update. The application can use the DefaultInsertHeuristic or derive it's own.
+The embedding layers that use a cache, can choose when it's time to update the cache residency and insert new cache lines by calling an InsertHeuristic object that determines when to initiate this update.
+
+By default, `LinearUVMEmbeddingLayer` and `HierarchicalEmbeddingLayer` use the `DefaultInsertHeuristic` when no heuristic is provided (i.e. `insert_heuristic = nullptr` in the layer config). 
+
+To disable auto-insertion entirely, use the `NeverInsertHeuristic` class. The application can also derive its own heuristic from the `InsertHeuristic` base class.
+
 See [../include/insert_heuristic.hpp](../include/insert_heuristic.hpp) for more details.
 
 ## Unit tests
@@ -50,5 +55,5 @@ pytest tests
 * Note: make sure to install the python bindings and required packages before testing, using:
     ```bash
     pip install .
-    PIP_CONSTRAINT="" pip install -r benchmarks/requirements.txt
+    pip install -r benchmarks/requirements.txt
     ```

@@ -34,7 +34,9 @@ class InsertHeuristic {
 // TODO: TRTREC-88
 class DefaultInsertHeuristic : public InsertHeuristic {
   public:
-  DefaultInsertHeuristic(const std::vector<float>& thresholds); 
+  static constexpr float DEFAULT_THRESHOLD = 0.75f;
+
+  DefaultInsertHeuristic(const std::vector<float>& thresholds);
   ~DefaultInsertHeuristic() override = default;
   
   bool insert_needed(const float hitrate, const size_t table_id) override;
@@ -119,6 +121,12 @@ private:
     
     // Constants
     static constexpr uint64_t seed_ = 98437598437ULL;
+};
+
+class NeverInsertHeuristic : public InsertHeuristic {
+  public:
+  ~NeverInsertHeuristic() override = default;
+  bool insert_needed(const float hitrate, const size_t table_id) override;
 };
 
 }  // namespace nve

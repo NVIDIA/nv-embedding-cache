@@ -50,18 +50,20 @@ LinearUVMEmbeddingLayer<KeyType>::LinearUVMEmbeddingLayer(const Config& cfg, gpu
     NVE_CHECK_(gpu_table_ != nullptr, "Invalid GPU table");
     NVE_CHECK_(gpu_table_->config().uvm_table != nullptr, "GPU Table must be backed by a UVM buffer");
 
-    if (config_.insert_heuristic != nullptr) {
-      auto_insert_handler_ = std::make_shared<AutoInsertHandler>(
-        config_.insert_heuristic,
-        gpu_table_,
-        0 /* table_id */,
-        allocator_,
-        config_.min_insert_freq_gpu,
-        config_.min_insert_size_gpu,
-        sizeof(KeyType),
-        gpu_table_->get_device_id()
-      );
+    auto heuristic = config_.insert_heuristic;
+    if (!heuristic) {
+      heuristic = std::make_shared<DefaultInsertHeuristic>(std::vector<float>{DefaultInsertHeuristic::DEFAULT_THRESHOLD});
     }
+    auto_insert_handler_ = std::make_shared<AutoInsertHandler>(
+      heuristic,
+      gpu_table_,
+      0 /* table_id */,
+      allocator_,
+      config_.min_insert_freq_gpu,
+      config_.min_insert_size_gpu,
+      sizeof(KeyType),
+      gpu_table_->get_device_id()
+    );
 }
 
 template <typename KeyType>
@@ -88,7 +90,7 @@ void LinearUVMEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t 
   auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
   auto output_bw = std::make_shared<BufferWrapper<void>>(ctx, "output", output, output_buffer_size);
 
-  const bool collect_misses = (hitrates || config_.insert_heuristic);
+  const bool collect_misses = (hitrates || !std::dynamic_pointer_cast<NeverInsertHeuristic>(config_.insert_heuristic));
   if (collect_misses) {
     NVE_CHECK_(gpu_table_->config().count_misses, "GPU table was not configured to report hit counts");
     gpu_table_->reset_lookup_counter(layer_ctx->table_contexts_.at(0));
@@ -174,7 +176,7 @@ void LinearUVMEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t 
       *hitrates = hitrate;
     }
     // Handle automatic inserts
-    if (config_.insert_heuristic) {
+    if (auto_insert_handler_) {
       auto_insert_handler_->auto_insert(layer_ctx, keys_bw, output_bw, hitrate, num_keys, output_stride);
     }
   }

@@ -4,6 +4,14 @@ Releases will be listed below, latest at the top.
 
 Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means release of February 2026 with patch 3.
 
+## NV Embedding Cache 26.04
+### New Features
+- C API (see: [c_api.md](docs/c_api.md))
+### Improvements
+- Updated base NVIDIA containers to 26.01
+### Bug Fixes
+- Default insert heuristic used by C++ embedding layers - was already the case for Python
+
 ## NV Embedding Cache 26.03
 ### New Features
 - New samples:

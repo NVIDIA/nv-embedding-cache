@@ -191,10 +191,22 @@ ManagedMemBlock::ManagedMemBlock(size_t row_size, size_t num_embeddings, nve::Da
 
 ManagedMemBlock::ManagedMemBlock(size_t size_to_alloc, const std::vector<int>& gpu_ids) : MemBlock(MemBlockType::MANAGED) {
     NVE_CHECK_(cudaMallocManaged(&ptr_, size_to_alloc));
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 13000
+    cudaMemLocation loc;
+    loc.id = 0;
+    loc.type = cudaMemLocationTypeHost;
+    NVE_CHECK_(cudaMemAdvise(ptr_, size_to_alloc, cudaMemAdviseSetPreferredLocation, loc));
+    for (int gpu_id : gpu_ids) {
+        loc.type = cudaMemLocationTypeDevice;
+        loc.id = gpu_id;
+        NVE_CHECK_(cudaMemAdvise(ptr_, size_to_alloc, cudaMemAdviseSetAccessedBy, loc));
+    }
+#else
     NVE_CHECK_(cudaMemAdvise(ptr_, size_to_alloc, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId));
     for (int gpu_id : gpu_ids) {
         NVE_CHECK_(cudaMemAdvise(ptr_, size_to_alloc, cudaMemAdviseSetAccessedBy, gpu_id));
     }
+#endif
     NVE_CHECK_(cudaDeviceSynchronize());
 }
 

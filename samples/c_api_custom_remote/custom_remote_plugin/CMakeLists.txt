@@ -13,17 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-include_directories(
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
+message("NV Embedding Cache Plugin: std::map Remote Table (sample)")
 
-# Unit level tests
-add_subdirectory(common)
-add_subdirectory(gpu_table)
-add_subdirectory(embedding_layer)
-add_subdirectory(host_table)
-add_subdirectory(ecache)
-add_subdirectory(kernels)
-add_subdirectory(sample_sanity)
-add_subdirectory(linear_host_table)
-add_subdirectory(c_api)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+file(GLOB nve_plugin_custom_remote_src "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+
+add_library(nve-plugin-custom_remote SHARED ${nve_plugin_custom_remote_src})
+target_link_libraries(nve-plugin-custom_remote PUBLIC nve-common)

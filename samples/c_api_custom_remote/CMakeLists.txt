@@ -13,17 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-include_directories(
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
+# Plugin: custom_remote (sample remote table backed by std::map)
+add_subdirectory(custom_remote_plugin)
 
-# Unit level tests
-add_subdirectory(common)
-add_subdirectory(gpu_table)
-add_subdirectory(embedding_layer)
-add_subdirectory(host_table)
-add_subdirectory(ecache)
-add_subdirectory(kernels)
-add_subdirectory(sample_sanity)
-add_subdirectory(linear_host_table)
-add_subdirectory(c_api)
+# Sample executable
+add_executable(c_api_custom_remote_sample c_api_custom_remote_sample.cpp)
+target_include_directories(c_api_custom_remote_sample PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(c_api_custom_remote_sample PUBLIC nve-common)

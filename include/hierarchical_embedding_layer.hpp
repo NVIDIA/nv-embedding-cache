@@ -34,7 +34,8 @@ class HierarchicalEmbeddingLayer : public EmbeddingLayerBase {
  public:
   struct Config {
     std::string layer_name;
-    std::shared_ptr<InsertHeuristic> insert_heuristic = nullptr;
+    std::shared_ptr<InsertHeuristic> insert_heuristic = nullptr; // nullptr will result in using the default InsertHeuristic
+                                                                 // auto inserts can be disabled by using the NeverInsertHeuristic class
     int64_t min_insert_freq_gpu = 0; // increase this to throttle down auto inserts
     int64_t min_insert_freq_host = 0;
     int64_t min_insert_size_gpu = 1 << 16;

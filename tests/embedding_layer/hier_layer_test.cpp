@@ -251,6 +251,8 @@ class HierLayerTest {
       cfg.min_insert_freq_host = 0;
       cfg.min_insert_size_gpu =  MIN_INSERT_HEURISTIC_SIZE;
       cfg.min_insert_size_host = MIN_INSERT_HEURISTIC_SIZE;
+    } else {
+      cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
     }
     m_layer = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(cfg, tables);
 
