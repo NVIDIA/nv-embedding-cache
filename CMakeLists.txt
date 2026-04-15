@@ -123,114 +123,15 @@ endif()
 string(STRIP "${NVE_CACHE_LINE_SIZE}" NVE_CACHE_LINE_SIZE)
 message(STATUS "Cache line size = ${NVE_CACHE_LINE_SIZE} bytes")
 
-# AVX detection and configuration
-include(CheckCXXSourceCompiles)
-set(CMAKE_REQUIRED_FLAGS_BACKUP ${CMAKE_REQUIRED_FLAGS})
-set(CMAKE_REQUIRED_FLAGS "-march=native")
-check_cxx_source_compiles("
-  #if __AVX__
-  int main() { return 0; }
-  #else
-  #error AVX is not available!
-  #endif" AVX_SUPPORTED
-)
-check_cxx_source_compiles("
-  #if __AVX2__
-  int main() { return 0; }
-  #else
-  #error AVX2 is not available!
-  #endif" AVX2_SUPPORTED
-)
-check_cxx_source_compiles("
-  #if __AVX512F__
-  int main() { return 0; }
-  #else
-  #error AVX-512 F is not available!
-  #endif" AVX512F_SUPPORTED
-)
-check_cxx_source_compiles("
-  #if __AVX512BW__
-  int main() { return 0; }
-  #else
-  #error AVX-512 BW is not available!
-  #endif" AVX512BW_SUPPORTED
-)
-check_cxx_source_compiles("
-  #if __AVX512VL__
-  int main() { return 0; }
-  #else
-  #error AVX-512 VL is not available!
-  #endif" AVX512VL_SUPPORTED
-)
-check_cxx_source_compiles("
-  #if __AVX512VBMI__
-  int main() { return 0; }
-  #else
-  #error AVX-512 VBMI is not available!
-  #endif" AVX512VBMI_SUPPORTED
-)
-message(STATUS "AVX_SUPPORTED:      ${AVX_SUPPORTED}")
-message(STATUS "AVX2_SUPPORTED:     ${AVX2_SUPPORTED}")
-message(STATUS "AVX512F_SUPPORTED:  ${AVX512F_SUPPORTED}")
-message(STATUS "AVX512BW_SUPPORTED: ${AVX512BW_SUPPORTED}")
-message(STATUS "AVX512VL_SUPPORTED: ${AVX512VL_SUPPORTED}")
-message(STATUS "AVX512VBMI_SUPPORTED: ${AVX512VBMI_SUPPORTED}")
-set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS_BACKUP}")
-
-# Determine the best AVX level to use
-if(AVX512BW_SUPPORTED AND AVX512VL_SUPPORTED AND NOT NVE_DISABLE_AVX512)
-  set(NVE_AVX_LEVEL "AVX512")
-  if(AVX512VBMI_SUPPORTED)
-    set(NVE_AVX_FLAGS "-mavx512f -mavx512bw -mavx512vl -mavx512vbmi")
-    message(STATUS "Using AVX-512 with BW, VL and VBMI extensions")
-  else()
-    set(NVE_AVX_FLAGS "-mavx512f -mavx512bw -mavx512vl")
-    message(STATUS "Using AVX-512 with BW and VL extensions, but without VBMI")
-  endif()
-elseif(AVX512F_SUPPORTED AND NOT NVE_DISABLE_AVX512)
-  set(NVE_AVX_LEVEL "AVX512F")
-  set(NVE_AVX_FLAGS "-mavx512f")
-  message(STATUS "Using AVX-512F")
-elseif(AVX2_SUPPORTED)
-  set(NVE_AVX_LEVEL "AVX2")
-  set(NVE_AVX_FLAGS "-mavx2")
-  message(STATUS "Using AVX2")
-elseif(AVX_SUPPORTED)
-  set(NVE_AVX_LEVEL "AVX")
-  set(NVE_AVX_FLAGS "-mavx")
-  message(STATUS "Using AVX")
-else()
-  set(NVE_AVX_LEVEL "NONE")
-  set(NVE_AVX_FLAGS "")
-  message(STATUS "No AVX support detected, using standard instructions")
-endif()
-
-# Set AVX flags for all compilers
-if(NVE_AVX_FLAGS)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${NVE_AVX_FLAGS}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${NVE_AVX_FLAGS}")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${NVE_AVX_FLAGS}")
-  
-  # Also set for specific build types
-  set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${NVE_AVX_FLAGS}")
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${NVE_AVX_FLAGS}")
-  set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} ${NVE_AVX_FLAGS}")
-  
-  set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} ${NVE_AVX_FLAGS}")
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${NVE_AVX_FLAGS}")
-  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} ${NVE_AVX_FLAGS}")
-endif()
-
-# Define preprocessor macros for AVX level
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNVE_AVX_LEVEL_${NVE_AVX_LEVEL}=1")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNVE_AVX_LEVEL_${NVE_AVX_LEVEL}=1")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DNVE_AVX_LEVEL_${NVE_AVX_LEVEL}=1")
-
-message(STATUS "AVX Configuration Summary:")
-message(STATUS "  Detected AVX Level: ${NVE_AVX_LEVEL}")
-message(STATUS "  AVX Flags: ${NVE_AVX_FLAGS}")
-message(STATUS "  Preprocessor Macro: NVE_AVX_LEVEL_${NVE_AVX_LEVEL}=1")
-message(STATUS "  Runtime Detection: Enabled (NVE_RUNTIME_AVX_DETECTION=1)")
+# nve_configure_avx() sets the following variables in this scope:
+#   AVX_SUPPORTED / AVX2_SUPPORTED / AVX512F_SUPPORTED /
+#   AVX512BW_SUPPORTED / AVX512VL_SUPPORTED / AVX512VBMI_SUPPORTED
+#   NVE_AVX_LEVEL        — selected level: AVX512 | AVX512F | AVX2 | AVX | NONE
+#   NVE_AVX_FLAGS        — compiler flags for the selected level (e.g. "-mavx2")
+#   CMAKE_C_FLAGS / CMAKE_CXX_FLAGS / CMAKE_CUDA_FLAGS (base, _RELEASE, _DEBUG)
+#                        — extended with NVE_AVX_FLAGS and -DNVE_AVX_LEVEL_<level>=1
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nve_avx.cmake)
+nve_configure_avx()
 
 # set Release build by default
 if(NOT CMAKE_BUILD_TYPE)
@@ -318,6 +219,7 @@ if(NOT DEFINED NVE_SM_VERSION)
     execute_process (
         COMMAND bash -c "which nvidia-smi"
         RESULT_VARIABLE SMI_FOUND
+        OUTPUT_QUIET
     )
     if(SMI_FOUND EQUAL "0")
         execute_process (
@@ -379,6 +281,22 @@ endif()
 
 add_subdirectory(src)
 add_subdirectory(plugins)
+
+option(NVE_DISABLE_TORCH_BINDINGS
+       "Disable building libnve-torch-ops.so with PyTorch custom op bindings" OFF)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nve_torch.cmake)
+# nve_configure_torch() sets the following variables in this scope:
+#   NVE_MIN_TORCH_MAJOR      — minimum required PyTorch major version
+#   NVE_MIN_TORCH_MINOR      — minimum required PyTorch minor version
+#   NVE_DISABLE_TORCH_BINDINGS — set to ON if torch is missing or ABI check fails
+#   TORCH_ARCH_STR           — space-separated arch list (e.g. "8.0 8.6") for TORCH_CUDA_ARCH_LIST
+#   CMAKE_PREFIX_PATH        — extended with the torch cmake prefix (on success only)
+nve_configure_torch()
+if(NOT NVE_DISABLE_TORCH_BINDINGS)
+    find_package(Torch REQUIRED)
+    add_subdirectory(python/pynve/torch_bindings)
+endif()
+
 add_subdirectory(python/pynve/bindings)
 if(NOT DEFINED NVE_DISABLE_TESTS_AND_SAMPLES)
   message(STATUS "Tests and samples are enabled")

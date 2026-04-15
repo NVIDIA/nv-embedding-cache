@@ -197,4 +197,81 @@ uint64_t BinaryTensorFileFormat::get_num_rows() const {
 void BinaryTensorFileFormat::reset() {
     stream_->seek(0);
 }
+
+// ---------------------------------------------------------------------------
+// TensorFileFormat — NVE table file format (.nve)
+// ---------------------------------------------------------------------------
+
+void TensorFileFormat::write_table_file_header(StreamWrapperBase& stream)
+{
+    stream.seek(0);
+    stream.write(&MAGIC_NUMBER, sizeof(MAGIC_NUMBER));
+    stream.write(&VERSION_MAJOR, sizeof(VERSION_MAJOR));
+    stream.write(&VERSION_MINOR, sizeof(VERSION_MINOR));
+    stream.flush();
+}
+
+bool TensorFileFormat::verify_table_header(StreamWrapperBase& stream)
+{
+    stream.seek(0);
+    uint32_t version_major, version_minor;
+    MagicNumberType magic_number;
+    stream.read(&magic_number, sizeof(magic_number));
+    stream.read(&version_major, sizeof(version_major));
+    stream.read(&version_minor, sizeof(version_minor));
+    return magic_number == MAGIC_NUMBER && version_major == VERSION_MAJOR && version_minor == VERSION_MINOR;
+}
+
+void TensorFileFormat::write_tensor_to_stream(StreamWrapperBase& stream, uint64_t name, const TensorWrapper& tensor)
+{
+    TableEntry entry;
+    size_t sz = tensor.row * tensor.col * tensor.element_size_in_bytes;
+    entry.key = get_key(name, tensor);
+    entry.offset = sz + sizeof(TableEntry) + stream.tell();
+    entry.length = sz;
+    stream.write(&entry, sizeof(TableEntry));
+    stream.write(tensor.data, sz);
+    stream.flush();
+}
+
+void TensorFileFormat::load_tensor_from_stream(StreamWrapperBase& stream, uint64_t name, TensorWrapper& tensor)
+{
+    NVE_CHECK_(verify_table_header(stream), "Incorrect file version");
+    uint64_t sz = tensor.row * tensor.col * tensor.element_size_in_bytes;
+    TableEntry entry;
+    size_t bytes_read = stream.read(&entry, sizeof(TableEntry));
+    while (bytes_read != 0)
+    {
+        NVE_CHECK_(bytes_read == sizeof(TableEntry), "Problem reading table entry");
+        if (get_name_from_key(entry.key) == name)
+        {
+            NVE_CHECK_(entry.length == sz, "Incorrect tensor size");
+            size_t br = stream.read(tensor.data, entry.length);
+            NVE_CHECK_(br == entry.length, "Problem reading tensor");
+            break;
+        }
+        else {
+            stream.seek(entry.offset);
+            bytes_read = stream.read(&entry, sizeof(TableEntry));
+        }
+    }
+}
+
+TensorFileFormat::TableKey TensorFileFormat::get_key(uint64_t name, const TensorWrapper& tensor) const
+{
+    NVE_CHECK_(tensor.col < (1llu << TableKey::ROW_SIZE_BITS), "nve support max 16 bit row size");
+    NVE_CHECK_(tensor.row < (1llu << TableKey::ROWS_BITS), "nve support max 44 bit rows");
+    NVE_CHECK_(name < (1llu << TableKey::AUX_BITS), "nve support max 32 bit unique name");
+    NVE_CHECK_(tensor.element_size_in_bytes < (1llu << TableKey::DATA_TYPE_BITS), "nve support max 2 bit data type");
+    TableKey key;
+    key.key1 = tensor.col | tensor.element_size_in_bytes << TableKey::ROW_SIZE_BITS | tensor.row << (TableKey::ROW_SIZE_BITS + TableKey::DATA_TYPE_BITS);
+    key.key2 = name;
+    return key;
+}
+
+uint64_t TensorFileFormat::get_name_from_key(const TableKey& key) const
+{
+    return key.key2 & ((1llu << TableKey::AUX_BITS) - 1);
+}
+
 }

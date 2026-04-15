@@ -20,6 +20,9 @@
 #include "include/host_table.hpp"
 #include "binding_serialization.hpp"
 #include "include/buffer_wrapper.hpp"
+#include "third_party/pybind11/include/pybind11/pybind11.h"
+
+namespace py = pybind11;
 
 namespace nve {
 
@@ -319,7 +322,7 @@ std::string getFileExtension(const std::string& filepath) {
     return extension;
 }
 
-void ParameterServerTable::insert_keys_from_numpy_file(py::object keys_stream, py::object values_stream, uint64_t batch_size) {
+void insert_keys_from_numpy_file(std::shared_ptr<ParameterServerTable> table, py::object keys_stream, py::object values_stream, uint64_t batch_size) {
     std::shared_ptr<StreamWrapperBase> keys_stream_wrapper = std::make_shared<PyStreamWrapper>(keys_stream);
     std::shared_ptr<StreamWrapperBase> values_stream_wrapper = std::make_shared<PyStreamWrapper>(values_stream);
 
@@ -327,17 +330,21 @@ void ParameterServerTable::insert_keys_from_numpy_file(py::object keys_stream, p
     std::shared_ptr<NumpyTensorFileFormat> values_file_reader = std::make_shared<NumpyTensorFileFormat>(values_stream_wrapper);
     NVE_CHECK_(keys_file_reader->get_shape().size() == 1, "Invalid keys shape");
     NVE_CHECK_(keys_file_reader->get_shape()[0] == values_file_reader->get_shape()[0], "Values/Keys shape mismatch");
-    NVE_CHECK_(values_file_reader->get_row_size_in_bytes() == row_bytes_, "Values row size mismatch");
-    NVE_CHECK_(keys_file_reader->get_row_size_in_bytes() == sizeof(KeyType), "Key size mismatch");
-    insert_keys_from_tensor_file(keys_file_reader, values_file_reader, batch_size);
+    NVE_CHECK_(values_file_reader->get_row_size_in_bytes() == table->get_row_size_in_bytes(), "Values row size mismatch");
+    NVE_CHECK_(keys_file_reader->get_row_size_in_bytes() == sizeof(ParameterServerTable::KeyType), "Key size mismatch");
+    table->insert_keys_from_tensor_file(keys_file_reader, values_file_reader, batch_size);
 }
 
-void ParameterServerTable::insert_keys_from_binary_file(py::object keys_stream, py::object values_stream, uint64_t batch_size) {
+void insert_keys_from_binary_file(std::shared_ptr<ParameterServerTable> table, py::object keys_stream, py::object values_stream, uint64_t batch_size) {
     std::shared_ptr<StreamWrapperBase> keys_stream_wrapper = std::make_shared<PyStreamWrapper>(keys_stream);
     std::shared_ptr<StreamWrapperBase> values_stream_wrapper = std::make_shared<PyStreamWrapper>(values_stream);
-    std::shared_ptr<BinaryTensorFileFormat> keys_file_reader = std::make_shared<BinaryTensorFileFormat>(keys_stream_wrapper, sizeof(KeyType));
-    std::shared_ptr<BinaryTensorFileFormat> values_file_reader = std::make_shared<BinaryTensorFileFormat>(values_stream_wrapper, row_bytes_);
-    insert_keys_from_tensor_file(keys_file_reader, values_file_reader, batch_size);
+    std::shared_ptr<BinaryTensorFileFormat> keys_file_reader = std::make_shared<BinaryTensorFileFormat>(keys_stream_wrapper, sizeof(ParameterServerTable::KeyType));
+    std::shared_ptr<BinaryTensorFileFormat> values_file_reader = std::make_shared<BinaryTensorFileFormat>(values_stream_wrapper, table->get_row_size_in_bytes());
+    table->insert_keys_from_tensor_file(keys_file_reader, values_file_reader, batch_size);
+}
+
+uint64_t ParameterServerTable::get_row_size_in_bytes() const {
+    return row_bytes_;
 }
 
 void ParameterServerTable::insert_keys_from_filepath(const std::string& keys_path, const std::string& values_path, uint64_t batch_size) {

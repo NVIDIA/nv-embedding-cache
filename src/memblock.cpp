@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#include "binding_memblock.hpp"
+#include "include/memblock.hpp"
 #include "include/common.hpp"
 #include "include/cuda_support.hpp"
 #include "include/default_allocator.hpp"

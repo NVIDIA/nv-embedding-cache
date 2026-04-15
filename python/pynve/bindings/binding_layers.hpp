@@ -17,8 +17,6 @@
  
 #pragma once
 
-#include "third_party/pybind11/include/pybind11/pybind11.h"
-#include "third_party/pybind11/include/pybind11/functional.h"
 #include "include/embedding_layer.hpp"
 #include "include/hierarchical_embedding_layer.hpp"
 #include "include/linear_embedding_layer.hpp"
@@ -36,14 +34,12 @@
 #include "cuda_ops/cuda_common.h"
 #include "cuda_ops/dedup_grads_kernel.cuh"
 #include "cuda_ops/gradient_calculator.cuh"
-#include "binding_memblock.hpp"
+#include "include/memblock.hpp"
 #include "binding_tables.hpp"
-#include "binding_serialization.hpp"
+#include "include/serialization.hpp"
 #include "cuda_ops/pipeline_gather.cuh"
 
 #include <sys/mman.h>
-
-namespace py = pybind11;
 
 namespace nve {
 
@@ -58,6 +54,21 @@ template<typename IndexT>
 class NVEmbedBinding
 {
 public:
+    // Accessors used by torch custom ops for shape inference and output allocation.
+    int64_t get_embedding_dim() const {
+        switch (data_type_) {
+            case nve::DataType_t::Float32:
+                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(float));
+            case nve::DataType_t::Float16:
+                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(__half));
+            default:
+                NVE_CHECK_(false, "Invalid data type");
+                return 0;
+        }
+    }
+
+    nve::DataType_t get_data_type() const { return data_type_; }
+
     void lookup(size_t num_keys, uintptr_t keys, uintptr_t output, uint64_t stream_)
     {
         float hitrates[3] = {0};
@@ -569,37 +580,16 @@ private:
         return dlm_tensor;
     }
 
-    py::capsule get_dl_tensor(nve::DataType_t dtype)
+    void write_tensor_to_stream(nve::StreamWrapperBase& stream, uint64_t name)
     {
-        DLManagedTensor* p = create_dlpack_tensor(dtype);
-        return py::capsule(p, "dltensor", [](PyObject* capsule) { 
-            const char *name = PyCapsule_GetName(capsule);
-            if (!name || std::strcmp(name, "dltensor") != 0) {
-                // Already consumed / renamed (e.g. "used_dltensor") or invalid.
-                return;
-            }
-
-            auto *managed = static_cast<DLManagedTensor *>(
-                PyCapsule_GetPointer(capsule, "dltensor")
-            );
-            if (!managed) return;
-
-            if (managed->deleter) {
-                managed->deleter(managed);  // This is the DLManagedTensor deleter.
-            }
-        });
+        nve::TensorFileFormat writer;
+        writer.write_tensor_to_stream(stream, name, uvm_table_);
     }
 
-    void write_tensor_to_stream(py::object stream, uint64_t name)
+    void load_tensor_from_stream(nve::StreamWrapperBase& stream, uint64_t name)
     {
-        TensorFileFormat tensor_file_writer;
-        tensor_file_writer.write_tensor_to_stream(stream, name, uvm_table_);
-    }
-
-    void load_tensor_from_stream(py::object stream, uint64_t name)
-    {
-        TensorFileFormat tensor_file_reader;
-        tensor_file_reader.load_tensor_from_stream(stream, name, uvm_table_);
+        nve::TensorFileFormat reader;
+        reader.load_tensor_from_stream(stream, name, uvm_table_);
     }
 
     ~LinearUVMEmbedding()

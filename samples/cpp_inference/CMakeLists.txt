@@ -13,12 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
+# C++ inference sample using AOTInductor + NVE.
+# Built as part of the main NVE build when samples are enabled.
+# No Python or pybind11 dependency at runtime.
 
-HAS_TORCH_OPS = False
-try:
-    import pynve.nve  # triggers loading libnve-torch-ops.so if linked
-    _ = torch.ops.nve_ops.embedding_lookup
-    HAS_TORCH_OPS = True
-except (ImportError, AttributeError):
-    pass
+if(NOT TORCH_FOUND)
+    message(FATAL_ERROR "Torch package was not found!")
+endif()
+
+add_executable(nve_inference inference.cu)
+
+target_include_directories(nve_inference PRIVATE
+    ${TORCH_INCLUDE_DIRS}
+)
+
+target_link_libraries(nve_inference
+    ${TORCH_LIBRARIES}
+    nve-torch-ops
+    nve-common
+)

@@ -36,6 +36,70 @@ To disable auto-insertion entirely, use the `NeverInsertHeuristic` class. The ap
 
 See [../include/insert_heuristic.hpp](../include/insert_heuristic.hpp) for more details.
 
+## C++ Deployment with PyTorch (AOTInductor)
+
+NVE models that use `NVEmbedding` / `NVEmbeddingBag` can be deployed for C++ inference without Python at runtime. The flow uses PyTorch's AOTInductor to compile the model graph, while NVE handles the embedding layer setup and weight loading natively in C++.
+
+### Prerequisites
+
+Build NVE with torch bindings enabled (default):
+```bash
+pip install .
+```
+
+### Step 1: Export from Python
+
+Use `export_aot()` to save the model graph, layer metadata, and weights:
+
+```python
+from pynve.torch.nve_export import export_aot
+
+model = MyModel()  # contains NVEmbedding layers
+export_aot(model, (example_keys,), "save_dir/")
+```
+
+This produces:
+- `save_dir/model.pt2` — AOTInductor-compiled graph (loadable by C++ `AOTIModelPackageLoader`)
+- `save_dir/metadata.json` — per-layer configuration (num_embeddings, embedding_size, dtype, cache_type, memblock_type, etc.)
+- `save_dir/weights/<module_name>.nve` — embedding weights in NVE binary format, one file per layer
+
+### Step 2: Load and run in C++
+
+Use `nve::LayerDirectory` (RAII) to create embedding layers, load weights, and register them in the `NVELayerRegistry`. Then load the AOT model and run:
+
+```cpp
+#include <torch/torch.h>
+#include <torch/csrc/inductor/aoti_package/model_package_loader.h>
+#include "python/pynve/torch_bindings/nve_loader.hpp"
+
+// Constructor reads metadata.json, creates layers, loads weights, registers in registry.
+// Destructor unregisters layers.
+nve::LayerDirectory dir("save_dir/");
+
+// Load AOT-compiled model
+torch::inductor::AOTIModelPackageLoader loader("save_dir/model.pt2");
+
+// Run inference
+auto keys = torch::tensor({0L, 1L, 5L, 10L},
+    torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+c10::InferenceMode mode;
+auto outputs = loader.run({keys});
+```
+
+No Python or pybind11 is required at C++ runtime. The C++ program links against `libnve-torch-ops.so` (custom op registration) and `libnve-common.so` (NVE core).
+
+### Architecture
+
+The custom op `nve_ops::embedding_lookup` is registered in the C10 dispatcher via `STABLE_TORCH_LIBRARY` (LibTorch Stable ABI) in `libnve-torch-ops.so`. When the AOT model calls this op at runtime, it dispatches it looks up the layer by ID in the `NVELayerRegistry` singleton and calls the appropriate NveLayer lookup().
+
+```
+AOT Model → C10 Dispatcher → nve_ops::embedding_lookup → NVELayerRegistry → LinearUVMEmbedding::lookup()
+```
+
+### Example
+
+A complete working sample is in [../samples/cpp_inference/](../samples/cpp_inference/). See the [README](../samples/cpp_inference/README.md) for build and run instructions.
+
 ## Unit tests
 Unit tests are located in [../tests/](../tests/) and are using 2 frameworks: [GoogleTest](https://github.com/google/googletest) and [PyTest](https://docs.pytest.org/en/stable/).
 

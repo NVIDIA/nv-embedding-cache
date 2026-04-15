@@ -4,6 +4,12 @@ Releases will be listed below, latest at the top.
 
 Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means release of February 2026 with patch 3.
 
+## EXPERIMENTAL Feature Branch
+This branch introduces a new integration with Torch.
+See the ["C++ Deployment with PyTorch"](docs/advanced.md#c-deployment-with-pytorch-aotinductor) section in [docs/advanced.md](docs/advanced.md).
+* Only some layer types are currently supported.
+* Implementation / API is not yet stable.
+
 ## NV Embedding Cache 26.04
 ### New Features
 - C API (see: [c_api.md](docs/c_api.md))

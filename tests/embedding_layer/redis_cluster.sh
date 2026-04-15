@@ -49,6 +49,7 @@ case $1 in
       cd /tmp/$i
       redis-server \
       --port $i \
+      --protected-mode no \
       --cluster-enabled yes \
       --cluster-config-file nodes.conf \
       --cluster-node-timeout 5000 \
@@ -65,9 +66,11 @@ case $1 in
         exit 4
       fi
     done
-    
+
     printf "${BLUE}[Starting cluster]${NC}\n"
-    echo yes | redis-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 --cluster-replicas 1 >/dev/null
+    LOCAL_IP=$(hostname -I |cut -f1 -d" ")
+    LOCAL_IP=${LOCAL_IP:-127.0.0.1}
+    echo yes | redis-cli --cluster create ${LOCAL_IP}:7000 ${LOCAL_IP}:7001 ${LOCAL_IP}:7002 ${LOCAL_IP}:7003 ${LOCAL_IP}:7004 ${LOCAL_IP}:7005 --cluster-replicas 1 >/dev/null
 
     # Wait until cluster is up
     SLEEP=0

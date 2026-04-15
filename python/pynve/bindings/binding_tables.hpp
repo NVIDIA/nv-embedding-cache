@@ -18,10 +18,7 @@
 #pragma once
 
 #include <table.hpp>
-#include "third_party/pybind11/include/pybind11/pybind11.h"
 #include <memory>
-
-namespace py = pybind11;
 
 namespace nve {
 
@@ -85,22 +82,19 @@ public:
         ParallelHash,
         Redis,
     };
-
+    using KeyType = int64_t; // For now assuming all keys are int64
     // num_rows = 0, means no eviction
     ParameterServerTable(uint64_t num_rows, uint64_t row_elements, nve::DataType_t data_type, uint64_t initial_size, PSType_t ps_type, const std::string& extra_params);
     ~ParameterServerTable();
     void insert_keys(size_t num_keys, uintptr_t keys, uintptr_t values);
     void erase_keys(size_t num_keys, uintptr_t keys);
     void clear_keys();
-    void insert_keys_from_numpy_file(py::object keys_stream, py::object values_stream, uint64_t batch_size);
-    void insert_keys_from_binary_file(py::object keys_stream, py::object values_stream, uint64_t batch_size);
     void insert_keys_from_filepath(const std::string& keys_path, const std::string& values_path, uint64_t batch_size);
+    uint64_t get_row_size_in_bytes() const;
     uint64_t get_num_rows() const override;
-private:
-    // internal function to insert keys from tensor files
     void insert_keys_from_tensor_file(std::shared_ptr<TensorFileFormatBase> keys_file_reader, std::shared_ptr<TensorFileFormatBase> values_file_reader, uint64_t batch_size);
+    
 private:
-    using KeyType = int64_t; // For now assuming all keys are int64
     uint64_t num_rows_;
     uint64_t row_elements_;
     uint64_t row_bytes_;

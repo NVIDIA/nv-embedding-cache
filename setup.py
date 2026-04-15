@@ -47,11 +47,20 @@ class CMakeBuild(build_ext):
         # Run CMake build
         try:
             # Cmake configure and build
+            try:
+                import torch.utils
+                torch_prefix = torch.utils.cmake_prefix_path
+            except ImportError:
+                torch_prefix = None
+
             cmake_args = ['cmake',
                           '-B', _build_dir,
                           '-DCMAKE_BUILD_TYPE=Release',
                           '-DNVE_ORIGIN_RPATH=1',
                           '--fresh']
+
+            if torch_prefix:
+                cmake_args.append(f'-DCMAKE_PREFIX_PATH={torch_prefix}')
 
             # Disable tests/samples by default, unless PYNVE_BUILD_SAMPLES=1
             if os.environ.get('PYNVE_BUILD_SAMPLES') != '1':
@@ -60,6 +69,11 @@ class CMakeBuild(build_ext):
             # In CI disable AVX512
             if (os.environ.get('PYNVE_DISABLE_AVX512')):
                 cmake_args.append('-DNVE_DISABLE_AVX512=1')
+
+            # PyTorch custom op bindings — built by default.
+            # Set PYNVE_DISABLE_TORCH_BINDINGS=1 to disable.
+            if os.environ.get('PYNVE_DISABLE_TORCH_BINDINGS') == '1':
+                cmake_args.append('-DNVE_DISABLE_TORCH_BINDINGS=ON')
 
             subprocess.check_call(cmake_args)
             build_threads = min(os.cpu_count(), 32)

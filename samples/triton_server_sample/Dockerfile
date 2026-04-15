@@ -25,7 +25,7 @@ COPY . .
 RUN pip install .
 
 # Install Python dependencies for the model backend
-RUN pip install -r benchmarks/requirements.txt
+RUN pip install -r samples/triton_server_sample/requirements.txt
 
 
 ENTRYPOINT ["tritonserver"]

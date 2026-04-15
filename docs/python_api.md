@@ -76,8 +76,18 @@ Loading a dcp checkpoint is straightforward. When calling dcp.load, the user is 
 Special consideration is required when loading into a multi-process environment with "Distributed Memblock"; since all processes share the same NVEmbedding.weight underlying physical memory, only one rank should load the tensor (usually rank 0).
 See [load_sample.py](../samples/pytorch/load_checkpoint_sample/load_sample.py)
 
+## Note on PyTorch Versions
 
+PyTorch integration uses the LibTorch Stable ABI, which is only available since PyTorch 2.10.
+`pip install .` uses build isolation and typically installs the latest stable PyTorch from PyPI to build against.
+If the locally installed PyTorch version is older than 2.10, you may encounter an import error when importing `pynve.nve`, as it links against `libnve-torch-ops.so` by default.
 
+To work around this, install without torch bindings:
+```bash
+PYNVE_DISABLE_TORCH_BINDINGS=1 pip install .
+```
+
+This uses the legacy Python API path. Embedding lookups and training work normally, but exporting via `torch.export` or AOTInductor will not be available.
 
 
 

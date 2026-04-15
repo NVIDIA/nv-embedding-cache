@@ -23,7 +23,7 @@ use **NVEmbedding** with cache_type **Hierarchical**(Py) / **HierarchicalEmbeddi
 - CUDA 12.8+ (earlier version will work with minor code changes)
 - CMake 3.18+
 - Python 3.10+
-- Torch
+- Torch (2.10+ needed for export)
 - (Optional) Redis 7.0.15+ - used in some tests
 
 The provided [Dockerfile](Dockerfile) satisfies these prerequisites. If you're using your own environment, you can skip step (2) in the installation instructions below.
