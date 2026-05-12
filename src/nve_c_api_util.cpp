@@ -69,6 +69,7 @@ nve_gpu_table_config_t nve_gpu_table_config_default(void) {
   c.modify_on_gpu = 1;
   c.kernel_mode_type = 0;
   c.kernel_mode_value = 0;
+  c.invalid_key = -1;
   return c;
 }
 
@@ -100,6 +101,8 @@ nve_hierarchical_layer_config_t nve_hierarchical_layer_config_default(void) {
   c.min_insert_freq_host = 0;
   c.min_insert_size_gpu = 1 << 16;
   c.min_insert_size_host = 0;
+  c.default_embedding = NULL;
+  c.default_embedding_size = 0;
   return c;
 }
 
@@ -117,6 +120,7 @@ nve_host_table_config_t nve_host_table_config_default(void) {
   c.key_size = 8;
   c.max_value_size = 8;
   c.value_dtype = NVE_DTYPE_UNKNOWN;
+  c.invalid_key = -1;
   return c;
 }
 

@@ -19,6 +19,33 @@
 
 #include <gtest/gtest.h>
 
+#include <dlfcn.h>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
+
+#include <host_table.hpp>
+
+namespace nve_test {
+
+inline std::string plugin_so(const std::string& plugin_name) {
+  return "libnve-plugin-" + plugin_name + ".so";
+}
+
+inline std::filesystem::path nve_library_dir() {
+  Dl_info dli;
+  if (dladdr(reinterpret_cast<const void*>(nve::load_host_table_plugin), &dli) == 0) {
+    throw std::runtime_error("Could not locate nve-common shared library");
+  }
+  return std::filesystem::path{dli.dli_fname}.parent_path();
+}
+
+inline std::string plugin_full_path(const std::string& plugin_name) {
+  return (nve_library_dir() / plugin_so(plugin_name)).string();
+}
+
+}  // namespace nve_test
+
 // Macros to skip tests if specific plugins are not available.
 // These use compile-time checks based on NVE_FEATURE_* preprocessor definitions.
 

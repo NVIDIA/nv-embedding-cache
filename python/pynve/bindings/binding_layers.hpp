@@ -17,8 +17,6 @@
  
 #pragma once
 
-#include "third_party/pybind11/include/pybind11/pybind11.h"
-#include "third_party/pybind11/include/pybind11/functional.h"
 #include "include/embedding_layer.hpp"
 #include "include/hierarchical_embedding_layer.hpp"
 #include "include/linear_embedding_layer.hpp"
@@ -36,14 +34,12 @@
 #include "cuda_ops/cuda_common.h"
 #include "cuda_ops/dedup_grads_kernel.cuh"
 #include "cuda_ops/gradient_calculator.cuh"
-#include "binding_memblock.hpp"
+#include "include/memblock.hpp"
 #include "binding_tables.hpp"
-#include "binding_serialization.hpp"
+#include "include/serialization.hpp"
 #include "cuda_ops/pipeline_gather.cuh"
 
 #include <sys/mman.h>
-
-namespace py = pybind11;
 
 namespace nve {
 
@@ -58,6 +54,21 @@ template<typename IndexT>
 class NVEmbedBinding
 {
 public:
+    // Accessors used by torch custom ops for shape inference and output allocation.
+    int64_t get_embedding_dim() const {
+        switch (data_type_) {
+            case nve::DataType_t::Float32:
+                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(float));
+            case nve::DataType_t::Float16:
+                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(__half));
+            default:
+                NVE_CHECK_(false, "Invalid data type");
+                return 0;
+        }
+    }
+
+    nve::DataType_t get_data_type() const { return data_type_; }
+
     void lookup(size_t num_keys, uintptr_t keys, uintptr_t output, uint64_t stream_)
     {
         float hitrates[3] = {0};
@@ -114,10 +125,10 @@ public:
         if (num_keys > max_num_keys_) {
             size_t tmp_mem_size_device, tmp_mem_size_host;
             size_t data_element_size = (data_type_ == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
-            backprop_runner_->GetAllocRequirements(num_keys, data_element_size, tmp_mem_size_device, tmp_mem_size_host);
+            backprop_runner_->get_alloc_requirements(num_keys, data_element_size, tmp_mem_size_device, tmp_mem_size_host);
             char* tmp_device_mem = reinterpret_cast<char*>(d_tmp_device_buf_.get_ptr(tmp_mem_size_device));
             char* tmp_host_mem = reinterpret_cast<char*>(d_tmp_host_buf_.get_ptr(tmp_mem_size_host));
-            backprop_runner_->SetAndInitBuffers(num_keys, data_element_size, tmp_device_mem, tmp_host_mem);
+            backprop_runner_->set_and_init_buffers(num_keys, data_element_size, tmp_device_mem, tmp_host_mem);
             max_num_keys_ = num_keys;
         }
 
@@ -127,7 +138,7 @@ public:
         uint32_t embed_width = static_cast<uint32_t>(row_size_in_bytes_  / element_size);
 
         if (data_type_ == nve::DataType_t::Float32) {
-            uint64_t num_unique_keys = backprop_runner_->template ComputeGradients<float, is_fixed_hotness>(
+            uint64_t num_unique_keys = backprop_runner_->template compute_gradients<float, is_fixed_hotness>(
                 reinterpret_cast<const IndexT*>(keys),
                 nullptr,
                 reinterpret_cast<const float*>(grads),
@@ -142,7 +153,7 @@ public:
                 stream);
             return num_unique_keys;
         } else {
-            uint64_t num_unique_keys = backprop_runner_->template ComputeGradients<__half, is_fixed_hotness>(
+            uint64_t num_unique_keys = backprop_runner_->template compute_gradients<__half, is_fixed_hotness>(
                 reinterpret_cast<const IndexT*>(keys),
                 nullptr,
                 reinterpret_cast<const __half*>(grads),
@@ -173,10 +184,10 @@ public:
         if (num_keys > max_num_keys_) {
             size_t tmp_mem_size_device, tmp_mem_size_host;
             size_t data_element_size = (data_type_ == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
-            backprop_runner_->GetAllocRequirements(num_keys, data_element_size, tmp_mem_size_device, tmp_mem_size_host);
+            backprop_runner_->get_alloc_requirements(num_keys, data_element_size, tmp_mem_size_device, tmp_mem_size_host);
             char* tmp_device_mem = reinterpret_cast<char*>(d_tmp_device_buf_.get_ptr(tmp_mem_size_device));
             char* tmp_host_mem = reinterpret_cast<char*>(d_tmp_host_buf_.get_ptr(tmp_mem_size_host));
-            backprop_runner_->SetAndInitBuffers(num_keys, data_element_size, tmp_device_mem, tmp_host_mem);
+            backprop_runner_->set_and_init_buffers(num_keys, data_element_size, tmp_device_mem, tmp_host_mem);
             max_num_keys_ = num_keys;
         }
 
@@ -186,7 +197,7 @@ public:
         uint32_t embed_width = static_cast<uint32_t>(row_size_in_bytes_  / element_size);
 
         if (data_type_ == nve::DataType_t::Float32) {
-            uint64_t num_unique_keys = backprop_runner_->template ComputeGradients<float, is_fixed_hotness>(
+            uint64_t num_unique_keys = backprop_runner_->template compute_gradients<float, is_fixed_hotness>(
                 reinterpret_cast<const IndexT*>(keys),
                 reinterpret_cast<const IndexT*>(offsets),
                 reinterpret_cast<const float*>(grads),
@@ -201,7 +212,7 @@ public:
                 stream);
             return num_unique_keys;
         } else {
-            uint64_t num_unique_keys = backprop_runner_->template ComputeGradients<__half, is_fixed_hotness>(
+            uint64_t num_unique_keys = backprop_runner_->template compute_gradients<__half, is_fixed_hotness>(
                 reinterpret_cast<const IndexT*>(keys),
                 reinterpret_cast<const IndexT*>(offsets),
                 reinterpret_cast<const __half*>(grads),
@@ -366,15 +377,16 @@ private:
     using layer_type = nve::HierarchicalEmbeddingLayer<IndexT>;
 
 public:
-    HierarchicalEmbedding(size_t row_size, nve::DataType_t dtype, 
-                          uint64_t gpu_cache_size, 
+    HierarchicalEmbedding(size_t row_size, nve::DataType_t dtype,
+                          uint64_t gpu_cache_size,
                           uint64_t host_cache_size,
-                          table_ptr_t remote, 
-                          bool use_private_stream, 
-                          int device_id, 
-                          EmbedLayerConfig config) : 
-                          NVEmbedBinding<IndexT>(device_id, row_size, dtype, config), 
-                          use_private_stream_(use_private_stream), 
+                          table_ptr_t remote,
+                          uint64_t num_rows,
+                          bool use_private_stream,
+                          int device_id,
+                          EmbedLayerConfig config) :
+                          NVEmbedBinding<IndexT>(device_id, row_size, dtype, config),
+                          use_private_stream_(use_private_stream),
                           ps_table_(nullptr)
     {
         ScopedDevice scope_device(this->device_id_);
@@ -402,9 +414,8 @@ public:
             host_table_ptr_t nvhm_table = create_nvhm_table(host_cache_size, this->row_size_in_bytes_, dtype);
             tables.push_back(nvhm_table);
             if (remote) {
-                // Host cache is L2 with remote being L3, set target hitrate to be proportional by size
-                // Unless num_rows is 0, which means increase host cache can increase indefinitely
-                auto num_rows = std::dynamic_pointer_cast<ParameterServerTable>(remote)->get_num_rows();
+                // Host cache is L2 with remote being L3, set target hitrate to be proportional by size.
+                // num_rows == 0 means the remote is unbounded, so the host cache can grow indefinitely.
                 float target_hitrate = num_rows > 0 ? float(host_cache_size) / float(num_rows * this->row_size_in_bytes_) : 1.0f;
                 if (target_hitrate > 1.f) {
                     NVE_LOG_WARNING_("Cache is initialized with maximal size larger than the embedding table");
@@ -433,7 +444,7 @@ public:
 
     host_table_ptr_t create_nvhm_table(uint64_t table_size, uint64_t row_size, nve::DataType_t data_type)
     {
-        load_host_table_plugin("nvhm");
+        load_host_table_plugin("libnve-plugin-nvhm.so");
 
         constexpr int64_t num_partitions = 1; // Single partition is better for inference, increase if lock contention is an issue during insert
         const int64_t keys_per_partition = table_size / row_size / num_partitions;
@@ -491,11 +502,11 @@ private:
                         EmbedLayerConfig config) : 
                         NVEmbedBinding<IndexT>(device_id, row_size, dtype, config), 
                         use_private_stream_(use_private_stream),
-                        mem_block_(mem_block)
+                        mem_block_(std::move(mem_block))
     {
         ScopedDevice scope_device(this->device_id_);
         auto element_size = (dtype == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
-        
+
         nve::GPUTableConfig cfg;
         cfg.device_id = this->device_id_;
         cfg.cache_size = static_cast<int64_t>(gpu_cache_size);
@@ -503,7 +514,7 @@ private:
         cfg.row_size_in_bytes = this->row_size_in_bytes_;
         cfg.value_dtype = dtype;
         cfg.count_misses = true;
-        
+
         if (use_private_stream)
         {
             NVE_CHECK_(cudaStreamCreate(&private_stream_));
@@ -514,7 +525,7 @@ private:
 
         // handle kernel mode
         cfg.kernel_mode_type = config.kernel_mode;
-        
+
         if (cfg.kernel_mode_type == static_cast<uint64_t>(nve::KernelType::SortGather)) {
             cfg.kernel_mode_value = config.kernel_mode_value_1 > 0 ? config.kernel_mode_value_1 : 1024;
         }
@@ -524,9 +535,9 @@ private:
             gather_pipeline_params_.num_aux_streams = config.kernel_mode_value_2 > 0 ? config.kernel_mode_value_2 : 16;
             cfg.kernel_mode_value = reinterpret_cast<uintptr_t>(&gather_pipeline_params_);
         }
-        
+
         auto gpu_table = std::make_shared<nve::GpuTable<IndexT>>(cfg, nullptr /* using default allocator for device 0*/);
-        
+
         typename layer_type::Config layer_cfg = {"uvm_layer", std::make_shared<DefaultInsertHeuristic>(std::vector<float>{DefaultInsertHeuristic::DEFAULT_THRESHOLD})};
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, gpu_table, nullptr /* using default allocator for device 0*/);
 
@@ -569,37 +580,16 @@ private:
         return dlm_tensor;
     }
 
-    py::capsule get_dl_tensor(nve::DataType_t dtype)
+    void write_tensor_to_stream(nve::StreamWrapperBase& stream, uint64_t name)
     {
-        DLManagedTensor* p = create_dlpack_tensor(dtype);
-        return py::capsule(p, "dltensor", [](PyObject* capsule) { 
-            const char *name = PyCapsule_GetName(capsule);
-            if (!name || std::strcmp(name, "dltensor") != 0) {
-                // Already consumed / renamed (e.g. "used_dltensor") or invalid.
-                return;
-            }
-
-            auto *managed = static_cast<DLManagedTensor *>(
-                PyCapsule_GetPointer(capsule, "dltensor")
-            );
-            if (!managed) return;
-
-            if (managed->deleter) {
-                managed->deleter(managed);  // This is the DLManagedTensor deleter.
-            }
-        });
+        nve::TensorFileFormat writer;
+        writer.write_tensor_to_stream(stream, name, uvm_table_);
     }
 
-    void write_tensor_to_stream(py::object stream, uint64_t name)
+    void load_tensor_from_stream(nve::StreamWrapperBase& stream, uint64_t name)
     {
-        TensorFileFormat tensor_file_writer;
-        tensor_file_writer.write_tensor_to_stream(stream, name, uvm_table_);
-    }
-
-    void load_tensor_from_stream(py::object stream, uint64_t name)
-    {
-        TensorFileFormat tensor_file_reader;
-        tensor_file_reader.load_tensor_from_stream(stream, name, uvm_table_);
+        nve::TensorFileFormat reader;
+        reader.load_tensor_from_stream(stream, name, uvm_table_);
     }
 
     ~LinearUVMEmbedding()
@@ -629,24 +619,55 @@ class GPUEmbedding : public NVEmbedBinding<IndexT>
 private:
     using layer_type = nve::GPUEmbeddingLayer<IndexT>;
     public:
-    GPUEmbedding(size_t row_size, 
-                size_t num_embeddings, 
-                nve::DataType_t dtype, 
-                uintptr_t embedding_table, 
-                int device_id, 
-                EmbedLayerConfig config) : 
-                NVEmbedBinding<IndexT>(device_id, row_size, dtype, config) 
+    GPUEmbedding(size_t row_size,
+                size_t num_embeddings,
+                nve::DataType_t dtype,
+                std::shared_ptr<MemBlock> mem_block,
+                int device_id,
+                EmbedLayerConfig config) :
+                NVEmbedBinding<IndexT>(device_id, row_size, dtype, config),
+                num_embeddings_(num_embeddings),
+                mem_block_(std::move(mem_block))
     {
         ScopedDevice scope_device(this->device_id_);
+
+        gpu_table_.data = mem_block_->get_ptr();
+        gpu_table_.row = num_embeddings;
+        gpu_table_.col = row_size;
+        gpu_table_.element_size_in_bytes = static_cast<uint64_t>(dtype_size(dtype));
 
         nve::GPUEmbeddingLayerConfig layer_cfg;
         layer_cfg.device_id = this->device_id_;
         layer_cfg.num_embeddings = num_embeddings;
         layer_cfg.embedding_width_in_bytes = this->row_size_in_bytes_;
-        layer_cfg.embedding_table = reinterpret_cast<void*>(embedding_table);
+        layer_cfg.embedding_table = gpu_table_.data;
         layer_cfg.value_dtype = this->data_type_;
         layer_cfg.layer_name = "gpu_layer";
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, nullptr /* using default allocator for device 0*/);
+    }
+
+    void write_tensor_to_stream(nve::StreamWrapperBase& stream, uint64_t name)
+    {
+        ScopedDevice scope_device(this->device_id_);
+        const size_t sz = gpu_table_.row * gpu_table_.col * gpu_table_.element_size_in_bytes;
+        std::vector<uint8_t> host_buf(sz);
+        NVE_CHECK_(cudaMemcpy(host_buf.data(), gpu_table_.data, sz, cudaMemcpyDeviceToHost));
+        TensorWrapper host_view = gpu_table_;
+        host_view.data = host_buf.data();
+        nve::TensorFileFormat writer;
+        writer.write_tensor_to_stream(stream, name, host_view);
+    }
+
+    void load_tensor_from_stream(nve::StreamWrapperBase& stream, uint64_t name)
+    {
+        ScopedDevice scope_device(this->device_id_);
+        const size_t sz = gpu_table_.row * gpu_table_.col * gpu_table_.element_size_in_bytes;
+        std::vector<uint8_t> host_buf(sz);
+        TensorWrapper host_view = gpu_table_;
+        host_view.data = host_buf.data();
+        nve::TensorFileFormat reader;
+        reader.load_tensor_from_stream(stream, name, host_view);
+        NVE_CHECK_(cudaMemcpy(gpu_table_.data, host_buf.data(), sz, cudaMemcpyHostToDevice));
     }
 
     ~GPUEmbedding()
@@ -654,6 +675,11 @@ private:
         ScopedDevice scope_device(this->device_id_);
         this->release_contexts();
     }
+
+private:
+    TensorWrapper gpu_table_;
+    uint64_t num_embeddings_{0};
+    std::shared_ptr<MemBlock> mem_block_;
 };
 
 } // namespace nve

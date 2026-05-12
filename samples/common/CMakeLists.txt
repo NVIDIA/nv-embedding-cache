@@ -25,3 +25,7 @@ target_link_libraries(nve-samples-common PUBLIC -lnvinfer -lcuda)
 target_compile_options(nve-samples-common PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: ${NVCC_BASE_FLAGS} >)
 target_compile_options(nve-samples-common PRIVATE $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>: ${NVCC_DEBUG_FLAGS} >)
 target_compile_options(nve-samples-common PRIVATE $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>: ${NVCC_RELEASE_FLAGS} >)
+
+# Reusable host-table plugin (libnve-plugin-custom_remote.so) used by the
+# c_api_custom_remote, pytorch, and cpp_inference_custom_ps samples.
+add_subdirectory(custom_remote_plugin)

@@ -141,7 +141,7 @@ class HierLayerTest {
       case HostTableType::None:
         break;// do nothing
       case HostTableType::NVHashMap: {
-        std::vector<std::string> plugin_names{"nvhm"};
+        std::vector<std::string> plugin_names{nve_test::plugin_full_path("nvhm")};
         load_host_table_plugins(plugin_names.begin(), plugin_names.end());
         nlohmann::json nvhm_conf = {{"mask_size", 8},
                                   {"key_size", sizeof(IndexT)},
@@ -163,7 +163,7 @@ class HierLayerTest {
       }
       case HostTableType::Redis: {
         check_redis_ready();
-        std::vector<std::string> plugin_names{"redis"};
+        std::vector<std::string> plugin_names{nve_test::plugin_full_path("redis")};
         load_host_table_plugins(plugin_names.begin(), plugin_names.end());
         nlohmann::json redis_conf = {
                                       {"mask_size", 8},
@@ -181,7 +181,7 @@ class HierLayerTest {
         break;
       }
       case HostTableType::Abseil: {
-        std::vector<std::string> plugin_names{"abseil"};
+        std::vector<std::string> plugin_names{nve_test::plugin_full_path("abseil")};
         load_host_table_plugins(plugin_names.begin(), plugin_names.end());
         nlohmann::json abseil_conf = {{"mask_size", 8},
                                   {"key_size", sizeof(IndexT)},
@@ -200,7 +200,7 @@ class HierLayerTest {
         break;
       }
       case HostTableType::Phmap: {
-        std::vector<std::string> plugin_names{"phmap"};
+        std::vector<std::string> plugin_names{nve_test::plugin_full_path("phmap")};
         load_host_table_plugins(plugin_names.begin(), plugin_names.end());
         nlohmann::json phm_conf = {{"mask_size", 8},
                                   {"key_size", sizeof(IndexT)},
@@ -396,16 +396,16 @@ class HierLayerTest {
   void Clear(TableType db_type) {
     switch (db_type) {
       case TableType::Device:
-        m_gpu_tab->clear(m_ctx);
+        if (m_gpu_tab) m_gpu_tab->clear(m_ctx);
         break;
       case TableType::Host:
-        m_host_tab->clear(m_ctx);
+        if (m_host_tab) m_host_tab->clear(m_ctx);
         break;
       case TableType::Remote:
-        m_remote_tab->clear(m_ctx);
+        if (m_remote_tab) m_remote_tab->clear(m_ctx);
         break;
       case TableType::Ref:
-        m_ref_tab->clear(m_ctx);
+        if (m_ref_tab) m_ref_tab->clear(m_ctx);
         break;
       default:
         throw std::runtime_error("Invalid database type in test!");
@@ -820,6 +820,107 @@ TEST_P(HierachicalSpecialConfig, InflightInsertAccumulationFlush) {
   EXPECT_FATAL_FAILURE(ExpectedFailLookupHelper(), "exceeds hit_tol");
   hlt.Wait(); // Wait for auto insert to finish
   NVE_CHECK_(cudaDeviceSynchronize());
+}
+
+// Test that keys missing from all tables get filled with the configured default embedding,
+// while keys that hit retain their stored values.
+TEST(HierachicalDefaultEmbedding, FillsMissesFromConfig) {
+  cudaGetLastError();
+  using IndexT = int64_t;
+  constexpr uint64_t row_size = 64;
+  constexpr uint64_t num_keys = 32;
+  constexpr uint64_t num_inserted = 16;
+  constexpr uint8_t default_byte = 0xAB;
+  constexpr uint8_t inserted_byte = 0x42;
+
+  HostTableConfig host_cfg;
+  host_cfg.value_dtype = DataType_t::Float32;
+  host_cfg.max_value_size = static_cast<int64_t>(row_size);
+  auto host_tab = std::make_shared<MockHostTable<IndexT>>(host_cfg, true /*functional_ref*/);
+
+  std::vector<uint8_t> default_emb(row_size, default_byte);
+
+  typename HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
+  layer_cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
+  layer_cfg.default_embedding = default_emb;
+  std::vector<table_ptr_t> tables{host_tab};
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
+  auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
+  layer->clear(ctx);
+
+  std::vector<IndexT> keys(num_keys);
+  for (uint64_t i = 0; i < num_keys; i++) keys[i] = static_cast<IndexT>(i);
+  std::vector<uint8_t> insert_data(num_inserted * row_size, inserted_byte);
+  layer->insert(ctx, static_cast<int64_t>(num_inserted), keys.data(),
+                static_cast<int64_t>(row_size), static_cast<int64_t>(row_size),
+                insert_data.data(), 0 /*table_id*/);
+  ctx->wait();
+
+  std::vector<uint8_t> output(num_keys * row_size, 0x00);
+  constexpr uint64_t mask_bits = sizeof(max_bitmask_repr_t) * 8;
+  std::vector<max_bitmask_repr_t> hitmask((num_keys + mask_bits - 1) / mask_bits, 0);
+  layer->lookup(ctx, static_cast<int64_t>(num_keys), keys.data(), output.data(),
+                static_cast<int64_t>(row_size), hitmask.data(),
+                nullptr /*pool_params*/, nullptr /*hitrates*/);
+  ctx->wait();
+
+  for (uint64_t i = 0; i < num_keys; i++) {
+    const bool hit = (hitmask[i / mask_bits] >> (i % mask_bits)) & 0x1u;
+    if (i < num_inserted) {
+      ASSERT_TRUE(hit) << "expected hit for key " << i;
+      for (uint64_t j = 0; j < row_size; j++) {
+        ASSERT_EQ(inserted_byte, output[i * row_size + j])
+            << "key " << i << " byte " << j;
+      }
+    } else {
+      ASSERT_FALSE(hit) << "expected miss for key " << i;
+      for (uint64_t j = 0; j < row_size; j++) {
+        ASSERT_EQ(default_byte, output[i * row_size + j])
+            << "key " << i << " byte " << j;
+      }
+    }
+  }
+}
+
+// Sanity: when default_embedding is unset, miss outputs are not overwritten.
+TEST(HierachicalDefaultEmbedding, NoDefaultLeavesMissesUntouched) {
+  cudaGetLastError();
+  using IndexT = int64_t;
+  constexpr uint64_t row_size = 32;
+  constexpr uint64_t num_keys = 8;
+  constexpr uint8_t sentinel = 0x77;
+
+  HostTableConfig host_cfg;
+  host_cfg.value_dtype = DataType_t::Float32;
+  host_cfg.max_value_size = static_cast<int64_t>(row_size);
+  auto host_tab = std::make_shared<MockHostTable<IndexT>>(host_cfg, true /*functional_ref*/);
+
+  typename HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
+  layer_cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
+  // default_embedding intentionally left empty
+  std::vector<table_ptr_t> tables{host_tab};
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
+  auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
+  layer->clear(ctx);
+
+  std::vector<IndexT> keys(num_keys);
+  for (uint64_t i = 0; i < num_keys; i++) keys[i] = static_cast<IndexT>(1000 + i);  // none inserted
+  std::vector<uint8_t> output(num_keys * row_size, sentinel);
+  constexpr uint64_t mask_bits = sizeof(max_bitmask_repr_t) * 8;
+  std::vector<max_bitmask_repr_t> hitmask((num_keys + mask_bits - 1) / mask_bits, 0);
+  layer->lookup(ctx, static_cast<int64_t>(num_keys), keys.data(), output.data(),
+                static_cast<int64_t>(row_size), hitmask.data(),
+                nullptr /*pool_params*/, nullptr /*hitrates*/);
+  ctx->wait();
+
+  for (uint64_t i = 0; i < num_keys; i++) {
+    const bool hit = (hitmask[i / mask_bits] >> (i % mask_bits)) & 0x1u;
+    ASSERT_FALSE(hit) << "expected miss for key " << i;
+    for (uint64_t j = 0; j < row_size; j++) {
+      ASSERT_EQ(sentinel, output[i * row_size + j])
+          << "key " << i << " byte " << j;
+    }
+  }
 }
 
 // These cases must have remote PS for the test flow to work correctly

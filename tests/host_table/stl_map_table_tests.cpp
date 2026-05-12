@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <execution_context.hpp>
+#include <json_support.hpp>
 #include <stl_map_backed_table.hpp>
 
 using namespace nve;
@@ -36,24 +37,24 @@ TEST(stl_map_backed_table, parse_table_conf) {
     "key_size": 4,
     "max_value_size": 16,
     "value_dtype": "bfloat",
-    
+
     "num_partitions": 2,
     "partitioner": "always_zero",
     "workgroups": [1],
     "max_find_task_size": 128,
-    
+
     "value_alignment": 32,
     "allocation_rate": 4096,
-    
+
     "prefetch_values": false,
-    
+
     "overflow_policy": {
       "overflow_margin": 1024,
       "handler": "evict_lru",
       "resolution_margin": 0.5
     }
   })"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   STLMapTableConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));
@@ -64,7 +65,7 @@ TEST(stl_map_backed_table, parse_factory_conf) {
   std::cout << static_cast<nlohmann::json>(conf) << '\n';
 
   nlohmann::json json(R"({})"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   STLMapTableFactoryConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));

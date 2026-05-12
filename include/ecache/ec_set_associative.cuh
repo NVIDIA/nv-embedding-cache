@@ -19,10 +19,13 @@
 #include "embed_cache.cuh"
 #include "ec_set_associative.h"
 #include "ec_kernel_common.cuh"
+#include "ec_hash.h"
 #include <cuda_fp16.h>
 #include <cuda/pipeline>
 #include <cooperative_groups.h>
 #include <cub/cub.cuh>
+#include <thrust/fill.h>
+#include <thrust/execution_policy.h>
 #include <type_traits>
 #include <limits>
 
@@ -42,14 +45,14 @@ constexpr __host__ __device__ uint32_t calc_pipe_buffer_size(uint32_t row_size)
 template<typename IndexT, typename TagT>
 static __device__ inline uint32_t embed_cache_get_way_mask(IndexT lane_idx, uint32_t curr_table, const typename EmbedCacheSA<IndexT, TagT>::CacheData data)
 {
-    uint64_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-    uint64_t set_idx = lane_idx % data.num_sets;
+    uint64_t cache_offset = static_cast<uint64_t>(curr_table) * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+    uint64_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
     const TagT* ways = (const TagT*)(data.tags_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, TagT>::NUM_WAYS) * sizeof(TagT));
     uint32_t out = 0;
     for (uint32_t i = 0; i < EmbedCacheSA<IndexT, TagT>::NUM_WAYS; i++)
     {
         TagT way = ways[i];
-        IndexT key = way * data.num_sets + set_idx;
+        IndexT key = embed_cache_construct_key<IndexT>(way, set_idx, data.num_sets);
         uint32_t b = key == lane_idx;
         out |= (b << i); 
     }
@@ -60,8 +63,8 @@ static __device__ inline uint32_t embed_cache_get_way_mask(IndexT lane_idx, uint
 template<typename IndexT, typename TagT>
 static __device__ inline uint64_t embed_cache_get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, TagT>::CacheData data)
 {
-    uint64_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-    uint64_t set_idx = lane_idx % data.num_sets;
+    uint64_t cache_offset = static_cast<uint64_t>(curr_table) * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
+    uint64_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
     uint32_t out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
     uint32_t way = __ffs(out) - 1;
     uint64_t lane_ptr = (out == 0) ? ((table == nullptr) ? 0 : (uint64_t)table + (lane_idx)*(uint64_t)data.row_size_in_bytes) : 
@@ -82,14 +85,14 @@ public:
     static __device__ inline uint64_t get_address(IndexT lane_idx, const int8_t* table, uint32_t curr_table, const typename EmbedCacheSA<IndexT, uint16_t>::CacheData data)
     {
         uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS;
-        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
         uint4 ways_vec = *(uint4*)(data.tags_ptr + (cache_offset + set_idx * EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS) * sizeof(uint16_t));
         uint16_t* ways = (uint16_t*)(&ways_vec);
         uint32_t out = 0;
         for (uint32_t i = 0; i < EmbedCacheSA<IndexT, uint16_t>::NUM_WAYS; i++)
         {
             uint32_t way = ways[i];
-            uint32_t key = way * data.num_sets + set_idx;
+            uint32_t key = embed_cache_construct_key<uint32_t>(way, set_idx, data.num_sets);
             uint32_t b = key == lane_idx;
             out |= (b << i); 
         }
@@ -233,14 +236,14 @@ __global__ void mem_update_accumulate_quantized_kernel(typename EmbedCacheSA<Ind
 }
 
 template<typename IndexT, typename TagT>
-__global__ void invalidate_tag_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, TagT* tags)
+__global__ void invalidate_tag_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, TagT* tags, TagT sentinel_key)
 {
     auto tid = blockIdx.x*blockDim.x + threadIdx.x;
     if (tid < list->num_entries)
     {
         typename EmbedCacheSA<IndexT, TagT>::ModifyEntry e = list->entries[tid];
         TagT* to_mod_tag = tags + e.set * EmbedCacheSA<IndexT, TagT>::NUM_WAYS + e.way;
-        *to_mod_tag = static_cast<TagT>(-1);
+        *to_mod_tag = sentinel_key;
     }
 }
 
@@ -278,7 +281,7 @@ __global__ void query(const IndexT* d_keys, const size_t len,
     {
         IndexT lane_idx = d_keys[tid];
         uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
         uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
         uint32_t lane_way = __ffs(lane_out) - 1;
         if (lane_out == 0)
@@ -341,7 +344,7 @@ __global__ void update_accumulate_no_sync(const IndexT* d_keys, const size_t len
     {
         IndexT lane_idx = d_keys[tid];
         uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
         uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
         uint32_t lane_way = __ffs(lane_out) - 1;
         if (lane_out == 0)
@@ -413,7 +416,7 @@ __global__ void query(const IndexT* d_keys, const size_t len,
         else {
             const IndexT lane_idx = d_keys[tid];
             const uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-            const uint32_t set_idx = lane_idx % data.num_sets;
+            const uint32_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
             const uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
             const uint32_t lane_way = __ffs(lane_out) - 1;
 
@@ -463,11 +466,11 @@ __global__ void query(const IndexT* d_keys, const size_t len,
 
 // need to have an argument explicity depend on IndexT type or the compiler gets confused
 template<typename IndexT, typename TagT>
-cudaError_t call_tag_invalidate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, TagT* tags, cudaStream_t stream)
+cudaError_t call_tag_invalidate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, TagT* tags, TagT sentinel_key, cudaStream_t stream)
 {
     dim3 grid_size((num_entries + 32 - 1)/32,1);
-    dim3 block_size(32, 1); 
-    invalidate_tag_kernel<IndexT, TagT><<<grid_size, block_size, 0, stream>>>(list, tags);
+    dim3 block_size(32, 1);
+    invalidate_tag_kernel<IndexT, TagT><<<grid_size, block_size, 0, stream>>>(list, tags, sentinel_key);
     return cudaGetLastError();
 }
 
@@ -578,8 +581,15 @@ template<typename IndexT, typename TagT>
 cudaError_t call_tag_update_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t num_entries, TagT* tags, cudaStream_t stream)
 {
     dim3 grid_size((num_entries + 32 - 1)/32,1);
-    dim3 block_size(32, 1); 
+    dim3 block_size(32, 1);
     tag_update_kernel<IndexT, TagT><<<grid_size, block_size, 0, stream>>>(list, tags);
+    return cudaGetLastError();
+}
+
+template<typename TagT>
+cudaError_t call_fill_tags(TagT* d_tags, size_t n, TagT sentinel_key, cudaStream_t stream)
+{
+    thrust::fill_n(thrust::cuda::par.on(stream), d_tags, n, sentinel_key);
     return cudaGetLastError();
 }
 
@@ -682,7 +692,7 @@ void __global__ update_accumulate_no_sync_fused_with_pipeline(int8_t* global0, i
         {
             IndexT lane_idx =  indices[tid];
 
-            uint32_t set_idx = lane_idx % data.num_sets;
+            uint32_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
             uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, 0, data);
             uint32_t lane_way = __ffs(lane_out) - 1;
             if (lane_out == 0)
@@ -844,7 +854,7 @@ __global__ void find(const int8_t* uvm,
         auto curr_table = 0;
         IndexT lane_idx = indices[tid];
         uint32_t cache_offset = curr_table * data.num_sets * EmbedCacheSA<IndexT, TagT>::NUM_WAYS;
-        uint32_t set_idx = lane_idx % data.num_sets;
+        uint32_t set_idx = embed_cache_hash_set_idx(lane_idx, data.num_sets);
         uint32_t lane_out = embed_cache_get_way_mask<IndexT, TagT>(lane_idx, curr_table, data);
         uint32_t lane_way = __ffs(lane_out) - 1;
         FindOutput out;

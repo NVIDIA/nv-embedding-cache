@@ -112,7 +112,7 @@ TEST_P(MPIBufferTest, ReadWrite) {
   }
   const auto tc = GetParam();
   auto mpi_env = std::make_shared<nve::MPIEnv>();
-  TestDistBuffer(tc, mpi_env);
+  TestDistBuffer(tc, std::move(mpi_env));
 }
 
 TEST_P(MPIBufferTest, ReadWrite_PartialGroup) {
@@ -135,7 +135,7 @@ TEST_P(MPIBufferTest, ReadWrite_PartialGroup) {
   auto mpi_env_partial = std::make_shared<nve::MPIEnv>(ranks, devices);
 
   const auto tc = GetParam();
-  TestDistBuffer(tc, mpi_env_partial);
+  TestDistBuffer(tc, std::move(mpi_env_partial));
 }
 
 INSTANTIATE_TEST_SUITE_P(

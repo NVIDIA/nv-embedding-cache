@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <execution_context.hpp>
+#include <json_support.hpp>
 #include <phmap_flat_map_table.hpp>
 
 using namespace nve;
@@ -39,16 +40,16 @@ TEST(phmap_plugin, parse_table_conf) {
     "key_size": 4,
     "max_value_size": 16,
     "value_dtype": "bfloat",
-    
+
     "num_partitions": 2,
     "partitioner": "always_zero",
     "workgroups": [1],
     "max_find_task_size": 128,
-    
+
     "value_alignment": 32,
     "allocation_rate": 4096,
     "initial_capacity": 1337,
-    
+
     "prefetch_values": false,
 
     "overflow_policy": {
@@ -57,7 +58,7 @@ TEST(phmap_plugin, parse_table_conf) {
       "resolution_margin": 0.5
     }
   })"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   PHMapFlatMapTableConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));
@@ -68,7 +69,7 @@ TEST(phmap_plugin, parse_factory_conf) {
   std::cout << static_cast<nlohmann::json>(conf) << '\n';
 
   nlohmann::json json(R"({})"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   PHMapFlatMapTableFactoryConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));

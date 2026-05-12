@@ -41,6 +41,9 @@ void ReportMemUsage(std::string msg) {
     double gpu_freeGB = double(gpu_free) / GB;
     double gpu_usedGB = gpu_totalGB - gpu_freeGB;
 
+    const std::ios::fmtflags saved_flags{std::cout.flags()};
+    const std::streamsize saved_precision{std::cout.precision()};
+
     std::cout << "[MEM_USAGE]" << std::fixed << std::setprecision(2)
     << "[ " << msg << " ]" << std::endl;
     std::cout << "\t[ HOST ] Used: " << cpu_usedGB << " GB"
@@ -51,6 +54,9 @@ void ReportMemUsage(std::string msg) {
     << ",  Free: " << gpu_freeGB << " GB"
     << ",  Total: " << gpu_totalGB << " GB"
     << std::endl;
+
+    std::cout.flags(saved_flags);
+    std::cout.precision(saved_precision);
 }
 
 std::ostream& operator<<(std::ostream& os, const BandwidthFormatter& bf)

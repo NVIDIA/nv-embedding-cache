@@ -27,18 +27,18 @@ import pytest
         pytest.param('torch_cpu', [], id='torch_cpu'),
         pytest.param('torchrec', [], id='torchrec'),
         pytest.param('nv_linear', [], id='nv_linear'),
-        pytest.param('nv_hierarchical', ['-pc'], id='nv_hierarchical'),
+        pytest.param('nv_hierarchical', ['--prefill'], id='nv_hierarchical'),
         pytest.param('nv_gpu', [], id='nv_gpu'),
     ])
 def test_single_gpu_bench(mode, extra_params):
     base_params = [ '--batch', '128',
                     '--hotness','128',
-                    '-nr', '1000000',
-                    '-ns', '100',
+                    '--num_table_rows', '1000000',
+                    '--num_steps', '100',
                     '--load_factor', '0.1',
-                    '-nw', '100',
-                    '-ed', '128',
-                    '-a', '1.05', ]
+                    '--num_warmup_steps', '100',
+                    '--embedding_dim', '128',
+                    '--pareto', '0.2', ]
     root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sample_path = os.path.join(root_path, 'benchmarks', 'single_gpu_bench.py')
     cmd = ['python', sample_path, '--mode', mode] + base_params + extra_params
@@ -57,12 +57,12 @@ def test_single_gpu_bench(mode, extra_params):
 def test_multi_gpu_bench(runner, mode):
     base_params = [ '--batch', '128',
                     '--hotness','128',
-                    '-nr', '1000000',
-                    '-ns', '100',
+                    '--num_table_rows', '1000000',
+                    '--num_steps', '100',
                     '--load_factor', '0.1',
-                    '-nw', '100',
-                    '-ed', '128',
-                    '-a', '1.05', ]
+                    '--num_warmup_steps', '100',
+                    '--embedding_dim', '128',
+                    '--alpha', '1.05', ]
     root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sample_path = os.path.join(root_path, 'benchmarks', 'multi_gpu_bench.py')
     cmd = runner + [sample_path] + (['--'] if runner[0] == 'torchx' else []) +['--mode', mode] + base_params

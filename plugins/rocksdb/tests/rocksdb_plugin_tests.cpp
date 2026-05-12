@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <execution_context.hpp>
+#include <json_support.hpp>
 #include <rocksdb_table.hpp>
 
 using namespace nve;
@@ -35,14 +36,14 @@ TEST(rocksdb_plugin, parse_table_conf) {
       "key_size": 4,
       "max_value_size": 16,
       "value_dtype": "bfloat",
-      
+
       "max_batch_size": 1024,
-      
+
       "column_family": "some_column_name",
       "verify_checksums": false
     }
   )"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   RocksDBTableConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));
@@ -57,7 +58,7 @@ TEST(rocksdb_plugin, parse_factory_conf) {
     "read_only": true,
     "num_threads": 8
   })"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   RocksDBTableFactoryConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));

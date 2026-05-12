@@ -169,24 +169,24 @@ struct generic_bitmask final {
   }
 
   static constexpr repr_type load(const void* const __restrict mem) noexcept {
-    NVE_ASSERT_(mem % size == 0);
+    NVE_ASSERT_(reinterpret_cast<uintptr_t>(mem) % size == 0);
     return *reinterpret_cast<const repr_type*>(mem);
   }
 
   static constexpr repr_type load(const char* const __restrict mem, const int64_t ij) noexcept {
-    NVE_ASSERT_(mem % size == 0);
+    NVE_ASSERT_(reinterpret_cast<uintptr_t>(mem) % size == 0);
     NVE_ASSERT_(ij >= 0);
     return load(&mem[ij / num_bits * size]);
   }
 
   static constexpr void store(void* const __restrict mem, const repr_type repr) noexcept {
-    NVE_ASSERT_(mem % size == 0);
+    NVE_ASSERT_(reinterpret_cast<uintptr_t>(mem) % size == 0);
     *reinterpret_cast<repr_type*>(mem) = repr;
   }
 
   static constexpr void store(char* const __restrict mem, const int64_t ij,
                               const repr_type repr) noexcept {
-    NVE_ASSERT_(mem % size == 0);
+    NVE_ASSERT_(reinterpret_cast<uintptr_t>(mem) % size == 0);
     NVE_ASSERT_(ij >= 0);
     store(&mem[ij / num_bits * size], repr);
   }
@@ -253,14 +253,14 @@ struct generic_bitmask final {
   }
 
   static constexpr void atomic_join(void* const __restrict mem, const repr_type repr) noexcept {
-    NVE_ASSERT_(mem % size == 0);
+    NVE_ASSERT_(reinterpret_cast<uintptr_t>(mem) % size == 0);
     repr_type* const dst{reinterpret_cast<repr_type*>(mem)};
     __atomic_or_fetch(dst, repr, __ATOMIC_RELAXED);
   }
 
   static constexpr void atomic_join(char* const __restrict mem, const int64_t ij,
                                     const repr_type repr) noexcept {
-    NVE_ASSERT_(mem % size == 0);
+    NVE_ASSERT_(reinterpret_cast<uintptr_t>(mem) % size == 0);
     NVE_ASSERT_(ij >= 0);
     atomic_join(&mem[ij / num_bits * size], repr);
   }

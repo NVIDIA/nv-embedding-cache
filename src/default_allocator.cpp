@@ -71,13 +71,13 @@ size_t get_largest_hugepage_bits(size_t alloc_size) {
         start += start_token.size(); // advance start to remove the start token
         size_t page_size_kb;
         std::istringstream(path_str.substr(start, end - start)) >> page_size_kb;
-        NVE_ASSERT_(std::popcount(page_size_kb) == 1);
+        NVE_ASSERT_(popcount(page_size_kb) == 1);
         const size_t page_size = page_size_kb << 10;
 
         // Check free pages
         size_t needed_hugepages = ceil_div(alloc_size, page_size);
         size_t free_hugepages = 0;
-        std::ifstream free_hugepages_stream(std::string(path_str) + "/free_hugepages");
+        std::ifstream free_hugepages_stream(std::move(path_str) + "/free_hugepages");
         if (free_hugepages_stream.is_open()) {
             free_hugepages_stream >> free_hugepages;
         }
@@ -103,7 +103,7 @@ cudaError_t DefaultAllocator::device_allocate(void** ptr, size_t sz, int device_
 
     // coverity[error_interface]
     auto res = cudaMalloc(ptr,sz); // not returning on error before changing back to original device
-    // Error will be returned to caller, thereforce the coverity error is disabled as intentional
+    // Error will be returned to caller, therefore the coverity error is disabled as intentional
 
     // Swap back to original device
     if (swap_device) {
@@ -124,7 +124,7 @@ cudaError_t DefaultAllocator::device_free(void* ptr, int device_id) noexcept {
 
     // coverity[error_interface]
     auto res = cudaFree(ptr); // not returning on error before changing back to original device
-    // Error will be returned to caller, thereforce the coverity error is disabled as intentional
+    // Error will be returned to caller, therefore the coverity error is disabled as intentional
 
     if (swap_device) {
         RETURN_IF_CUDA_ERROR_(cudaSetDevice(curr_device));
@@ -151,7 +151,7 @@ cudaError_t DefaultAllocator::device_allocate_async(void** ptr, size_t sz, cudaS
     // coverity[error_interface]
     cudaError_t res = mem_pool ? cudaMallocFromPoolAsync(ptr, sz, mem_pool, stream) : cudaMalloc(ptr,sz);
     // not returning on error before changing back to original device
-    // Error will be returned to caller, thereforce the coverity error is disabled as intentional
+    // Error will be returned to caller, therefore the coverity error is disabled as intentional
 
     // Swap back to original device
     if (swap_device) {
@@ -172,7 +172,7 @@ cudaError_t DefaultAllocator::device_free_async(void* ptr, cudaStream_t stream, 
 
     // coverity[error_interface]
     auto res = cudaFreeAsync(ptr, stream); // not returning on error before changing back to original device
-    // Error will be returned to caller, thereforce the coverity error is disabled as intentional
+    // Error will be returned to caller, therefore the coverity error is disabled as intentional
 
     if (swap_device) {
         RETURN_IF_CUDA_ERROR_(cudaSetDevice(curr_device));

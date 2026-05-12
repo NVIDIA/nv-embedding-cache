@@ -33,7 +33,7 @@ context_ptr_t LinearUVMEmbeddingLayer<KeyType>::create_execution_context(
   allocator_ptr_t allocator) {
   allocator_ptr_t actual_allocator = allocator ? allocator : allocator_;
   auto gpu_ctx = gpu_table_ ? gpu_table_->create_execution_context(lookup_stream, modify_stream, thread_pool, actual_allocator) : nullptr;
-  std::vector<context_ptr_t> contexts{gpu_ctx};
+  std::vector<context_ptr_t> contexts{std::move(gpu_ctx)};
   return std::make_shared<LayerExecutionContext>(
     lookup_stream,
     modify_stream,
@@ -54,6 +54,7 @@ LinearUVMEmbeddingLayer<KeyType>::LinearUVMEmbeddingLayer(const Config& cfg, gpu
     if (!heuristic) {
       heuristic = std::make_shared<DefaultInsertHeuristic>(std::vector<float>{DefaultInsertHeuristic::DEFAULT_THRESHOLD});
     }
+    KeyType invalid_key = static_cast<KeyType>(gpu_table_->get_invalid_key());
     auto_insert_handler_ = std::make_shared<AutoInsertHandler>(
       heuristic,
       gpu_table_,
@@ -62,7 +63,8 @@ LinearUVMEmbeddingLayer<KeyType>::LinearUVMEmbeddingLayer(const Config& cfg, gpu
       config_.min_insert_freq_gpu,
       config_.min_insert_size_gpu,
       sizeof(KeyType),
-      gpu_table_->get_device_id()
+      gpu_table_->get_device_id(),
+      &invalid_key
     );
 }
 
@@ -134,8 +136,8 @@ void LinearUVMEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t 
         gpu_table_->template find_and_combine_bw<KeyType, float>(
             layer_ctx->table_contexts_.at(0), num_keys, keys_bw,
             pool_params->sparse_type, pool_params->num_key_indices - 1,
-            offsets_bw, hotness,
-            pool_params->pooling_type, weights_bw,
+            std::move(offsets_bw), hotness,
+            pool_params->pooling_type, std::move(weights_bw),
             output_stride, output_bw);
         break;
       }
@@ -149,8 +151,8 @@ void LinearUVMEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t 
         gpu_table_->template find_and_combine_bw<KeyType, __half>(
             layer_ctx->table_contexts_.at(0), num_keys, keys_bw,
             pool_params->sparse_type, pool_params->num_key_indices - 1,
-            offsets_bw, hotness,
-            pool_params->pooling_type, weights_bw,
+            std::move(offsets_bw), hotness,
+            pool_params->pooling_type, std::move(weights_bw),
             output_stride, output_bw);
         break;
       }
@@ -177,7 +179,7 @@ void LinearUVMEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t 
     }
     // Handle automatic inserts
     if (auto_insert_handler_) {
-      auto_insert_handler_->auto_insert(layer_ctx, keys_bw, output_bw, hitrate, num_keys, output_stride);
+      auto_insert_handler_->auto_insert(std::move(layer_ctx), keys_bw, output_bw, hitrate, num_keys, output_stride);
     }
   }
 }
@@ -207,7 +209,7 @@ void LinearUVMEmbeddingLayer<KeyType>::insert(context_ptr_t& ctx, const int64_t 
   auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, keys_buffer_size);
   auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx, "values", values, values_buffer_size);
 
-  gpu_table_->insert_bw(layer_ctx->table_contexts_.at(0), num_keys, keys_bw, value_stride, value_stride, values_bw);
+  gpu_table_->insert_bw(layer_ctx->table_contexts_.at(0), num_keys, std::move(keys_bw), value_stride, value_stride, std::move(values_bw));
 }
 
 template <typename KeyType>
@@ -233,7 +235,7 @@ void LinearUVMEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64_t 
   if (auto_insert_handler_) {
     auto_insert_handler_->lock_modify();
   }
-  gpu_table_->update_bw(layer_ctx->table_contexts_.at(0), num_keys, keys_bw, value_stride, value_stride, values_bw);
+  gpu_table_->update_bw(layer_ctx->table_contexts_.at(0), num_keys, std::move(keys_bw), value_stride, value_stride, std::move(values_bw));
   if (auto_insert_handler_) {
     auto_insert_handler_->unlock_modify();
   }
@@ -262,7 +264,7 @@ void LinearUVMEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const int6
   if (auto_insert_handler_) {
     auto_insert_handler_->lock_modify();
   }
-  gpu_table_->update_accumulate_bw(layer_ctx->table_contexts_.at(0), num_keys, keys_bw, value_stride, value_stride, values_bw, value_type);
+  gpu_table_->update_accumulate_bw(layer_ctx->table_contexts_.at(0), num_keys, std::move(keys_bw), value_stride, value_stride, std::move(values_bw), value_type);
   if (auto_insert_handler_) {
     auto_insert_handler_->unlock_modify();
   }
@@ -306,7 +308,7 @@ void LinearUVMEmbeddingLayer<KeyType>::erase(context_ptr_t& ctx, const int64_t n
   if (auto_insert_handler_) {
     auto_insert_handler_->lock_modify();
   }
-  gpu_table_->erase_bw(layer_ctx->table_contexts_.at(0), num_keys, keys_bw);
+  gpu_table_->erase_bw(layer_ctx->table_contexts_.at(0), num_keys, std::move(keys_bw));
   if (auto_insert_handler_) {
     auto_insert_handler_->unlock_modify();
   }

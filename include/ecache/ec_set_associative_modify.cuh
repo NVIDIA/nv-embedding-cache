@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include "ec_hash.h"
 
 namespace nve {
 
@@ -28,7 +29,7 @@ __global__ void ComputeSetKernel(uint32_t num_keys, uint32_t num_sets,
                                 float decay_rate) {
     const uint32_t offset = blockIdx.x * warpSize * blockDim.y + threadIdx.y * warpSize;
     if ((offset + threadIdx.x) < num_keys) {
-        sets[offset + threadIdx.x] = keys[offset + threadIdx.x] % num_sets;
+        sets[offset + threadIdx.x] = embed_cache_hash_set_idx(keys[offset + threadIdx.x], num_sets);
     }
     const uint32_t sets_per_warp = warpSize / NUM_WAYS;
     const uint32_t set = blockIdx.x * sets_per_warp * blockDim.y + threadIdx.y * sets_per_warp + (threadIdx.x / NUM_WAYS);
@@ -159,7 +160,8 @@ __global__ void SetReplaceDataKernel(
     uint32_t num_sets,
     uint32_t num_represented_sets,
     uint32_t max_update_size,
-    void* __restrict__ replace_entries) {
+    void* __restrict__ replace_entries,
+    TagType sentinel_key) {
 
     using ModifyEntry = typename EmbedCacheSA<KeyType, TagType>::ModifyEntry;
     using ModifyList = typename EmbedCacheSA<KeyType, TagType>::ModifyList;
@@ -196,7 +198,7 @@ __global__ void SetReplaceDataKernel(
             // find this key and update counter
             for (int w = 0; w < NUM_WAYS; w++) {
                 TagType tag = set_ways_ptr[w];
-                KeyType key_in_cache = static_cast<KeyType>(tag * num_sets + set);
+                KeyType key_in_cache = embed_cache_construct_key<KeyType>(tag, set, num_sets);
                 if (key_in_cache == key) {
                     set_counters_ptr[w] += priority[location];
                     hit = true;
@@ -229,7 +231,7 @@ __global__ void SetReplaceDataKernel(
                 // find this key and update counter
                 for (int w = 0; w < NUM_WAYS; w++) {
                     TagType tag = set_ways_ptr[w];
-                    KeyType key_in_cache = static_cast<KeyType>(tag) * num_sets + set;
+                    KeyType key_in_cache = embed_cache_construct_key<KeyType>(tag, set, num_sets);
                     if (key_in_cache == key) {
                         set_counters_ptr[w] += priority[location];
                         hit = true;
@@ -255,7 +257,7 @@ __global__ void SetReplaceDataKernel(
         uint32_t dst_pos = threadIdx.x;
         CounterType counter = set_counters_ptr[dst_pos];
         TagType tag = set_ways_ptr[dst_pos];
-        if (tag == TagType(INVALID_IDX)) {
+        if (tag == sentinel_key) {
             counter = 0;
         }
         SortBlock(counter, dst_pos, NUM_WAYS);
@@ -266,7 +268,7 @@ __global__ void SetReplaceDataKernel(
         counter = __shfl_sync(mask, counter, threadIdx.y * NUM_WAYS + NUM_WAYS - threadIdx.x - 1);
 
         KeyType index = keys[src_pos];
-        tag = index / num_sets;
+        tag = embed_cache_construct_tag<TagType>(index, num_sets);
         uint32_t final_dst_pos = dst_pos;
 
         bool need_to_write = (threadIdx.x < num_replacements) && (highest_priority > counter);
@@ -288,7 +290,7 @@ __global__ void SetReplaceDataKernel(
                 entries[curr_num_replace_entries].dst = dst_ptr;
                 entries[curr_num_replace_entries].set = set;
                 entries[curr_num_replace_entries].way = final_dst_pos;
-                entries[curr_num_replace_entries].tag = TagType(index / num_sets);
+                entries[curr_num_replace_entries].tag = embed_cache_construct_tag<TagType>(index, num_sets);
 
                 // set counter for the new row
                 // it should happen in update kernel and not here, but since we don't support
@@ -368,6 +370,7 @@ cudaError_t ComputeSetReplaceData(
     uint64_t num_sets,
     uint32_t max_update_size,
     void* replace_entries,
+    TagType sentinel_key,
     cudaStream_t stream) {
         assert (NUM_WAYS <= 32);
         assert ((NUM_WAYS & (NUM_WAYS - 1)) == 0);
@@ -495,7 +498,7 @@ cudaError_t ComputeSetReplaceData(
             static_cast<uint32_t>(num_keys), priority, tags, counters,
             cache_ptr, static_cast<uint32_t>(embed_width_in_bytes),
             static_cast<uint32_t>(num_sets), num_represented_sets,
-            max_update_size, replace_entries);
+            max_update_size, replace_entries, sentinel_key);
 
         return cudaGetLastError();
     }
@@ -511,7 +514,8 @@ __global__ void SetUpdateDataKernel(
     uint32_t embed_width_in_bytes,
     const TagType* __restrict__ tags,
     uint32_t max_update_size,
-    void* __restrict__ replace_entries) {
+    void* __restrict__ replace_entries,
+    TagType sentinel_key) {
         
     using ModifyEntry = typename EmbedCacheSA<KeyType, TagType>::ModifyEntry;
     using ModifyList = typename EmbedCacheSA<KeyType, TagType>::ModifyList;
@@ -522,13 +526,13 @@ __global__ void SetUpdateDataKernel(
     const uint32_t keyID = blockIdx.x * blockDim.x + threadIdx.x;
     if (keyID < num_keys) {
         KeyType key = keys[keyID];
-        uint32_t set = key % num_sets;
+        uint32_t set = embed_cache_hash_set_idx(key, num_sets);
 
         const TagType* set_ways_ptr = tags + set * NUM_WAYS;
-    
+
         for (int w = 0; w < NUM_WAYS; w++) {
             TagType tag = set_ways_ptr[w];
-            KeyType key_in_cache = static_cast<KeyType>(tag) * num_sets + set;
+            KeyType key_in_cache = embed_cache_construct_key<KeyType>(tag, set, num_sets);
             if (key_in_cache == key) {
                 uint32_t curr_num_replace_entries = atomicAdd(num_replace_entries_to_update, 1);
                 if (curr_num_replace_entries < max_update_size) {
@@ -536,12 +540,12 @@ __global__ void SetUpdateDataKernel(
                     if (invalidate_only) {
                         entries[curr_num_replace_entries].src = nullptr;
                         entries[curr_num_replace_entries].dst = nullptr;
-                        entries[curr_num_replace_entries].tag = static_cast<TagType>(-1);
+                        entries[curr_num_replace_entries].tag = sentinel_key;
                     } else {
                         int8_t* dst_ptr = cache_ptr + ( set * NUM_WAYS + w ) * embed_width_in_bytes;
                         entries[curr_num_replace_entries].src = values + keyID * value_stride;
                         entries[curr_num_replace_entries].dst = dst_ptr;
-                        entries[curr_num_replace_entries].tag = static_cast<TagType>(key / num_sets);
+                        entries[curr_num_replace_entries].tag = embed_cache_construct_tag<TagType>(key, num_sets);
                     }
                     entries[curr_num_replace_entries].set = set;
                     entries[curr_num_replace_entries].way = w;
@@ -560,6 +564,7 @@ cudaError_t ComputeSetInvalidateData(
     const TagType* __restrict__ tags,
     uint32_t max_update_size,
     void* __restrict__ replace_entries,
+    TagType sentinel_key,
     cudaStream_t stream = 0) {
 
     assert (NUM_WAYS <= 32);
@@ -570,7 +575,7 @@ cudaError_t ComputeSetInvalidateData(
 
     SetUpdateDataKernel<KeyType, TagType, NUM_WAYS, true><<<gridSize, blockSize, 0, stream>>>(
         nullptr, nullptr, keys, static_cast<uint32_t>(num_keys),static_cast<uint32_t>( num_sets), 0, 0,
-        tags, max_update_size, replace_entries);
+        tags, max_update_size, replace_entries, sentinel_key);
 
     return cudaGetLastError();
 }
@@ -587,6 +592,7 @@ cudaError_t ComputeSetUpdateData(
     const TagType* __restrict__ tags,
     uint32_t max_update_size,
     void* __restrict__ replace_entries,
+    TagType sentinel_key,
     cudaStream_t stream = 0) {
 
     assert (NUM_WAYS <= 32);
@@ -598,10 +604,10 @@ cudaError_t ComputeSetUpdateData(
     SetUpdateDataKernel<KeyType, TagType, NUM_WAYS><<<gridSize, blockSize, 0, stream>>>(
         cache_ptr, values, keys, static_cast<uint32_t>(num_keys),
         static_cast<uint32_t>(num_sets),
-        static_cast<uint32_t>(value_stride), 
+        static_cast<uint32_t>(value_stride),
         static_cast<uint32_t>(embed_width_in_bytes),
-        tags, max_update_size, replace_entries);
-    
+        tags, max_update_size, replace_entries, sentinel_key);
+
     return cudaGetLastError();
 }
 }

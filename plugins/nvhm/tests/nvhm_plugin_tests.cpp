@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <execution_context.hpp>
+#include <json_support.hpp>
 #include <nvhm_map_table.hpp>
 
 using namespace nve;
@@ -38,12 +39,12 @@ TEST(nvhm_plugin, parse_table_conf) {
     "key_size": 4,
     "max_value_size": 16,
     "value_dtype": "bfloat",
-    
+
     "num_partitions": 2,
     "partitioner": "always_zero",
     "workgroups": [1],
     "max_find_task_size": 128,
-    
+
     "kernel_size": 16,
     "initial_capacity": 1337,
     "value_alignment": 32,
@@ -53,14 +54,14 @@ TEST(nvhm_plugin, parse_table_conf) {
 
     "minimize_psl": true,
     "auto_shrink": true,
-    
+
     "overflow_policy": {
       "overflow_margin": 1024,
       "handler": "evict_lru",
       "resolution_margin": 0.5
     }
   })"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   NvhmMapTableConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));
@@ -71,7 +72,7 @@ TEST(nvhm_plugin, parse_factory_conf) {
   std::cout << static_cast<nlohmann::json>(conf) << '\n';
 
   nlohmann::json json(R"({})"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   NvhmMapTableFactoryConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));

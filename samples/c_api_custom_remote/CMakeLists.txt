@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Plugin: custom_remote (sample remote table backed by std::map)
-add_subdirectory(custom_remote_plugin)
+# The custom_remote plugin (libnve-plugin-custom_remote.so) is built in
+# samples/common/custom_remote_plugin (added to the build before this
+# directory in samples/CMakeLists.txt) and shared with the pytorch and
+# cpp_inference_custom_ps samples. The sample loads it at runtime via
+# nve_load_host_table_plugin("libnve-plugin-custom_remote.so"), so no explicit link step is
+# needed here.
 
 # Sample executable
 add_executable(c_api_custom_remote_sample c_api_custom_remote_sample.cpp)
 target_include_directories(c_api_custom_remote_sample PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(c_api_custom_remote_sample PUBLIC nve-common)
+add_dependencies(c_api_custom_remote_sample nve-plugin-custom_remote)

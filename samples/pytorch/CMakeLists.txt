@@ -13,13 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-file(GLOB SOURCE_FILES
-     *.h
-     *.cpp
-     *.cu
-     *.cuh
-)
-
-pybind11_add_module(sample_remote ${SOURCE_FILES})
-
-target_link_libraries(sample_remote PUBLIC nve-common)
+# Pytorch samples are pure-Python; the host-table custom_remote plugin used by
+# pytorch_samples_common.get_remote_interface and the export_sample/ scripts is
+# built once in samples/common/custom_remote_plugin (libnve-plugin-custom_remote.so)
+# and resolved at runtime via load_host_table_plugin("libnve-plugin-custom_remote.so").

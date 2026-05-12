@@ -138,6 +138,10 @@ nve_status_t nve_hierarchical_layer_create(
         cfg.min_insert_freq_host = config->min_insert_freq_host;
         cfg.min_insert_size_gpu = config->min_insert_size_gpu;
         cfg.min_insert_size_host = config->min_insert_size_host;
+        if (config->default_embedding && config->default_embedding_size > 0) {
+          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
+          cfg.default_embedding.assign(p, p + config->default_embedding_size);
+        }
         layer = std::make_shared<nve::HierarchicalEmbeddingLayer<int32_t>>(cfg, cpp_tables, alloc);
         break;
       }
@@ -149,6 +153,10 @@ nve_status_t nve_hierarchical_layer_create(
         cfg.min_insert_freq_host = config->min_insert_freq_host;
         cfg.min_insert_size_gpu = config->min_insert_size_gpu;
         cfg.min_insert_size_host = config->min_insert_size_host;
+        if (config->default_embedding && config->default_embedding_size > 0) {
+          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
+          cfg.default_embedding.assign(p, p + config->default_embedding_size);
+        }
         layer = std::make_shared<nve::HierarchicalEmbeddingLayer<int64_t>>(cfg, cpp_tables, alloc);
         break;
       }
@@ -198,7 +206,7 @@ nve_status_t nve_layer_lookup_pooled(
     uint64_t* hitmask,
     nve_pooling_type_t pooling_type, nve_sparse_type_t sparse_type,
     const int64_t* key_indices, int64_t num_key_indices,
-    void* default_values, const void* sparse_weights,
+    const void* sparse_weights,
     nve_data_type_t weight_type, float* hitrates) {
   if (!layer || !layer->ptr || !ctx || !ctx->ptr) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "layer and ctx must not be NULL");
@@ -209,7 +217,6 @@ nve_status_t nve_layer_lookup_pooled(
     params.sparse_type = convert_sparse_type(sparse_type);
     params.key_indices = key_indices;
     params.num_key_indices = num_key_indices;
-    params.default_values = default_values;
     params.sparse_weights = sparse_weights;
     params.weight_type = convert_dtype(weight_type);
 

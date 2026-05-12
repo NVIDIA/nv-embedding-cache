@@ -26,6 +26,7 @@
 #include <thread_pool.hpp>
 #include <execution_context.hpp>
 #include <ecache/embed_cache.h>
+#include <bit_ops.hpp>
 
 namespace nve {
 
@@ -76,9 +77,9 @@ public:
 
   std::shared_ptr<DefaultECEvent> create_sync_event();
 
-  inline bool empty() const { return contexts_.empty(); }
+  bool empty() const;
 private:
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::unordered_set<cudaStream_t> lookup_streams_;
   std::unordered_set<const ExecutionContext*> contexts_; // Holding raw pointers instead of shared_ptr to avoid circular dependency
   void update_streams();
@@ -129,7 +130,7 @@ class LayerExecutionContext: public ExecutionContext {
     cudaStream_t modify_stream,
     thread_pool_ptr_t thread_pool,
     allocator_ptr_t allocator,
-    const std::vector<context_ptr_t>& table_contexts)
+    std::vector<context_ptr_t> table_contexts)
     : ExecutionContext(lookup_stream, modify_stream, std::move(thread_pool), std::move(allocator)),
       table_contexts_(std::move(table_contexts)), parallel_task_res_(table_contexts_.size()) {}
 
@@ -215,7 +216,8 @@ public:
     const int64_t min_insert_wait,
     const int64_t min_insert_size,
     const int64_t key_size,
-    const int32_t layer_gpu_device);
+    const int32_t layer_gpu_device,
+    const void* invalid_key_bytes);
 
   ~AutoInsertHandler();
 
@@ -225,7 +227,8 @@ public:
     std::shared_ptr<BufferWrapper<void>>& output_bw,
     const float hitrate,
     const int64_t num_keys,
-    const int64_t output_stride);
+    const int64_t output_stride,
+    std::shared_ptr<BufferWrapper<max_bitmask_repr_t>> hitmask_bw = nullptr);
   void lock_modify();
   void unlock_modify();
 
@@ -239,6 +242,7 @@ private:
   const int64_t min_insert_size_;
   const int64_t key_size_;
   const int32_t layer_gpu_device_;
+  std::vector<uint8_t> invalid_key_bytes_; // empty when no sentinel is configured (no rewriting)
 
   int64_t insert_freq_cnt_{0};
   int64_t collected_keys_{0};
@@ -251,6 +255,7 @@ private:
   void collect_keys_and_data(
     std::shared_ptr<BufferWrapper<const void>>& keys_bw,
     std::shared_ptr<BufferWrapper<void>>& output_bw,
+    std::shared_ptr<BufferWrapper<max_bitmask_repr_t>>& hitmask_bw,
     cudaStream_t lookup_stream,
     const int64_t num_keys);
   void launch_insert(

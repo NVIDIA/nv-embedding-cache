@@ -58,7 +58,6 @@ float load_as_float(const void* ptr, int64_t idx, DataType_t dtype) {
     default:
       throw std::runtime_error("Not implemented");
   }
-  return 0; // unreachable
 }
 
 void store_as_dtype(void* ptr, int64_t idx, DataType_t dtype, float val) {

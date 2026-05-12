@@ -25,41 +25,31 @@
 #include <helper_cupti.h>
 #include <cupti_target.h>
 #include <cupti_profiler_target.h>
+#if CUDA_VERSION >= 12050
+#include <cupti_profiler_host.h>
+#else
 #include <nvperf_host.h>
 #include <nvperf_target.h>
 #include <nvperf_cuda_host.h>
+#endif
 
 #include <Metric.h>
 #include <Eval.h>
+#if CUDA_VERSION < 12050
 #include <Utils.h>
+#endif
 #include <Parser.h>
 #include <List.h>
-
-
-#ifdef __COVERITY__
-// For Coverity scans replace CUPTI DRIVER_API_CALL with a simplified version that doesn't 
-// trigger error_interface for the unchecked cuGetErrorString call.
-#undef DRIVER_API_CALL
-#define DRIVER_API_CALL(apiFunctionCall)                                            \
-do                                                                                  \
-{                                                                                   \
-    CUresult _status = apiFunctionCall;                                             \
-    if (_status != CUDA_SUCCESS)                                                    \
-    {                                                                               \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error(" << _status << ").\n\n";        \
-        exit(EXIT_FAILURE);                                                         \
-    }                                                                               \
-} while (0)
-#endif // __COVERITY__
 
 // Disabling warnings of code mostly copied from CUPTI samples (keeping as close as possible to original)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 
 CuptiProfiler::CuptiProfiler(int device_id) {
+    // coverity[CUDA.ERROR_INTERFACE]
     DRIVER_API_CALL(cuInit(0));
     CUdevice device;
+    // coverity[CUDA.ERROR_INTERFACE]
     DRIVER_API_CALL(cuDeviceGet(&device, device_id));
 
     // Initialize profiler API and test device compatibility
@@ -111,20 +101,38 @@ CuptiProfiler::CuptiProfiler(int device_id) {
     CUpti_Device_GetChipName_Params getChipNameParams = { CUpti_Device_GetChipName_Params_STRUCT_SIZE };
     getChipNameParams.deviceIndex = static_cast<size_t>(device_id);
     CUPTI_API_CALL(cuptiDeviceGetChipName(&getChipNameParams));
-    m_chipName = (getChipNameParams.pChipName);
+    chip_name_ = (getChipNameParams.pChipName);
 
     /* Generate configuration for metrics, this can also be done offline*/
+#if CUDA_VERSION >= 12050
+    CUpti_Profiler_Host_Initialize_Params initializeHostParams = { CUpti_Profiler_Host_Initialize_Params_STRUCT_SIZE };
+    initializeHostParams.profilerType = CUPTI_PROFILER_TYPE_RANGE_PROFILER;
+    initializeHostParams.pChipName = chip_name_.c_str();
+    initializeHostParams.pCounterAvailabilityImage = nullptr;
+    CUPTI_API_CALL(cuptiProfilerHostInitialize(&initializeHostParams));
+    host_object_ = initializeHostParams.pHostObject;
+#else
     NVPW_InitializeHost_Params initializeHostParams = { NVPW_InitializeHost_Params_STRUCT_SIZE };
     NVPW_API_CALL(NVPW_InitializeHost(&initializeHostParams));
+#endif
 }
 
 CuptiProfiler::~CuptiProfiler(){
+#if CUDA_VERSION >= 12050
+    if (host_object_) {
+        CUpti_Profiler_Host_Deinitialize_Params deinitParams = { CUpti_Profiler_Host_Deinitialize_Params_STRUCT_SIZE };
+        deinitParams.pHostObject = static_cast<CUpti_Profiler_Host_Object*>(host_object_);
+        cuptiProfilerHostDeinitialize(&deinitParams);
+        host_object_ = nullptr;
+    }
+#endif
     CUpti_Profiler_DeInitialize_Params profilerDeInitializeParams = {CUpti_Profiler_DeInitialize_Params_STRUCT_SIZE};
     CUPTI_API_CALL(cuptiProfilerDeInitialize(&profilerDeInitializeParams));
 }
 
-bool CuptiProfiler::StartSession(const std::vector<std::string>& metrics, uint32_t maxRanges) {
+bool CuptiProfiler::start_session(const std::vector<std::string>& metrics, uint32_t maxRanges) {
     CUcontext cuContext;
+    // coverity[CUDA.ERROR_INTERFACE]
     DRIVER_API_CALL(cuCtxGetCurrent(&cuContext));
 
     CUpti_Profiler_GetCounterAvailability_Params getCounterAvailabilityParams = {CUpti_Profiler_GetCounterAvailability_Params_STRUCT_SIZE};
@@ -136,15 +144,15 @@ bool CuptiProfiler::StartSession(const std::vector<std::string>& metrics, uint32
     getCounterAvailabilityParams.pCounterAvailabilityImage = counterAvailabilityImage.data();
     CUPTI_API_CALL(cuptiProfilerGetCounterAvailability(&getCounterAvailabilityParams));
 
-    m_metricNames = metrics;
-    if (m_metricNames.size())
+    metric_names_ = metrics;
+    if (metric_names_.size())
     {
-        if(!NV::Metric::Config::GetConfigImage(m_chipName, m_metricNames, configImage, counterAvailabilityImage.data()))
+        if(!NV::Metric::Config::GetConfigImage(chip_name_, metric_names_, config_image_, counterAvailabilityImage.data()))
         {
             std::cout << "Failed to create configImage" << std::endl;
             return false;
         }
-        if(!NV::Metric::Config::GetCounterDataPrefixImage(m_chipName, m_metricNames, m_counterDataImagePrefix))
+        if(!NV::Metric::Config::GetCounterDataPrefixImage(chip_name_, metric_names_, counter_data_image_prefix_))
         {
             std::cout << "Failed to create counterDataImagePrefix" << std::endl;
             return false;
@@ -156,7 +164,7 @@ bool CuptiProfiler::StartSession(const std::vector<std::string>& metrics, uint32
         return false;
     }
 
-    if(!CreateCounterDataImage(m_counterDataImage, m_counterDataScratchBuffer, m_counterDataImagePrefix, maxRanges))
+    if(!create_counter_data_image(counter_data_image_, counter_data_scratch_buffer_, counter_data_image_prefix_, maxRanges))
     {
         std::cout << "Failed to create counterDataImage" << std::endl;
         return false;
@@ -164,10 +172,10 @@ bool CuptiProfiler::StartSession(const std::vector<std::string>& metrics, uint32
 
     CUpti_Profiler_BeginSession_Params beginSessionParams = {CUpti_Profiler_BeginSession_Params_STRUCT_SIZE};
     beginSessionParams.ctx = NULL;
-    beginSessionParams.counterDataImageSize = m_counterDataImage.size();
-    beginSessionParams.pCounterDataImage = &m_counterDataImage[0];
-    beginSessionParams.counterDataScratchBufferSize = m_counterDataScratchBuffer.size();
-    beginSessionParams.pCounterDataScratchBuffer = &m_counterDataScratchBuffer[0];
+    beginSessionParams.counterDataImageSize = counter_data_image_.size();
+    beginSessionParams.pCounterDataImage = &counter_data_image_[0];
+    beginSessionParams.counterDataScratchBufferSize = counter_data_scratch_buffer_.size();
+    beginSessionParams.pCounterDataScratchBuffer = &counter_data_scratch_buffer_[0];
     beginSessionParams.range = CUPTI_UserRange;
     beginSessionParams.replayMode = CUPTI_UserReplay;
     beginSessionParams.maxRangesPerPass = maxRanges;
@@ -175,8 +183,8 @@ bool CuptiProfiler::StartSession(const std::vector<std::string>& metrics, uint32
     CUPTI_API_CALL(cuptiProfilerBeginSession(&beginSessionParams));
 
     CUpti_Profiler_SetConfig_Params setConfigParams = {CUpti_Profiler_SetConfig_Params_STRUCT_SIZE};
-    setConfigParams.pConfig = &configImage[0];
-    setConfigParams.configSize = configImage.size();
+    setConfigParams.pConfig = &config_image_[0];
+    setConfigParams.configSize = config_image_.size();
     setConfigParams.passIndex = 0;
     setConfigParams.minNestingLevel = 1;
     setConfigParams.numNestingLevels = 1;
@@ -185,7 +193,7 @@ bool CuptiProfiler::StartSession(const std::vector<std::string>& metrics, uint32
     return true;
 }
 
-void CuptiProfiler::StopSession() {
+void CuptiProfiler::stop_session() {
     CUpti_Profiler_FlushCounterData_Params flushCounterDataParams = {CUpti_Profiler_FlushCounterData_Params_STRUCT_SIZE};
     CUPTI_API_CALL(cuptiProfilerFlushCounterData(&flushCounterDataParams));
 
@@ -196,7 +204,7 @@ void CuptiProfiler::StopSession() {
     CUPTI_API_CALL(cuptiProfilerEndSession(&endSessionParams));
 }
 
-void CuptiProfiler::StartPass() {
+void CuptiProfiler::start_pass() {
     CUpti_Profiler_BeginPass_Params beginPassParams = {CUpti_Profiler_BeginPass_Params_STRUCT_SIZE};
     CUPTI_API_CALL(cuptiProfilerBeginPass(&beginPassParams));
 
@@ -204,7 +212,7 @@ void CuptiProfiler::StartPass() {
     CUPTI_API_CALL(cuptiProfilerEnableProfiling(&enableProfilingParams));
 }
 
-void CuptiProfiler::EndPass() {
+void CuptiProfiler::end_pass() {
     CUpti_Profiler_DisableProfiling_Params disableProfilingParams = {CUpti_Profiler_DisableProfiling_Params_STRUCT_SIZE};
     CUPTI_API_CALL(cuptiProfilerDisableProfiling(&disableProfilingParams));
 
@@ -212,23 +220,23 @@ void CuptiProfiler::EndPass() {
     CUPTI_API_CALL(cuptiProfilerEndPass(&endPassParams));
 }
 
-void CuptiProfiler::PushRange(const std::string& name) {
+void CuptiProfiler::push_range(const std::string& name) {
     CUpti_Profiler_PushRange_Params pushRangeParamsA = {CUpti_Profiler_PushRange_Params_STRUCT_SIZE};
     pushRangeParamsA.pRangeName = name.c_str();
     CUPTI_API_CALL(cuptiProfilerPushRange(&pushRangeParamsA));
 }
 
-void CuptiProfiler::PopRange() {
+void CuptiProfiler::pop_range() {
     CUpti_Profiler_PopRange_Params popRangeParamsA = {CUpti_Profiler_PopRange_Params_STRUCT_SIZE};
     CUPTI_API_CALL(cuptiProfilerPopRange(&popRangeParamsA));
 }
 
-void CuptiProfiler::PrintMetrics(bool legacy_print) const {
+void CuptiProfiler::print_metrics(bool legacy_print) const {
     if (legacy_print) {
-        NV::Metric::Eval::PrintMetricValues(m_chipName, m_counterDataImage, m_metricNames);
+        NV::Metric::Eval::PrintMetricValues(chip_name_, counter_data_image_, metric_names_);
         return;
     }
-    auto cupti_metrics = GetMetrics();
+    auto cupti_metrics = get_metrics();
     auto saved_flags = std::cout.flags(); // save stream flags
     for (auto& region_metrics : cupti_metrics) {
         std::cout << region_metrics.first << ":" << std::endl;
@@ -239,17 +247,53 @@ void CuptiProfiler::PrintMetrics(bool legacy_print) const {
     std::cout.flags(saved_flags); // restore stream flags
 }
 
-CuptiProfiler::ProfilerMetrics CuptiProfiler::GetMetrics() const {
+CuptiProfiler::ProfilerMetrics CuptiProfiler::get_metrics() const {
     CuptiProfiler::ProfilerMetrics all_metrics;
 
-    if (!m_counterDataImage.size())
+    if (!counter_data_image_.size())
     {
         std::cerr << "Counter Data Image is empty!" << std::endl;
         return all_metrics;
     }
+#if CUDA_VERSION >= 12050
+    std::vector<const char*> metricNamePtrs;
+    for (const auto& name : metric_names_) {
+        metricNamePtrs.push_back(name.c_str());
+    }
+    std::vector<double> metricValues(metric_names_.size());
+
+    for (size_t rangeIndex = 0; ; ++rangeIndex)
+    {
+        CUpti_Profiler_Host_GetRangeName_Params getRangeNameParams = { CUpti_Profiler_Host_GetRangeName_Params_STRUCT_SIZE };
+        getRangeNameParams.pCounterDataImage = counter_data_image_.data();
+        getRangeNameParams.counterDataImageSize = counter_data_image_.size();
+        getRangeNameParams.rangeIndex = rangeIndex;
+        getRangeNameParams.delimiter = "/";
+        getRangeNameParams.pRangeName = nullptr;
+        if (cuptiProfilerHostGetRangeName(&getRangeNameParams) != CUPTI_SUCCESS) {
+            break;
+        }
+        std::string rangeName(getRangeNameParams.pRangeName);
+        free(const_cast<char*>(getRangeNameParams.pRangeName));
+
+        CUpti_Profiler_Host_EvaluateToGpuValues_Params evalParams = { CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE };
+        evalParams.pHostObject = static_cast<CUpti_Profiler_Host_Object*>(host_object_);
+        evalParams.pCounterDataImage = counter_data_image_.data();
+        evalParams.counterDataImageSize = counter_data_image_.size();
+        evalParams.rangeIndex = rangeIndex;
+        evalParams.ppMetricNames = metricNamePtrs.data();
+        evalParams.numMetrics = metricNamePtrs.size();
+        evalParams.pMetricValues = metricValues.data();
+        CUPTI_API_CALL(cuptiProfilerHostEvaluateToGpuValues(&evalParams));
+
+        for (size_t i = 0; i < metric_names_.size(); ++i) {
+            all_metrics[rangeName][metric_names_[i]] = metricValues[i];
+        }
+    }
+#else
     const uint8_t* pCounterAvailabilityImage = nullptr;
     NVPW_CUDA_MetricsEvaluator_CalculateScratchBufferSize_Params calculateScratchBufferSizeParam = {NVPW_CUDA_MetricsEvaluator_CalculateScratchBufferSize_Params_STRUCT_SIZE};
-    calculateScratchBufferSizeParam.pChipName = m_chipName.c_str();
+    calculateScratchBufferSizeParam.pChipName = chip_name_.c_str();
     calculateScratchBufferSizeParam.pCounterAvailabilityImage = pCounterAvailabilityImage;
     RETURN_IF_NVPW_ERROR({}, NVPW_CUDA_MetricsEvaluator_CalculateScratchBufferSize(&calculateScratchBufferSizeParam));
 
@@ -257,21 +301,21 @@ CuptiProfiler::ProfilerMetrics CuptiProfiler::GetMetrics() const {
     NVPW_CUDA_MetricsEvaluator_Initialize_Params metricEvaluatorInitializeParams = {NVPW_CUDA_MetricsEvaluator_Initialize_Params_STRUCT_SIZE};
     metricEvaluatorInitializeParams.scratchBufferSize = scratchBuffer.size();
     metricEvaluatorInitializeParams.pScratchBuffer = scratchBuffer.data();
-    metricEvaluatorInitializeParams.pChipName = m_chipName.c_str();
+    metricEvaluatorInitializeParams.pChipName = chip_name_.c_str();
     metricEvaluatorInitializeParams.pCounterAvailabilityImage = pCounterAvailabilityImage;
-    metricEvaluatorInitializeParams.pCounterDataImage = m_counterDataImage.data();
-    metricEvaluatorInitializeParams.counterDataImageSize = m_counterDataImage.size();
+    metricEvaluatorInitializeParams.pCounterDataImage = counter_data_image_.data();
+    metricEvaluatorInitializeParams.counterDataImageSize = counter_data_image_.size();
     RETURN_IF_NVPW_ERROR({}, NVPW_CUDA_MetricsEvaluator_Initialize(&metricEvaluatorInitializeParams));
     NVPW_MetricsEvaluator* metricEvaluator = metricEvaluatorInitializeParams.pMetricsEvaluator;
 
     NVPW_CounterData_GetNumRanges_Params getNumRangesParams = { NVPW_CounterData_GetNumRanges_Params_STRUCT_SIZE };
-    getNumRangesParams.pCounterDataImage = m_counterDataImage.data();
+    getNumRangesParams.pCounterDataImage = counter_data_image_.data();
     RETURN_IF_NVPW_ERROR({}, NVPW_CounterData_GetNumRanges(&getNumRangesParams));
 
     std::string reqName;
     bool isolated = true;
     bool keepInstances = true;
-    for (std::string metricName : m_metricNames)
+    for (std::string metricName : metric_names_)
     {
         NV::Metric::Parser::ParseMetricNameString(metricName, &reqName, &isolated, &keepInstances);
         NVPW_MetricEvalRequest metricEvalRequest;
@@ -285,7 +329,7 @@ CuptiProfiler::ProfilerMetrics CuptiProfiler::GetMetrics() const {
         for (size_t rangeIndex = 0; rangeIndex < getNumRangesParams.numRanges; ++rangeIndex)
         {
             NVPW_Profiler_CounterData_GetRangeDescriptions_Params getRangeDescParams = { NVPW_Profiler_CounterData_GetRangeDescriptions_Params_STRUCT_SIZE };
-            getRangeDescParams.pCounterDataImage = m_counterDataImage.data();
+            getRangeDescParams.pCounterDataImage = counter_data_image_.data();
             getRangeDescParams.rangeIndex = rangeIndex;
             RETURN_IF_NVPW_ERROR({}, NVPW_Profiler_CounterData_GetRangeDescriptions(&getRangeDescParams));
             std::vector<const char*> descriptionPtrs(getRangeDescParams.numDescriptions);
@@ -304,8 +348,8 @@ CuptiProfiler::ProfilerMetrics CuptiProfiler::GetMetrics() const {
 
             NVPW_MetricsEvaluator_SetDeviceAttributes_Params setDeviceAttribParams = { NVPW_MetricsEvaluator_SetDeviceAttributes_Params_STRUCT_SIZE };
             setDeviceAttribParams.pMetricsEvaluator = metricEvaluator;
-            setDeviceAttribParams.pCounterDataImage = m_counterDataImage.data();
-            setDeviceAttribParams.counterDataImageSize = m_counterDataImage.size();
+            setDeviceAttribParams.pCounterDataImage = counter_data_image_.data();
+            setDeviceAttribParams.counterDataImageSize = counter_data_image_.size();
             RETURN_IF_NVPW_ERROR({}, NVPW_MetricsEvaluator_SetDeviceAttributes(&setDeviceAttribParams));
 
             double metricValue;
@@ -315,8 +359,8 @@ CuptiProfiler::ProfilerMetrics CuptiProfiler::GetMetrics() const {
             evaluateToGpuValuesParams.numMetricEvalRequests = 1;
             evaluateToGpuValuesParams.metricEvalRequestStructSize = NVPW_MetricEvalRequest_STRUCT_SIZE;
             evaluateToGpuValuesParams.metricEvalRequestStrideSize = sizeof(NVPW_MetricEvalRequest);
-            evaluateToGpuValuesParams.pCounterDataImage = m_counterDataImage.data();
-            evaluateToGpuValuesParams.counterDataImageSize = m_counterDataImage.size();
+            evaluateToGpuValuesParams.pCounterDataImage = counter_data_image_.data();
+            evaluateToGpuValuesParams.counterDataImageSize = counter_data_image_.size();
             evaluateToGpuValuesParams.rangeIndex = rangeIndex;
             evaluateToGpuValuesParams.isolated = true;
             evaluateToGpuValuesParams.pMetricValues = &metricValue;
@@ -325,14 +369,15 @@ CuptiProfiler::ProfilerMetrics CuptiProfiler::GetMetrics() const {
             all_metrics[rangeName][metricName] = metricValue;
         }
     }
-    
+
     NVPW_MetricsEvaluator_Destroy_Params metricEvaluatorDestroyParams = { NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE };
     metricEvaluatorDestroyParams.pMetricsEvaluator = metricEvaluator;
     RETURN_IF_NVPW_ERROR({}, NVPW_MetricsEvaluator_Destroy(&metricEvaluatorDestroyParams));
+#endif
     return all_metrics;
 }
 
-bool CuptiProfiler::CreateCounterDataImage(
+bool CuptiProfiler::create_counter_data_image(
     std::vector<uint8_t>& counterDataImage,
     std::vector<uint8_t>& counterDataScratchBuffer,
     std::vector<uint8_t>& counterDataImagePrefix,
@@ -380,8 +425,9 @@ bool CuptiProfiler::CreateCounterDataImage(
     return true;
 }
 
-std::vector<std::string> CuptiProfiler::GetAllMetricNames() const {
+std::vector<std::string> CuptiProfiler::get_all_metric_names() const {
     CUcontext cuContext;
+    // coverity[CUDA.ERROR_INTERFACE]
     DRIVER_API_CALL(cuCtxGetCurrent(&cuContext));
 
     CUpti_Profiler_GetCounterAvailability_Params getCounterAvailabilityParams = {CUpti_Profiler_GetCounterAvailability_Params_STRUCT_SIZE};
@@ -394,7 +440,7 @@ std::vector<std::string> CuptiProfiler::GetAllMetricNames() const {
     CUPTI_API_CALL(cuptiProfilerGetCounterAvailability(&getCounterAvailabilityParams));
 
     std::vector<std::string> metric_list;
-    NV::Metric::Enum::ExportSupportedMetrics(m_chipName.c_str(), true /* listSubMetrics */, counterAvailabilityImage.data(), metric_list);
+    NV::Metric::Enum::ExportSupportedMetrics(chip_name_.c_str(), true /* listSubMetrics */, counterAvailabilityImage.data(), metric_list);
     return metric_list;
 }
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(kernel_unit_tests unit_tests.cu cpu_kernel_unit_tests.cpp)
+add_executable(kernel_unit_tests gpu_kernel_unit_tests.cu cpu_kernel_unit_tests.cpp)
 add_executable(gpu_insert_tests gpu_insert_tests.cu)
 
 include_directories(${PROJECT_SOURCE_DIR})

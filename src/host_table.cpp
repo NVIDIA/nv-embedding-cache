@@ -18,7 +18,6 @@
 #include <dlfcn.h>
 
 #include <bit_ops.hpp>
-#include <filesystem>
 #include <host_table.hpp>
 #include <json_support.hpp>
 #include <limits>
@@ -79,6 +78,7 @@ void from_json(const nlohmann::json& json, HostTableConfig& conf) {
   NVE_READ_JSON_FIELD_(key_size);
   NVE_READ_JSON_FIELD_(max_value_size);
   NVE_READ_JSON_FIELD_(value_dtype);
+  NVE_READ_JSON_FIELD_(invalid_key);
 }
 
 void to_json(nlohmann::json& json, const HostTableConfig& conf) {
@@ -88,6 +88,7 @@ void to_json(nlohmann::json& json, const HostTableConfig& conf) {
   NVE_WRITE_JSON_FIELD_(key_size);
   NVE_WRITE_JSON_FIELD_(max_value_size);
   NVE_WRITE_JSON_FIELD_(value_dtype);
+  NVE_WRITE_JSON_FIELD_(invalid_key);
 }
 
 void HostTableFactoryConfig::check() const {}
@@ -123,18 +124,19 @@ static void register_implementation(void* dll, const char* htf_name) {
 }
 
 void load_host_table_plugin(const std::string_view& plugin_name) {
-  const std::string dll_name{to_string("libnve-plugin-", plugin_name, ".so")};
-  NVE_LOG_INFO_("Attempting to load host table plugin '", dll_name, "\'.");
+  const std::string plugin_path{plugin_name};
+  NVE_CHECK_(!plugin_path.empty(), "Host table plugin shared object must not be empty.");
+  NVE_LOG_INFO_("Attempting to load host table plugin '", plugin_path, "\'.");
 
-  // Try to load adjacent DLLs first, and if that fails use `LD_LIBRARY_PATH`.
-  Dl_info dli;
-  NVE_CHECK_(dladdr(reinterpret_cast<const void*>(load_host_table_plugin), &dli) != 0);
-  void* dll{dlopen((std::filesystem::path{dli.dli_fname}.parent_path() / dll_name).c_str(),
-                   RTLD_NOW | RTLD_GLOBAL)};
+  void* dll{dlopen(plugin_path.c_str(), RTLD_NOW | RTLD_GLOBAL)};
   if (dll == nullptr) {
-    NVE_LOG_CRITICAL_("error: ", dlerror());
-    NVE_CHECK_((dll = dlopen(dll_name.c_str(), RTLD_NOW | RTLD_GLOBAL)) != nullptr, dlerror());
-  }
+    // If given path failed to load, fallback to loading relative to the current .so
+    Dl_info dli;
+    NVE_CHECK_(dladdr(reinterpret_cast<const void*>(load_host_table_plugin), &dli) != 0);
+    dll = dlopen((std::filesystem::path{dli.dli_fname}.parent_path() / plugin_path).c_str(),
+                  RTLD_NOW | RTLD_GLOBAL);
+  }  
+  NVE_CHECK_(dll != nullptr, "Failed to load host table plugin '", plugin_path, "': ", dlerror());
 
   plugin_info_t plugin_ident;
   NVE_CHECK_(
@@ -158,13 +160,15 @@ create_host_table_factory_t resolve_host_table_implementation(const std::string&
   // Try to find HTF.
   auto it{htf_impls.find(impl_name)};
   if (it != htf_impls.end()) {
-    NVE_LOG_INFO_("Plugin '", impl_name, "' already loaded!");
+    NVE_LOG_INFO_("HostTableFactory implementation '", impl_name, "' is already registered.");
     return it->second;
   }
 
-  // Try to load plugin DLL with the same name and try again.
-  load_host_table_plugin(impl_name);
-  return htf_impls.at(impl_name);
+  NVE_THROW_("HostTableFactory implementation '", impl_name,
+             "' is not registered. Load the plugin shared object first with "
+             "load_host_table_plugin(\"libnve-plugin-abseil.so\") or "
+             "load_host_table_plugin(\"/full/path/to/plugin.so\").");
+  return nullptr;
 }
 
 host_table_factory_ptr_t create_host_table_factory(const nlohmann::json& json) {

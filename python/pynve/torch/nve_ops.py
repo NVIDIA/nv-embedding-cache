@@ -17,29 +17,182 @@ import torch
 from pynve.torch.nve_tensors import CachedTable
 import pynve.nve as nve
 
-# functional implementation for a embedding lookup with cache
-# allowing for autograd functionality
+# ---------------------------------------------------------------------------
+# torch.export-compatible ops
+#
+# These wrap torch.ops.nve_ops.embedding_lookup / embedding_lookup_with_pooling
+# (registered in nve.so via STABLE_TORCH_LIBRARY) so that:
+#   - Forward: the custom op is traced by torch.export / torch.jit.trace.
+#   - Backward: two variants per op:
+#       *Training  — takes weight (CachedTable), returns sparse gradient
+#                    for use with any PyTorch optimizer.
+#       *Inference — no weight input, raises on backward.
+# ---------------------------------------------------------------------------
+
+
+# ===== Embedding =====
+
+class NVEmbeddingOp(torch.autograd.Function):
+    """Inference-only embedding lookup via torch.ops.nve_ops.embedding_lookup.
+
+    Forward is traceable by torch.export / torch.jit.trace.
+    Backward raises RuntimeError — use NVEmbeddingOpTraining for training.
+    """
+
+    @staticmethod
+    def forward(keys: torch.Tensor, layer_id: int):
+        return torch.ops.nve_ops.embedding_lookup(keys, layer_id)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        pass
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise RuntimeError(
+            "NVEmbeddingOp does not support backward. "
+            "Use optimize_for_training=True to enable gradient computation.")
+
+
+class NVEmbeddingOpTraining(torch.autograd.Function):
+    """Training embedding lookup via torch.ops.nve_ops.embedding_lookup.
+
+    Forward is traceable by torch.export / torch.jit.trace.
+    weight (CachedTable) is an unused tensor input in the forward graph but
+    receives a sparse gradient in backward, compatible with any optimizer.
+    """
+
+    @staticmethod
+    def forward(keys: torch.Tensor, weight: CachedTable, layer_id: int):
+        return torch.ops.nve_ops.embedding_lookup(keys, layer_id)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        keys, weight, layer_id = inputs
+        ctx.save_for_backward(keys, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        keys, weight = ctx.saved_tensors
+        keys_flat = keys.reshape((1, -1))
+        num_keys = keys_flat.numel()
+        embed_dim = grad_output.shape[-1]
+        unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
+        result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
+        stream = torch.cuda.current_stream(keys.device).cuda_stream
+        nve_op = weight.emb_layer
+        num_unique = nve_op.concat_backprop(
+            num_keys, keys_flat.data_ptr(), grad_output.data_ptr(),
+            unique_keys.data_ptr(), result.data_ptr(), stream)
+        unique_keys = unique_keys[:num_unique].reshape((1, -1))
+        result = result[:num_unique]
+        grad_weight = torch.sparse_coo_tensor(
+            unique_keys, result, weight.shape, device=weight.device)
+        return None, grad_weight, None
+
+
+# ===== EmbeddingBag =====
+
+class NVEmbeddingBagOp(torch.autograd.Function):
+    """Inference-only embedding bag lookup via torch.ops.nve_ops.embedding_lookup_with_pooling.
+
+    Forward is traceable by torch.export / torch.jit.trace.
+    Backward raises RuntimeError — use NVEmbeddingBagOpTraining for training.
+    """
+
+    @staticmethod
+    def forward(keys: torch.Tensor, offsets: torch.Tensor,
+                per_sample_weights, pooling_type: int, layer_id: int):
+        return torch.ops.nve_ops.embedding_lookup_with_pooling(
+            keys, offsets, per_sample_weights, pooling_type, layer_id)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        pass
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise RuntimeError(
+            "NVEmbeddingBagOp does not support backward. "
+            "Use optimize_for_training=True to enable gradient computation.")
+
+
+class NVEmbeddingBagOpTraining(torch.autograd.Function):
+    """Training embedding bag lookup via torch.ops.nve_ops.embedding_lookup_with_pooling.
+
+    Forward is traceable by torch.export / torch.jit.trace.
+    weight (CachedTable) is an unused tensor input in the forward graph but
+    receives a sparse gradient in backward, compatible with any optimizer.
+    """
+
+    @staticmethod
+    def forward(keys: torch.Tensor, weight: CachedTable, offsets: torch.Tensor,
+                per_sample_weights, pooling_type: int, layer_id: int):
+        return torch.ops.nve_ops.embedding_lookup_with_pooling(
+            keys, offsets, per_sample_weights, pooling_type, layer_id)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        keys, weight, offsets, per_sample_weights, pooling_type, layer_id = inputs
+        ctx.pooling_type = pooling_type
+        if per_sample_weights is not None:
+            ctx.save_for_backward(keys, weight, offsets, per_sample_weights)
+            ctx.has_per_sample_weights = True
+        else:
+            ctx.save_for_backward(keys, weight, offsets)
+            ctx.has_per_sample_weights = False
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.has_per_sample_weights:
+            keys, weight, offsets, per_sample_weights = ctx.saved_tensors
+        else:
+            keys, weight, offsets = ctx.saved_tensors
+            per_sample_weights = None
+
+        num_keys = keys.numel()
+        embed_dim = grad_output.shape[-1]
+        unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
+        result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
+        stream = torch.cuda.current_stream(keys.device).cuda_stream
+        nve_op = weight.emb_layer
+
+        weight_dtype = nve.DataType_t.Unknown
+        weight_ptr = 0
+        if per_sample_weights is not None:
+            weight_dtype = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
+                           else nve.DataType_t.Float16
+            weight_ptr = per_sample_weights.data_ptr()
+
+        num_unique = nve_op.pooling_backprop(
+            num_keys, keys.data_ptr(), grad_output.data_ptr(),
+            unique_keys.data_ptr(), result.data_ptr(),
+            ctx.pooling_type, offsets.numel() - 1, offsets.data_ptr(),
+            weight_dtype, weight_ptr, stream)
+
+        unique_keys = unique_keys[:num_unique].reshape((1, -1))
+        result = result[:num_unique]
+        grad_weight = torch.sparse_coo_tensor(
+            unique_keys, result, weight.shape, device=weight.device)
+        # grad_keys=None, grad_weight=sparse, grad_offsets=None,
+        # grad_per_sample_weights=None, grad_pooling_type=None, grad_layer_id=None
+        return None, grad_weight, None, None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Legacy ops (pybind11 direct calls, no torch custom ops)
+#
+# Used as fallback when HAS_TORCH_OPS is False (torch bindings unavailable).
+# Not traceable by torch.export / torch.jit.trace.
+# ---------------------------------------------------------------------------
+
 class CacheEmbeddingOp(torch.autograd.Function):
     @staticmethod
-    def forward(keys : torch.Tensor, weight : CachedTable):
-        """Function for embedding lookup with caching.
-
-        This class provides the forward and backward pass for the embedding lookup operation, 
-        see torch.nn.Embedding for more information on the operation.
-
-        Args:
-            keys (torch.Tensor): Tensor of integer keys identifying the embedding vectors to retrieve
-            weight (CachedTable): CachedTable object containing the embedding table
-
-        Returns:
-            torch.Tensor: Tensor of embedding vectors corresponding to the input keys
-
-        """
-        nve_op: nve.NVEmbedding = weight.emb_layer
-        
-        #todo find a better formula for space
-        result = torch.empty(torch.numel(keys), weight.shape[-1], dtype=weight.dtype, device=keys.device)
-        nve_op.lookup(torch.numel(keys), keys.data_ptr(), result.data_ptr(), torch.cuda.current_stream(keys.device).cuda_stream)
+    def forward(keys: torch.Tensor, weight: CachedTable):
+        nve_op = weight.emb_layer
+        result = torch.empty(keys.numel(), weight.shape[-1], dtype=weight.dtype, device=keys.device)
+        nve_op.lookup(keys.numel(), keys.data_ptr(), result.data_ptr(),
+                      torch.cuda.current_stream(keys.device).cuda_stream)
         return result
 
     @staticmethod
@@ -50,93 +203,74 @@ class CacheEmbeddingOp(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         keys, weight = ctx.saved_tensors
-        keys = keys.reshape((1, -1))
-        unique_keys = torch.empty(torch.numel(keys), dtype=torch.int64, device=weight.device)
-        result_shape = list(weight.shape)
-        result = torch.empty(torch.numel(keys), result_shape[1], dtype=weight.dtype, device=weight.device)
+        keys_flat = keys.reshape((1, -1))
+        num_keys = keys_flat.numel()
+        embed_dim = grad_output.shape[-1]
+        unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
+        result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
         nve_op = weight.emb_layer
-        num_unique_keys = nve_op.concat_backprop(torch.numel(keys), keys.data_ptr(), grad_output.data_ptr(), unique_keys.data_ptr(), result.data_ptr(), torch.cuda.current_stream(weight.device).cuda_stream)
-        unique_keys = unique_keys.resize_(num_unique_keys)
-        unique_keys = unique_keys.reshape((1, -1))
-        result = result.resize_(num_unique_keys, result_shape[1])
-        res = torch.sparse_coo_tensor(unique_keys, result, tuple(result_shape)).to(weight.device)               
-        
-        return None, res
+        num_unique = nve_op.concat_backprop(
+            num_keys, keys_flat.data_ptr(), grad_output.data_ptr(),
+            unique_keys.data_ptr(), result.data_ptr(),
+            torch.cuda.current_stream(keys.device).cuda_stream)
+        unique_keys = unique_keys[:num_unique].reshape((1, -1))
+        result = result[:num_unique]
+        return None, torch.sparse_coo_tensor(unique_keys, result, weight.shape, device=weight.device)
 
-# functional implementation for a fused embedding lookup and pooling with cache
-# allowing for autograd functionality
+
 class CacheEmbeddingBagOp(torch.autograd.Function):
     @staticmethod
-    def forward(keys : torch.Tensor, weight : CachedTable, offsets : torch.Tensor, mode : str, per_sample_weights : torch.Tensor):
-        """Function for embedding bag with caching.
-
-        This class provides the forward and backward pass for the embedding bag operation, 
-        see torch.nn.EmbeddingBag for more information on the operation.
-
-        Args:
-            keys (torch.Tensor): Tensor of integer keys identifying the embedding vectors to retrieve
-            weight (CachedTable): CachedTable object containing the embedding table
-            offsets (torch.Tensor): Tensor of offsets identifying the boundaries of sequences
-            mode (str): Mode of pooling to apply can be 'sum', 'mean'.
-            per_sample_weights (torch.Tensor): Tensor of per sample weights
-
-        Returns:
-            torch.Tensor: Tensor of embedding vectors corresponding to the input keys
-
-        """
-        nve_op: nve.NVEmbedding = weight.emb_layer
+    def forward(keys: torch.Tensor, weight: CachedTable, offsets: torch.Tensor,
+                mode: str, per_sample_weights: torch.Tensor):
+        nve_op = weight.emb_layer
         device = keys.device
-        #todo find a better formula for space
-        result = torch.empty(torch.numel(offsets) - 1, weight.shape[-1], dtype=weight.dtype, device=device)
-        if (per_sample_weights != None):
-            if (per_sample_weights.dtype == torch.float32):
-                weights_type = nve.Float32 #float
-            else:
-                weights_type = nve.Float16 #half
-            if (mode == 'sum'):
-                nve_op.lookup_with_pooling(torch.numel(keys), keys.data_ptr(), result.data_ptr(), nve.WeightedSum, torch.numel(offsets) - 1, offsets.data_ptr(), weights_type, per_sample_weights, torch.cuda.current_stream(device).cuda_stream)
-            else:
-                nve_op.lookup_with_pooling(torch.numel(keys), keys.data_ptr(), result.data_ptr(), nve.WeightedMean, torch.numel(offsets) - 1, offsets.data_ptr(), weights_type, per_sample_weights, torch.cuda.current_stream(device).cuda_stream)
+        result = torch.empty(offsets.numel() - 1, weight.shape[-1], dtype=weight.dtype, device=device)
+        stream = torch.cuda.current_stream(device).cuda_stream
+        if per_sample_weights is not None:
+            w_type = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
+                     else nve.DataType_t.Float16
+            pool = nve.PoolingType_t.WeightedSum if mode == 'sum' else nve.PoolingType_t.WeightedMean
+            nve_op.lookup_with_pooling(keys.numel(), keys.data_ptr(), result.data_ptr(),
+                                       pool, offsets.numel() - 1, offsets.data_ptr(),
+                                       w_type, per_sample_weights.data_ptr(), stream)
         else:
-            if (mode == 'sum'):
-                nve_op.lookup_with_pooling(torch.numel(keys), keys.data_ptr(), result.data_ptr(), nve.Sum, torch.numel(offsets) - 1, offsets.data_ptr(), nve.Float32, 0, torch.cuda.current_stream(device).cuda_stream)
-            else:
-                nve_op.lookup_with_pooling(torch.numel(keys), keys.data_ptr(), result.data_ptr(), nve.Mean, torch.numel(offsets) - 1, offsets.data_ptr(), nve.Float32, 0, torch.cuda.current_stream(device).cuda_stream)
+            pool = nve.PoolingType_t.Sum if mode == 'sum' else nve.PoolingType_t.Mean
+            nve_op.lookup_with_pooling(keys.numel(), keys.data_ptr(), result.data_ptr(),
+                                       pool, offsets.numel() - 1, offsets.data_ptr(),
+                                       nve.DataType_t.Float32, 0, stream)
         return result
 
     @staticmethod
     def setup_context(ctx, inputs, output):
         keys, weight, offsets, mode, per_sample_weights = inputs
-        #save mode and tensors for backprop
-        ctx.mode  = mode
+        ctx.mode = mode
         ctx.save_for_backward(keys, weight, offsets, per_sample_weights)
 
     @staticmethod
     def backward(ctx, grad_output):
         keys, weight, offsets, per_sample_weights = ctx.saved_tensors
-        unique_keys = torch.empty(torch.numel(keys), dtype=torch.int64, device=weight.device)
-        result = torch.empty(torch.numel(keys), weight.shape[-1], dtype=weight.dtype, device=weight.device)
+        num_keys = keys.numel()
+        embed_dim = grad_output.shape[-1]
+        unique_keys = torch.empty(num_keys, dtype=torch.int64, device=weight.device)
+        result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=weight.device)
         nve_op = weight.emb_layer
-
-        if (per_sample_weights != None):
-            if (per_sample_weights.dtype == torch.float32):
-                weights_type = nve.Float32 #float
-            else:
-                weights_type = nve.Float16 #half
-            if (ctx.mode == 'sum'):
-                num_unique_keys = nve_op.pooling_backprop(torch.numel(keys), keys.data_ptr(), grad_output.data_ptr(), unique_keys.data_ptr(), result.data_ptr(), nve.WeightedSum, torch.numel(offsets) - 1, offsets.data_ptr(), weights_type, per_sample_weights, torch.cuda.current_stream(weight.device).cuda_stream)
-            else:
-                num_unique_keys = nve_op.pooling_backprop(torch.numel(keys), keys.data_ptr(), grad_output.data_ptr(), unique_keys.data_ptr(), result.data_ptr(), nve.WeightedMean, torch.numel(offsets) - 1, offsets.data_ptr(), weights_type, per_sample_weights, torch.cuda.current_stream(weight.device).cuda_stream)
+        stream = torch.cuda.current_stream(weight.device).cuda_stream
+        if per_sample_weights is not None:
+            w_type = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
+                     else nve.DataType_t.Float16
+            pool = nve.PoolingType_t.WeightedSum if ctx.mode == 'sum' else nve.PoolingType_t.WeightedMean
+            num_unique = nve_op.pooling_backprop(
+                num_keys, keys.data_ptr(), grad_output.data_ptr(),
+                unique_keys.data_ptr(), result.data_ptr(),
+                pool, offsets.numel() - 1, offsets.data_ptr(),
+                w_type, per_sample_weights.data_ptr(), stream)
         else:
-            if (ctx.mode == 'sum'):
-                num_unique_keys = nve_op.pooling_backprop(torch.numel(keys), keys.data_ptr(), grad_output.data_ptr(), unique_keys.data_ptr(), result.data_ptr(), nve.Sum, torch.numel(offsets) - 1, offsets.data_ptr(), nve.Float32, 0, torch.cuda.current_stream(weight.device).cuda_stream)
-            else:
-                num_unique_keys = nve_op.pooling_backprop(torch.numel(keys), keys.data_ptr(), grad_output.data_ptr(), unique_keys.data_ptr(), result.data_ptr(), nve.Mean, torch.numel(offsets) - 1, offsets.data_ptr(), nve.Float32, 0, torch.cuda.current_stream(weight.device).cuda_stream)
-
-        result_shape = list(weight.shape)
-        unique_keys = unique_keys.resize_(num_unique_keys)
-        unique_keys = unique_keys.reshape((1, -1))
-        result = result.resize_(num_unique_keys, result_shape[1])
-        res = torch.sparse_coo_tensor(unique_keys, result, tuple(result_shape)).to(weight.device)               
-        
-        return None, res, None, None, None
+            pool = nve.PoolingType_t.Sum if ctx.mode == 'sum' else nve.PoolingType_t.Mean
+            num_unique = nve_op.pooling_backprop(
+                num_keys, keys.data_ptr(), grad_output.data_ptr(),
+                unique_keys.data_ptr(), result.data_ptr(),
+                pool, offsets.numel() - 1, offsets.data_ptr(),
+                nve.DataType_t.Float32, 0, stream)
+        unique_keys = unique_keys[:num_unique].reshape((1, -1))
+        result = result[:num_unique]
+        return None, torch.sparse_coo_tensor(unique_keys, result, weight.shape, device=weight.device), None, None, None

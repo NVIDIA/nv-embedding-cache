@@ -171,6 +171,10 @@ class Table {
    * @returns Maximal supported row size in bytes.
    */
   virtual int64_t get_max_row_size() const = 0;
+  /**
+   * @returns Key used to signal invalid entries (cast to int64_t)
+   */
+  virtual int64_t get_invalid_key() const = 0;
 
   // BufferWrapper version with default fallback to normal buffer version.
   // These functions will be used by the layers and will delegate buffer management to the wrappers.

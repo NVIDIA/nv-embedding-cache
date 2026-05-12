@@ -66,6 +66,9 @@ struct GPUTableConfig {
                                             // are performed on GPU and do not manage cache metadata on host                            
   uint64_t kernel_mode_type{0};             // Force kernel mode type, 0 means use defaults
   uint64_t kernel_mode_value{0};            // Interpretation depends on kernel mode type
+  int64_t invalid_key{-1};                  // Key used to signal invalid entries (cast to int64_t)
+                                            // All operations on such keys (lookup, insert, ...) have undefined results
+                                            // Other keys in the same batch are unaffected
 };
 void from_json(const nlohmann::json& json, GPUTableConfig& conf);
 void to_json(nlohmann::json& json, const GPUTableConfig& conf);
@@ -262,6 +265,10 @@ class GpuTable : public Table {
    * @returns Maximal supported row size in bytes.
    */
   virtual int64_t get_max_row_size() const override;
+  /**
+   * @returns Key used to signal invalid entries (cast to int64_t)
+   */
+  virtual int64_t get_invalid_key() const override;
 
   virtual void erase_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
   virtual void find_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, buffer_ptr<max_bitmask_repr_t> hit_mask,

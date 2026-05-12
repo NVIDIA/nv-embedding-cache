@@ -31,7 +31,7 @@ import socket
 import warnings
 warnings.filterwarnings("ignore")
 
-from benchmark_util import write_benchmark_csv, benchmark_arg_parser
+from benchmark_util import write_benchmark_csv, benchmark_arg_parser, convert_pareto_to_alpha
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'samples', 'pytorch'))
 from pytorch_samples_common import gen_key, gen_jagged_key, parse_hitrates_from_log, gen_permute
 
@@ -138,7 +138,7 @@ def parse_command_line():
     parser = benchmark_arg_parser()
     parser.add_argument("--mode", default=AlgMode.NVLinearUVM, choices=[AlgMode.NVLinearUVM, AlgMode.NVHierarchical, AlgMode.NVGPU, AlgMode.TorchRec,AlgMode.Torch, AlgMode.TorchCPU ],help=f"Algorithm Mode of the script can be either [default: {AlgMode.NVLinearUVM}]")
     parser.add_argument("--clear", "-c", action='store_true',help="Clear tables before warmup (useful persistent parameter server)")
-    parser.add_argument("--prefill", "-p", action='store_true',help="Prefill tables before warmup")
+    parser.add_argument("--prefill", "-pf", action='store_true',help="Prefill tables before warmup")
     parser.add_argument("--host_load_factor", "-hlf", default=0.01 ,help="Load factor of the CPU cache(default: 0.01)", type=float)
     parser.add_argument("--redis_address", "-ra", default='localhost:7000', help="Address of a Redis server in formatted as 'host:port' (default: 'localhost:7000', only for hierarchical)")
     args = parser.parse_args()
@@ -314,6 +314,16 @@ def get_device(args):
 def main():
     torch.set_num_threads(os.cpu_count())
     args = parse_command_line()
+    if (args.verbose): print(args)
+
+    if (args.pareto < 0.):
+        raise RuntimeError(f"Pareto invalid value ({args.pareto}) - must be positive")
+    if (args.pareto > 0.):
+        # Update alpha from pareto
+        args.alpha = convert_pareto_to_alpha(args.pareto, args.num_table_rows)
+        if (not args.alpha) :
+            raise RuntimeError(f"Failed to convert Pareto ratio of {args.pareto} to power-law Alpha")
+        if (args.verbose): print(f"Update alpha to {args.alpha:.3f} from pareto {args.pareto}")
 
     embedding_dim = args.embedding_dim
     batch = args.batch

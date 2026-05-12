@@ -24,24 +24,26 @@
 #include <numeric>
 #include <cmath>
 
+#include "test_utils.hpp"
+
 /* ============================================================================
  * Helpers
  * ============================================================================ */
 
-#define CUDA_CHECK(call)                                                    \
-  do {                                                                      \
-    cudaError_t err = (call);                                               \
-    ASSERT_EQ(cudaSuccess, err) << "CUDA error: " << cudaGetErrorString(err); \
+#define CUDA_CHECK(call)                                                      \
+  do {                                                                        \
+    cudaError_t err = (call);                                                 \
+    EXPECT_EQ(cudaSuccess, err) << "CUDA error: " << cudaGetErrorString(err); \
   } while (0)
 
-#define NVE_CHECK(call)                              \
-  do {                                               \
-    nve_status_t st = (call);                        \
-    if (st != NVE_SUCCESS) {                         \
-      const char* msg = nullptr;                     \
-      nve_get_last_error(&msg);                      \
-      FAIL() << "NVE error " << st << ": " << msg;  \
-    }                                                \
+#define NVE_CHECK(call)                                   \
+  do {                                                    \
+    nve_status_t st = (call);                             \
+    if (st != NVE_SUCCESS) {                              \
+      const char* msg = nullptr;                          \
+      nve_get_last_error(&msg);                           \
+      ADD_FAILURE() << "NVE error " << st << ": " << msg; \
+    }                                                     \
   } while (0)
 
 static constexpr int DEVICE_ID = 0;
@@ -96,8 +98,8 @@ class GpuEmbeddingLayerTest : public ::testing::Test {
       nve_context_destroy(ctx_);
     }
     if (layer_) nve_layer_destroy(layer_);
-    if (d_table_) cudaFree(d_table_);
-    if (h_table_) cudaFreeHost(h_table_);
+    if (d_table_) CUDA_CHECK(cudaFree(d_table_));
+    if (h_table_) CUDA_CHECK(cudaFreeHost(h_table_));
   }
 
   int64_t num_embeddings_ = 0;
@@ -132,8 +134,8 @@ TEST_F(GpuEmbeddingLayerTest, LookupSingleKey) {
 
   EXPECT_FLOAT_EQ(1.0f, hitrate);
 
-  cudaFree(d_keys);
-  cudaFree(d_output);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
 }
 
 TEST_F(GpuEmbeddingLayerTest, LookupMultipleKeys) {
@@ -157,8 +159,8 @@ TEST_F(GpuEmbeddingLayerTest, LookupMultipleKeys) {
     EXPECT_FLOAT_EQ(expected, h_output[k * NUM_FLOATS]) << "Key " << h_keys[k];
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_output);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
 }
 
 TEST_F(GpuEmbeddingLayerTest, UpdateAndLookup) {
@@ -191,9 +193,9 @@ TEST_F(GpuEmbeddingLayerTest, UpdateAndLookup) {
     EXPECT_FLOAT_EQ(99.0f, h_output[i]) << "Mismatch at index " << i;
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_values);
-  cudaFree(d_output);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
+  CUDA_CHECK(cudaFree(d_output));
 }
 
 TEST_F(GpuEmbeddingLayerTest, Clear) {
@@ -235,7 +237,7 @@ class GpuTableTest : public ::testing::Test {
       nve_context_destroy(ctx_);
     }
     if (table_) nve_table_destroy(table_);
-    if (h_uvm_table_) cudaFreeHost(h_uvm_table_);
+    if (h_uvm_table_) CUDA_CHECK(cudaFreeHost(h_uvm_table_));
   }
 
   void* h_uvm_table_ = nullptr;
@@ -333,10 +335,10 @@ TEST_F(GpuTableTest, InsertFindErase) {
   // After erase, keys should miss in cache (resolved from UVM but counted as cache misses)
   EXPECT_NE(0, miss_count_after_erase) << "Expected cache misses after erase";
 
-  cudaFree(d_keys);
-  cudaFree(d_values);
-  cudaFree(d_output);
-  cudaFree(d_hitmask);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
+  CUDA_CHECK(cudaFree(d_output));
+  CUDA_CHECK(cudaFree(d_hitmask));
 }
 
 TEST_F(GpuTableTest, InsertUpdateFind) {
@@ -381,10 +383,10 @@ TEST_F(GpuTableTest, InsertUpdateFind) {
     EXPECT_FLOAT_EQ(42.0f, h_output[i]) << "Mismatch at index " << i;
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_values);
-  cudaFree(d_output);
-  cudaFree(d_hitmask);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
+  CUDA_CHECK(cudaFree(d_output));
+  CUDA_CHECK(cudaFree(d_hitmask));
 }
 
 TEST_F(GpuTableTest, ClearTable) {
@@ -420,9 +422,9 @@ TEST_F(GpuTableTest, ClearTable) {
   CUDA_CHECK(cudaMemcpy(&h_hitmask, d_hitmask, sizeof(uint64_t), cudaMemcpyDeviceToHost));
   EXPECT_EQ(0ULL, h_hitmask);
 
-  cudaFree(d_keys);
-  cudaFree(d_values);
-  cudaFree(d_hitmask);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
+  CUDA_CHECK(cudaFree(d_hitmask));
 }
 
 /* ============================================================================
@@ -495,11 +497,11 @@ TEST(GpuTableInt32, InsertAndFind) {
   nve_context_wait(ctx);
   nve_context_destroy(ctx);
   nve_table_destroy(table);
-  cudaFree(d_keys);
-  cudaFree(d_values);
-  cudaFree(d_output);
-  cudaFree(d_hitmask);
-  cudaFreeHost(h_uvm);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
+  CUDA_CHECK(cudaFree(d_output));
+  CUDA_CHECK(cudaFree(d_hitmask));
+  CUDA_CHECK(cudaFreeHost(h_uvm));
 }
 
 /* ============================================================================
@@ -544,7 +546,7 @@ class LinearUvmLayerTest : public ::testing::Test {
     }
     if (layer_) nve_layer_destroy(layer_);
     if (gpu_table_) nve_table_destroy(gpu_table_);
-    if (h_uvm_table_) cudaFreeHost(h_uvm_table_);
+    if (h_uvm_table_) CUDA_CHECK(cudaFreeHost(h_uvm_table_));
   }
 
   int64_t num_rows_ = 0;
@@ -578,8 +580,8 @@ TEST_F(LinearUvmLayerTest, LookupFromUvm) {
     EXPECT_FLOAT_EQ(expected, h_output[k * NUM_FLOATS]) << "Key " << h_keys[k];
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_output);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
 }
 
 TEST_F(LinearUvmLayerTest, InsertAndLookup) {
@@ -611,9 +613,9 @@ TEST_F(LinearUvmLayerTest, InsertAndLookup) {
     EXPECT_FLOAT_EQ(77.0f, h_output[i]);
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_values);
-  cudaFree(d_output);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
+  CUDA_CHECK(cudaFree(d_output));
 }
 
 TEST_F(LinearUvmLayerTest, EraseAndClear) {
@@ -639,8 +641,8 @@ TEST_F(LinearUvmLayerTest, EraseAndClear) {
   NVE_CHECK(nve_layer_clear(layer_, ctx_));
   NVE_CHECK(nve_context_wait(ctx_));
 
-  cudaFree(d_keys);
-  cudaFree(d_values);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_values));
 }
 
 TEST_F(LinearUvmLayerTest, UpdateAccumulate) {
@@ -682,9 +684,9 @@ TEST_F(LinearUvmLayerTest, UpdateAccumulate) {
         << "Key " << h_keys[k];
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_output);
-  cudaFree(d_grads);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
+  CUDA_CHECK(cudaFree(d_grads));
 }
 
 /* ============================================================================
@@ -726,7 +728,7 @@ class HierarchicalLayerTest : public ::testing::Test {
     }
     if (layer_) nve_layer_destroy(layer_);
     if (gpu_table_) nve_table_destroy(gpu_table_);
-    if (h_uvm_table_) cudaFreeHost(h_uvm_table_);
+    if (h_uvm_table_) CUDA_CHECK(cudaFreeHost(h_uvm_table_));
   }
 
   void* h_uvm_table_ = nullptr;
@@ -790,9 +792,9 @@ TEST_F(HierarchicalLayerTest, LookupInsertUpdateClearErase) {
   NVE_CHECK(nve_layer_clear(layer_, ctx_));
   NVE_CHECK(nve_context_wait(ctx_));
 
-  cudaFree(d_keys);
-  cudaFree(d_output);
-  cudaFree(d_values);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
+  CUDA_CHECK(cudaFree(d_values));
 }
 
 TEST_F(HierarchicalLayerTest, Accumulate) {
@@ -835,10 +837,10 @@ TEST_F(HierarchicalLayerTest, Accumulate) {
     EXPECT_FLOAT_EQ(60.0f, h_output[i]);
   }
 
-  cudaFree(d_keys);
-  cudaFree(d_output);
-  cudaFree(d_grads);
-  cudaFree(d_vals);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
+  CUDA_CHECK(cudaFree(d_grads));
+  CUDA_CHECK(cudaFree(d_vals));
 }
 
 /* ============================================================================
@@ -893,14 +895,14 @@ TEST(LayerWithHeuristic, LinearUvmWithDefaultHeuristic) {
   NVE_CHECK(nve_context_wait(ctx));
 
   // Cleanup
-  cudaFree(d_keys);
-  cudaFree(d_output);
+  CUDA_CHECK(cudaFree(d_keys));
+  CUDA_CHECK(cudaFree(d_output));
   nve_context_wait(ctx);
   nve_context_destroy(ctx);
   nve_layer_destroy(layer);
   nve_heuristic_destroy(heuristic);
   nve_table_destroy(gpu_table);
-  cudaFreeHost(h_uvm);
+  CUDA_CHECK(cudaFreeHost(h_uvm));
 }
 
 /* ============================================================================
@@ -913,7 +915,7 @@ class HierarchicalNvhmLayerTest : public ::testing::Test {
     CUDA_CHECK(cudaSetDevice(DEVICE_ID));
 
     // Load NVHM plugin
-    nve_status_t st = nve_load_host_table_plugin("nvhm");
+    nve_status_t st = nve_load_host_table_plugin(nve_test::plugin_full_path("nvhm").c_str());
     if (st != NVE_SUCCESS) {
       GTEST_SKIP() << "NVHM plugin not available";
     }
@@ -999,7 +1001,7 @@ TEST_F(HierarchicalNvhmLayerTest, InsertAndLookup) {
     EXPECT_FLOAT_EQ(expected, out[k * NUM_FLOATS]) << "Key " << h_keys[k];
   }
 
-  cudaFreeHost(p_output);
+  CUDA_CHECK(cudaFreeHost(p_output));
 }
 
 TEST_F(HierarchicalNvhmLayerTest, UpdateAndAccumulate) {
@@ -1034,7 +1036,7 @@ TEST_F(HierarchicalNvhmLayerTest, UpdateAndAccumulate) {
     EXPECT_FLOAT_EQ(55.0f, out[i]);
   }
 
-  cudaFreeHost(p_output);
+  CUDA_CHECK(cudaFreeHost(p_output));
 }
 
 TEST_F(HierarchicalNvhmLayerTest, EraseAndClear) {
@@ -1066,7 +1068,101 @@ TEST_F(HierarchicalNvhmLayerTest, EraseAndClear) {
   // All should be misses after clear
   EXPECT_EQ(0u, hitmask & 0xF);
 
-  cudaFreeHost(p_output);
+  CUDA_CHECK(cudaFreeHost(p_output));
+}
+
+/* ============================================================================
+ * Hierarchical Layer default_embedding fill
+ * ============================================================================ */
+
+TEST(HierarchicalDefaultEmbedding, FillsMissesViaCApi) {
+  // Load NVHM plugin (skip if unavailable)
+  nve_status_t st = nve_load_host_table_plugin(nve_test::plugin_full_path("nvhm").c_str());
+  if (st != NVE_SUCCESS) {
+    GTEST_SKIP() << "NVHM plugin not available";
+  }
+
+  // Single NVHM host table — last table is on host as default_embedding requires.
+  nve_host_factory_t factory = nullptr;
+  NVE_CHECK(nve_create_host_table_factory(&factory, R"({"implementation": "nvhm_map"})"));
+
+  const char* table_config = R"({
+    "mask_size": 8,
+    "key_size": 8,
+    "max_value_size": 128,
+    "value_dtype": "float32",
+    "num_partitions": 2,
+    "initial_capacity": 1024,
+    "value_alignment": 32
+  })";
+  nve_table_t host_table = nullptr;
+  NVE_CHECK(nve_host_factory_produce(factory, 0, table_config, &host_table));
+
+  // Default embedding row: 32 floats all set to 7.5f.
+  std::vector<float> default_emb(NUM_FLOATS, 7.5f);
+
+  auto hier_cfg = nve_hierarchical_layer_config_default();
+  hier_cfg.layer_name = "test_default_embedding";
+  hier_cfg.default_embedding = default_emb.data();
+  hier_cfg.default_embedding_size = static_cast<int64_t>(default_emb.size() * sizeof(float));
+
+  nve_table_t tables[] = {host_table};
+  nve_layer_t layer = nullptr;
+  NVE_CHECK(nve_hierarchical_layer_create(&layer, NVE_KEY_INT64, &hier_cfg, tables, 1, nullptr));
+
+  nve_context_t ctx = nullptr;
+  NVE_CHECK(nve_layer_create_execution_context(layer, &ctx, nullptr, nullptr, nullptr, nullptr));
+  NVE_CHECK(nve_layer_clear(layer, ctx));
+  NVE_CHECK(nve_context_wait(ctx));
+
+  // Insert keys [0..3] with distinct per-row values; keys [4..7] are intentionally absent.
+  const uint64_t num_inserted = 4;
+  const uint64_t num_keys = 8;
+  std::vector<int64_t> insert_keys = {0, 1, 2, 3};
+  std::vector<float> insert_vals(num_inserted * NUM_FLOATS);
+  for (uint64_t r = 0; r < num_inserted; ++r) {
+    for (uint64_t c = 0; c < NUM_FLOATS; ++c) {
+      insert_vals[r * NUM_FLOATS + c] = 100.0f + static_cast<float>(r);
+    }
+  }
+  NVE_CHECK(nve_layer_insert(layer, ctx, num_inserted, insert_keys.data(),
+                             ROW_SIZE, ROW_SIZE, insert_vals.data(), 0));
+  NVE_CHECK(nve_context_wait(ctx));
+
+  // Lookup [0..7] — first 4 should hit, last 4 should be filled with the default embedding.
+  std::vector<int64_t> lookup_keys = {0, 1, 2, 3, 4, 5, 6, 7};
+  void* p_output = nullptr;
+  CUDA_CHECK(cudaMallocHost(&p_output, num_keys * ROW_SIZE));
+  std::memset(p_output, 0x00, num_keys * ROW_SIZE);
+
+  uint64_t hitmask = 0;
+  NVE_CHECK(nve_layer_lookup(layer, ctx, num_keys, lookup_keys.data(),
+                             p_output, ROW_SIZE, &hitmask, nullptr));
+  NVE_CHECK(nve_context_wait(ctx));
+
+  auto* out = static_cast<float*>(p_output);
+  for (uint64_t k = 0; k < num_keys; ++k) {
+    const bool hit = (hitmask >> k) & 0x1;
+    if (k < num_inserted) {
+      EXPECT_TRUE(hit) << "expected hit for key " << k;
+      const float expected = 100.0f + static_cast<float>(k);
+      for (uint64_t c = 0; c < NUM_FLOATS; ++c) {
+        EXPECT_FLOAT_EQ(expected, out[k * NUM_FLOATS + c]) << "key " << k << " comp " << c;
+      }
+    } else {
+      EXPECT_FALSE(hit) << "expected miss for key " << k;
+      for (uint64_t c = 0; c < NUM_FLOATS; ++c) {
+        EXPECT_FLOAT_EQ(7.5f, out[k * NUM_FLOATS + c]) << "key " << k << " comp " << c;
+      }
+    }
+  }
+
+  CUDA_CHECK(cudaFreeHost(p_output));
+  nve_context_wait(ctx);
+  nve_context_destroy(ctx);
+  nve_layer_destroy(layer);
+  nve_table_destroy(host_table);
+  nve_host_factory_destroy(factory);
 }
 
 /* ============================================================================
@@ -1091,7 +1187,7 @@ class HierarchicalRedisLayerTest : public ::testing::Test {
 
     CUDA_CHECK(cudaSetDevice(DEVICE_ID));
 
-    nve_status_t st = nve_load_host_table_plugin("redis");
+    nve_status_t st = nve_load_host_table_plugin(nve_test::plugin_full_path("redis").c_str());
     if (st != NVE_SUCCESS) {
       GTEST_SKIP() << "Redis plugin not available";
     }
@@ -1133,8 +1229,8 @@ class HierarchicalRedisLayerTest : public ::testing::Test {
 
   void TearDown() override {
     if (layer_ && ctx_) {
-      nve_layer_clear(layer_, ctx_);
-      cudaDeviceSynchronize();
+      NVE_CHECK(nve_layer_clear(layer_, ctx_));
+      CUDA_CHECK(cudaDeviceSynchronize());
     }
     if (ctx_) { nve_context_wait(ctx_); nve_context_destroy(ctx_); }
     if (layer_) nve_layer_destroy(layer_);
@@ -1184,5 +1280,5 @@ TEST_F(HierarchicalRedisLayerTest, InsertLookupAndUpdate) {
     EXPECT_FLOAT_EQ(888.0f, out[i]);
   }
 
-  cudaFreeHost(p_output);
+  CUDA_CHECK(cudaFreeHost(p_output));
 }

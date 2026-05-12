@@ -32,14 +32,14 @@
 #ifdef NVE_ASSERT_
 #error NVE_ASSERT_ was already defined.
 #endif
-#ifdef _DEBUG
+#ifndef NDEBUG
 #define NVE_ASSERT_(_expr_) \
   do {                      \
     if (!(_expr_)) {        \
       std::abort();         \
     }                       \
   } while (false)
-#else
+#else // NDEBUG
 #define NVE_ASSERT_(_expr_) \
   do {                      \
   } while (false)
@@ -70,13 +70,25 @@
 #error NVE_CHECK_ was already defined.
 #endif
 #ifdef __COVERITY__
-#define NVE_CHECK_(_expr_, ...)                               \
-  do {                                                        \
-    const auto _res_{_expr_};                                 \
-    if (_res_ != decltype(_res_)())                           \
-    {                                                         \
-      NVE_LOG_CRITICAL_(nve::to_string(__VA_ARGS__));         \
-    }                                                         \
+// Coverity fails to identify there's no exception thrown in destructors, and its CUDA checker
+// does not always recognize nve::is_success as a return-value check for CUDA APIs.
+#define NVE_CHECK_(_expr_, ...)                                                           \
+  do {                                                                                    \
+    const auto _res_{_expr_};                                                             \
+    using res_type = std::remove_const_t<decltype(_res_)>;                                \
+    if constexpr (std::is_same_v<res_type, bool>) {                                       \
+      if (!_res_) {                                                                       \
+        NVE_LOG_CRITICAL_(nve::RuntimeError<res_type>(__FILE__, __LINE__, #_expr_, _res_, \
+                                                      nve::to_string(__VA_ARGS__)));      \
+        std::exit(1);                                                                     \
+      }                                                                                   \
+    } else {                                                                              \
+      if (_res_ != res_type{}) {                                                          \
+        NVE_LOG_CRITICAL_(nve::RuntimeError<res_type>(__FILE__, __LINE__, #_expr_, _res_, \
+                                                      nve::to_string(__VA_ARGS__)));      \
+        std::exit(1);                                                                     \
+      }                                                                                   \
+    }                                                                                     \
   } while (false)
 #else // __COVERITY__
 #define NVE_CHECK_(_expr_, ...)                                                           \
@@ -94,7 +106,7 @@
       }                                                                                   \
     }                                                                                     \
   } while (false)
-#endif  // __COVERITY__
+#endif // __COVERITY__
 
 #ifdef NVE_THROW_
 #error NVE_THROW_ was already defined.
@@ -178,7 +190,6 @@ class Exception : public std::exception {
       : file_{file}, line_{line}, expr_{expr}, hint_{hint}, thread_{this_thread_name()} {
     NVE_ASSERT_(file_);
     NVE_ASSERT_(expr_);
-    NVE_ASSERT_(hint_);
   }
 
   inline Exception(const Exception& that) noexcept
@@ -285,6 +296,17 @@ Logger* GetGlobalLogger();
 #ifdef NVE_LOG_
 #error NVE_LOG_ was already defined.
 #endif
+#ifdef __COVERITY__
+// Coverity flags the `if constexpr` compare below as a tautology
+// (CONSTANT_EXPRESSION_RESULT) at every NVE_LOG_ERROR_/NVE_LOG_CRITICAL_
+// call site. Under analysis, use a simpler body with no compile-time branch.
+#define NVE_LOG_(_level_, ...)                                            \
+  do {                                                                    \
+    nve::GetGlobalLogger()->log(                                          \
+      (_level_),                                                          \
+      to_string('(', __FILE__, ':', __LINE__, ") ", __VA_ARGS__));        \
+  } while (0)
+#else // __COVERITY__
 #define NVE_LOG_(_level_, ...)                                            \
   do {                                                                    \
     std::string _msg_;                                                    \
@@ -296,6 +318,7 @@ Logger* GetGlobalLogger();
     }                                                                     \
     nve::GetGlobalLogger()->log((_level_), (_msg_));                      \
   } while (0)
+#endif // __COVERITY__
 
 // Logging macros
 #ifdef NVE_LOG_CRITICAL_

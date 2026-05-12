@@ -38,6 +38,7 @@ static nve::GPUTableConfig convert_gpu_table_config(const nve_gpu_table_config_t
   cfg.modify_on_gpu = c->modify_on_gpu != 0;
   cfg.kernel_mode_type = c->kernel_mode_type;
   cfg.kernel_mode_value = c->kernel_mode_value;
+  cfg.invalid_key = c->invalid_key;
   return cfg;
 }
 

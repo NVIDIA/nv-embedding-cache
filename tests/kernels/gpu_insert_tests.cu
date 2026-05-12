@@ -90,6 +90,7 @@ class SortAndInsertTest : public ::testing::Test {
             num_sets,
             NUM_WAYS * num_sets,
             replace_list->pd,
+            static_cast<TagType>(-1),
             0)));
 
         replace_list->DtoH(0);
@@ -113,6 +114,7 @@ class SortAndInsertTest : public ::testing::Test {
             num_sets,
             num_keys,
             nullptr,
+            static_cast<TagType>(-1),
             0)));
 
         CHECK_CUDA_ERROR(cudaMalloc(extra_mem_buf, extra_mem_size));
@@ -269,7 +271,7 @@ class SortAndInsertTest : public ::testing::Test {
         EXPECT_TRUE(num_replacements_device == (NUM_WAYS * num_sets));
                
         // clear cache and insert low priority again
-        CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(tags->pd, INVALID_IDX, num_sets * sizeof(TagType) * NUM_WAYS, 0));
+        CACHE_CUDA_ERR_CHK_AND_THROW(call_fill_tags<TagType>(tags->pd, num_sets * NUM_WAYS, static_cast<TagType>(-1), 0));
 
         num_replacements_device = 
             SetupAndRunTest(tags, counters, unique_keys, priorities, data_ptrs, replace_list,
@@ -451,6 +453,7 @@ class SortAndInsertTest : public ::testing::Test {
             num_sets,
             num_keys,
             replace_list->pd,
+            static_cast<TagType>(-1),
             0)));
 
         replace_entries->DtoH(0);

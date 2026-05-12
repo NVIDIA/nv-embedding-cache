@@ -56,6 +56,7 @@ void from_json(const nlohmann::json& json, GPUTableConfig& conf) {
   NVE_READ_JSON_FIELD_(modify_on_gpu);
   NVE_READ_JSON_FIELD_(kernel_mode_type);
   NVE_READ_JSON_FIELD_(kernel_mode_value);
+  NVE_READ_JSON_FIELD_(invalid_key);
 }
 void to_json(nlohmann::json& json, const GPUTableConfig& conf) {
   NVE_WRITE_JSON_FIELD_(device_id);
@@ -70,6 +71,7 @@ void to_json(nlohmann::json& json, const GPUTableConfig& conf) {
   NVE_WRITE_JSON_FIELD_(modify_on_gpu);
   NVE_WRITE_JSON_FIELD_(kernel_mode_type);
   NVE_WRITE_JSON_FIELD_(kernel_mode_value);
+  NVE_WRITE_JSON_FIELD_(invalid_key);
 }
 
 std::string RuntimeError<nve::ECError>::to_string() const {
@@ -176,6 +178,7 @@ GpuTable<KeyType>::GpuTable(const GPUTableConfig& config, allocator_ptr_t alloca
   cfg.cache_sz_in_bytes = static_cast<size_t>(config_.cache_size);
   cfg.num_tables = 1;  // Only supporting single table cache at this point
   cfg.allocate_data_on_host = config_.data_storage_on_host;
+  cfg.sentinel_key = static_cast<KeyType>(config_.invalid_key);
 
   if (config.modify_on_gpu) {
     cache_ = std::make_shared<CacheTypeDevice>(allocator_.get(), GetGlobalLogger(), cfg);
@@ -309,7 +312,7 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
         params = &params_default;
       }
       gather_flow_pipeline<KeyType, KeyType>(ctx, 
-        cache,
+        std::move(cache),
         lookup_ctx,
         num_keys, 
         reinterpret_cast<const KeyType*>(keys), 
@@ -379,24 +382,24 @@ void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void*
   if (config_.modify_on_gpu) {
 
     nve::DefaultGPUHistogram<KeyType> histogram(num_keys);
-    size_t histAllocSize = histogram.getAllocSize();
+    size_t histAllocSize = histogram.get_alloc_size();
     void* d_hist_storage = ctx->get_buffer("d_hist_storage", histAllocSize, false);
     cudaStream_t mod_stream = gpu_table_ctx->get_modify_stream();
 
-    histogram.computeHistogram(reinterpret_cast<const KeyType*>(keys), num_keys,
+    histogram.compute_histogram(reinterpret_cast<const KeyType*>(keys), num_keys,
                                reinterpret_cast<const int8_t*>(values),
                                value_stride, d_hist_storage, mod_stream);
 
     auto ec_event = create_sync_event();
     StreamCoordinator sc(mod_stream, config_.private_stream);
 
-    auto num_keys_ = std::min(histogram.getNumBins(), static_cast<int64_t>(gpu_table_ctx->max_modify_size_));
+    auto num_keys_ = std::min(histogram.get_num_bins(), static_cast<int64_t>(gpu_table_ctx->max_modify_size_));
 
     NVE_CHECK_(cache_->insert(
       mod_ctx,
-      histogram.getKeys(),
-      histogram.getPriority(),
-      histogram.getData(),
+      histogram.get_keys(),
+      histogram.get_priority(),
+      histogram.get_data(),
       num_keys_,
       0, // tableIndex
       ec_event.get(),
@@ -1052,6 +1055,11 @@ int32_t GpuTable<KeyType>::get_device_id() const {
 template <typename KeyType>
 int64_t GpuTable<KeyType>::get_max_row_size() const { 
   return config_.row_size_in_bytes;
+}
+
+template <typename KeyType>
+int64_t GpuTable<KeyType>::get_invalid_key() const {
+  return config_.invalid_key;
 }
 
 template <typename KeyType>

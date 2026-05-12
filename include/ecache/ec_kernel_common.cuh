@@ -38,10 +38,4 @@ __device__ inline float4 Add(float4 a, float4 b)
   return ret;
 }
 
-template<typename IndexT>
-constexpr __device__ __host__ inline IndexT GetInvalidIndex()
-{
-  return static_cast<IndexT>(-1);
-}
-
 } // namespace nve

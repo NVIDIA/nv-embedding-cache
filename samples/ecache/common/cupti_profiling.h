@@ -28,22 +28,22 @@
  * 
  * {
  *      CuptiProfiler profiler;
- *      profiler.StartSession();
+ *      profiler.start_session();
  *      for (int i=0 ; i < NUM_PASSES ; i++) {
- *          profiler.StartPass();
+ *          profiler.start_pass();
  *
- *          profiler.PushRange("Range1");
+ *          profiler.push_range("Range1");
  *              // Profiling for Range1
- *          profiler.PopRange();
+ *          profiler.pop_range();
  *
- *          profiler.PushRange("Range2");
+ *          profiler.push_range("Range2");
  *              // Profiling for Range2
- *          profiler.PopRange();
+ *          profiler.pop_range();
  *
- *          profiler.StopPass();
+ *          profiler.end_pass();
  *      }
- *      profiler.StopSession();
- *      auto metrics = profiler.GetMetrics();
+ *      profiler.stop_session();
+ *      auto metrics = profiler.get_metrics();
  * }
 */
 
@@ -54,40 +54,41 @@ public:
     ~CuptiProfiler();
 
     // Start a session to setup metrics
-    bool StartSession(
+    bool start_session(
         const std::vector<std::string>& metrics = {
             "dram__bytes_write.sum",
             "dram__bytes_read.sum",
             },
         uint32_t maxRanges = 1000
     );
-    void StopSession();
+    void stop_session();
 
     // Passes should be started within a session
     // Use multiple passes to average values
-    void StartPass();
-    void EndPass();
+    void start_pass();
+    void end_pass();
 
     // Ranges should be used within a pass
     // Use ranges within passes to separate measurements on meaningful intervals
-    void PushRange(const std::string& name);
-    void PopRange();
+    void push_range(const std::string& name);
+    void pop_range();
 
-    void PrintMetrics(bool legacy_print=false) const;
-    ProfilerMetrics GetMetrics() const;
+    void print_metrics(bool legacy_print=false) const;
+    ProfilerMetrics get_metrics() const;
 
     // Can only be used before a profiling session has been started
-    std::vector<std::string> GetAllMetricNames() const;
+    std::vector<std::string> get_all_metric_names() const;
 
 private:
-    std::vector<std::string> m_metricNames;
-    std::vector<uint8_t> m_counterDataImage;
-    std::vector<uint8_t> m_counterDataScratchBuffer;
-    std::vector<uint8_t> m_counterDataImagePrefix;
-    std::vector<uint8_t> configImage;
-    std::string m_chipName;
+    std::vector<std::string> metric_names_;
+    std::vector<uint8_t> counter_data_image_;
+    void* host_object_ = nullptr; // CUpti_Profiler_Host_Object*, used on CUDA >= 12.5
+    std::vector<uint8_t> counter_data_scratch_buffer_;
+    std::vector<uint8_t> counter_data_image_prefix_;
+    std::vector<uint8_t> config_image_;
+    std::string chip_name_;
 
-    bool CreateCounterDataImage(
+    bool create_counter_data_image(
         std::vector<uint8_t>& counterDataImage,
         std::vector<uint8_t>& counterDataScratchBuffer,
         std::vector<uint8_t>& counterDataImagePrefix,

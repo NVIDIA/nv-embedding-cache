@@ -36,10 +36,11 @@ class HierarchicalEmbeddingLayer : public EmbeddingLayerBase {
     std::string layer_name;
     std::shared_ptr<InsertHeuristic> insert_heuristic = nullptr; // nullptr will result in using the default InsertHeuristic
                                                                  // auto inserts can be disabled by using the NeverInsertHeuristic class
-    int64_t min_insert_freq_gpu = 0; // increase this to throttle down auto inserts
-    int64_t min_insert_freq_host = 0;
-    int64_t min_insert_size_gpu = 1 << 16;
-    int64_t min_insert_size_host = 0;
+    int64_t min_insert_freq_gpu = 0; // Minimal amount of lookups between inserts on GPU. increase this to throttle down auto inserts
+    int64_t min_insert_freq_host = 0; // Minimal amount of lookups between inserts on Host. increase this to throttle down auto inserts
+    int64_t min_insert_size_gpu = 1 << 16; // Minimal amount of keys to trigger an insert on GPU (smaller amounts will be collected)
+    int64_t min_insert_size_host = 0; // Minimal amount of keys to trigger an insert on Host (smaller amounts will be collected)
+    std::vector<uint8_t> default_embedding = {}; // Default embedding vector bytes returned for keys missing from all tables. Empty implies no default (misses undefined).
   };
 
   NVE_PREVENT_COPY_AND_MOVE_(HierarchicalEmbeddingLayer);

@@ -392,6 +392,8 @@ void NumaThreadPool::worker_main_(const uint64_t workgroup_idx, const int64_t wo
     {
       std::unique_lock lk(tasks_guard);
       while (tasks.empty()) {
+        // The condition variable releases and reacquires tasks_guard; tasks is a stable queue reference.
+        // coverity[ATOMICITY]
         on_submit.wait(lk, [&tasks] { return !tasks.empty(); });
       }
       task = std::move(tasks.front());

@@ -97,7 +97,7 @@ void GenerateData(std::vector<IndexT>& keys, std::vector<uint8_t>& datavectors,
 
 class TestInsertHeuristic : public InsertHeuristic {
 public:
-  TestInsertHeuristic(std::vector<bool> results = {true, true, true}) : results_(results) {}
+  TestInsertHeuristic(std::vector<bool> results = {true, true, true}) : results_(std::move(results)) {}
   ~TestInsertHeuristic() override = default;
   bool insert_needed(const float /*hitrate*/, const size_t threshold_id) override {
     return results_.at(threshold_id);

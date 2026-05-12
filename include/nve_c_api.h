@@ -144,6 +144,7 @@ typedef struct {
   int      modify_on_gpu;           /* bool */
   uint64_t kernel_mode_type;
   uint64_t kernel_mode_value;
+  int64_t  invalid_key;             /* Sentinel for invalid entries. Default -1; cast to the table's key type. */
 } nve_gpu_table_config_t;
 
 typedef struct {
@@ -169,6 +170,11 @@ typedef struct {
   int64_t         min_insert_freq_host;
   int64_t         min_insert_size_gpu;
   int64_t         min_insert_size_host;
+  /* Default embedding row returned for keys missing from all tables.
+   * NULL or default_embedding_size=0 disables the default (misses left undefined).
+   * default_embedding_size, when non-zero, must equal the tables' row size. */
+  const void*     default_embedding;
+  int64_t         default_embedding_size;
 } nve_hierarchical_layer_config_t;
 
 typedef struct {
@@ -182,6 +188,7 @@ typedef struct {
   int64_t         key_size;
   int64_t         max_value_size;
   nve_data_type_t value_dtype;
+  int64_t         invalid_key;       /* Sentinel for invalid entries. Default -1; cast to the table's key type. */
 } nve_host_table_config_t;
 
 /* ============================================================================
@@ -205,6 +212,12 @@ NVE_C_API nve_status_t nve_version(int32_t* major, int32_t* minor, int32_t* patc
  * Plugin loading
  * ============================================================================ */
 
+/**
+ * Load a host-table plugin shared object.
+ *
+ * @param plugin_name Shared object name/path, for example
+ *        "libnve-plugin-abseil.so" or "/tmp/my_plugin.so".
+ */
 NVE_C_API nve_status_t nve_load_host_table_plugin(const char* plugin_name);
 
 /* ============================================================================
@@ -310,7 +323,8 @@ NVE_C_API nve_status_t nve_host_factory_produce(
 
 /**
  * Build a complete host database from JSON configuration.
- * Loads plugins, creates factories, and produces tables as specified.
+ * Loads plugins, creates factories, and produces tables as specified. JSON
+ * "plugins" entries are shared object names/paths passed directly to dlopen().
  * @param json_config JSON string with host_database configuration.
  * @param out_tables Output array of table handles (caller must free with nve_free_host_database).
  * @param out_ids Output array of table IDs (parallel to out_tables).
@@ -378,7 +392,7 @@ NVE_C_API nve_status_t nve_layer_lookup_pooled(
     uint64_t* hitmask,
     nve_pooling_type_t pooling_type, nve_sparse_type_t sparse_type,
     const int64_t* key_indices, int64_t num_key_indices,
-    void* default_values, const void* sparse_weights,
+    const void* sparse_weights,
     nve_data_type_t weight_type, float* hitrates);
 
 NVE_C_API nve_status_t nve_layer_insert(

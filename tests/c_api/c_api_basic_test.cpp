@@ -18,6 +18,8 @@
 #include <gtest/gtest.h>
 #include <nve_c_api.h>
 
+#include "test_utils.hpp"
+
 TEST(NveCApiBasic, Version) {
   int32_t major, minor, patch;
   EXPECT_EQ(NVE_SUCCESS, nve_version(&major, &minor, &patch));
@@ -46,6 +48,7 @@ TEST(NveCApiBasic, ConfigDefaults) {
   EXPECT_EQ(1, gpu_cfg.uvm_cpu_accumulate);
   EXPECT_EQ(1, gpu_cfg.modify_on_gpu);
   EXPECT_EQ(NVE_DTYPE_UNKNOWN, gpu_cfg.value_dtype);
+  EXPECT_EQ(-1, gpu_cfg.invalid_key);
 
   auto emb_cfg = nve_gpu_embedding_layer_config_default();
   EXPECT_EQ(0, emb_cfg.device_id);
@@ -69,6 +72,7 @@ TEST(NveCApiBasic, ConfigDefaults) {
   auto host_cfg = nve_host_table_config_default();
   EXPECT_EQ(8, host_cfg.max_value_size);
   EXPECT_EQ(NVE_DTYPE_UNKNOWN, host_cfg.value_dtype);
+  EXPECT_EQ(-1, host_cfg.invalid_key);
 }
 
 TEST(NveCApiBasic, DestroyNull) {
@@ -102,6 +106,13 @@ TEST(NveCApiBasic, HeuristicInvalidArgs) {
 
 TEST(NveCApiBasic, LoadPluginInvalidName) {
   EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_load_host_table_plugin(nullptr));
-  // Loading a non-existent plugin should produce a runtime error
-  EXPECT_NE(NVE_SUCCESS, nve_load_host_table_plugin("nonexistent_plugin_xyz"));
+  // Shorthand plugin names are no longer expanded to libnve-plugin-<name>.so.
+  EXPECT_NE(NVE_SUCCESS, nve_load_host_table_plugin("abseil"));
+  // Loading a non-existent shared object should produce a runtime error.
+  EXPECT_NE(NVE_SUCCESS, nve_load_host_table_plugin("nonexistent_plugin_xyz.so"));
+}
+
+TEST(NveCApiBasic, LoadPluginFullPath) {
+  SKIP_IF_ABSEIL_UNAVAILABLE();
+  EXPECT_EQ(NVE_SUCCESS, nve_load_host_table_plugin(nve_test::plugin_full_path("abseil").c_str()));
 }

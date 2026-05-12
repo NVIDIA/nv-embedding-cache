@@ -31,8 +31,8 @@
 namespace nve {
 
 struct GatherKernelPipelineParams {
-    uint64_t task_size;
-    uint64_t num_aux_streams;
+    uint64_t task_size = 0;
+    uint64_t num_aux_streams = 0;
 };
 
 template<uint32_t SubwarpWidth, typename DataType>
@@ -62,6 +62,8 @@ inline void CallPipelineScatterInner(const FindOutput* out_buff,
     dim3 block_size(32, 4);
     auto indices_per_block = (32 / SubwarpWidth) * block_size.y;
     dim3 grid_size ((static_cast<uint32_t>(num_indices) + indices_per_block - 1) / indices_per_block, 1);
+    // Kernel launch is checked in CallPipelineScatter()
+    // coverity[CUDA.ERROR_KERNEL_LAUNCH]
     EmbedPipelineScatter<SubwarpWidth, DataType><<<grid_size, block_size, 0, stream>>>(
             out_buff, num_indices, buff, row_size_in_bytes);
 }
@@ -387,7 +389,7 @@ void gather_flow_pipeline(std::shared_ptr<nve::ExecutionContext> ctx,
     
     //////////////////////////////////////////////////////////////////////////////////////////////
     // cpu gather phase
-    executeCpuGatherPhase<IndexT, TagT>(ctx, h_sorted_find_output, h_values, value_stride, row_size_in_bytes, misses, d_sorted_find_output, event_copy_find_output, aux_streams, params, device_id);
+    executeCpuGatherPhase<IndexT, TagT>(std::move(ctx), h_sorted_find_output, h_values, value_stride, row_size_in_bytes, misses, d_sorted_find_output, event_copy_find_output, aux_streams, params, device_id);
 
     for (auto event : events) {
         NVE_CHECK_(cudaEventDestroy(event));

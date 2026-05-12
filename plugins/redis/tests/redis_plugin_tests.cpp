@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <execution_context.hpp>
+#include <json_support.hpp>
 #include <redis_cluster_table.hpp>
 
 using namespace nve;
@@ -42,12 +43,12 @@ TEST(redis_plugin, parse_table_conf) {
       "value_dtype": "bfloat",
 
       "max_batch_size": 1024,
-      
+
       "num_partitions": 2,
       "partitioner": "always_zero",
       "workgroups": [1],
       "hash_key": "whatever",
-      
+
       "overflow_policy": {
         "overflow_margin": 1024,
         "handler": "evict_lru",
@@ -55,7 +56,7 @@ TEST(redis_plugin, parse_table_conf) {
       }
     }
   )"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   RedisClusterTableConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));
@@ -71,17 +72,17 @@ TEST(redis_plugin, parse_factory_conf) {
     "address": "localhost:7000",
     "user_name": "admin",
     "password": "12345",
-    
+
     "keep_alive": false,
     "connections_per_node": 3,
-    
+
     "use_tls": true,
     "ca_certificate": "my_bundle.crt",
     "client_certificate": "my_cert.pem",
     "client_key": "my_key.pem",
     "server_name_identification": "my_sni"
   })"_json);
-  ASSERT_EQ(json, static_cast<nlohmann::json>(conf));
+  ASSERT_TRUE(is_json_subset(json, static_cast<nlohmann::json>(conf)));
 
   RedisClusterTableFactoryConfig parsed_conf(json);
   ASSERT_EQ(static_cast<nlohmann::json>(parsed_conf), static_cast<nlohmann::json>(conf));

@@ -4,6 +4,20 @@ Releases will be listed below, latest at the top.
 
 Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means release of February 2026 with patch 3.
 
+## NV Embedding Cache 26.05
+### New Features
+- New PyTorch bindings for C++ deployments (see: [advanced.md](docs/advanced.md#c-deployment-with-pytorch-aotinductor))
+### Improvements
+- Benchmarks will translate pareto distribution to power-law coefficient
+- Code style alignment
+- Many small improvements from static code scan
+- Plugins can now have arbitrary filenames (no longer require libnve-plugin- prefix)
+- Default embedding values for hierarchical layer
+### Bug Fixes
+- Missing lock added in modify_context_destroy()
+- Fixed illegal memory access in embedding cache with negative keys
+- Fixed auto-inserting undefined embeddings for keys that were not resolved by any table in hierarchical layer
+
 ## NV Embedding Cache 26.04
 ### New Features
 - C API (see: [c_api.md](docs/c_api.md))

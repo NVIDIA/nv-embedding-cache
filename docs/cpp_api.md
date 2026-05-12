@@ -9,7 +9,7 @@ For more specific information, please consult the headers in [include/](../inclu
 ## Compilation
 
 To build the SDK, follow the instructions in [Getting started](../README.md#getting-started). If you installed the Python bindings, then it's already built in the [build](../build/) folder.
-Most applications using the SDK should link with `build/lib/libnve-common.so`, `libcudart.so`. Any plugin used (e.g. `libnve-plugin-redis.so`) should be present in the `LD_LIBRARY_PATH` environment variable during runtime.
+Most applications using the SDK should link with `build/lib/libnve-common.so`, `libcudart.so`. Pass plugins to `load_host_table_plugin()` as shared object names that the dynamic linker can resolve (e.g. `libnve-plugin-redis.so`) or as explicit paths (e.g. `/tmp/my_plugin.so`).
 
 ## Embedding Layer API
 

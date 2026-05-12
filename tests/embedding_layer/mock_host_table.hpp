@@ -287,7 +287,7 @@ class MockHostTable final : public HostTable<HostTableConfig> {
       }
       if (pooling_type != PoolingType_t::Concatenate) {
         for (uint64_t e=0 ; e<row_elements ; e++) {
-          store_as_dtype(output_row, static_cast<int64_t>(e), config_.value_dtype, bag_result[e] / weights_sum);
+          store_as_dtype(output_row, static_cast<int64_t>(e), config_.value_dtype, (weights_sum != 0.f) ? bag_result[e] / weights_sum : 0.f);
         }
         output_row += row_size;
       }

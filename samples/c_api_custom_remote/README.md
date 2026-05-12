@@ -19,8 +19,8 @@ GPU table  (L1, GPU SRAM / HBM cache)
    `create_<name>_table_factory`).
 
 2. **Loading the plugin at runtime** — the sample executable calls
-   `nve_load_host_table_plugin("custom_remote")` to dynamically load
-   `libnve-plugin-custom_remote.so`, then uses the factory to produce a table.
+   `nve_load_host_table_plugin("libnve-plugin-custom_remote.so")` to
+   dynamically load the plugin, then uses the factory to produce a table.
 
 3. **Pure C API usage** — all layer, table, and context operations use
    `nve_c_api.h`; no C++ NVE headers are included in the sample executable.

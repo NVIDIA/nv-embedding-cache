@@ -74,7 +74,7 @@ ExecutionContext::ExecutionContext(
     cudaStream_t modify_stream,
     thread_pool_ptr_t thread_pool,
     allocator_ptr_t allocator) : 
-    lookup_stream_(lookup_stream), modify_stream_(modify_stream), thread_pool_(thread_pool)
+    lookup_stream_(lookup_stream), modify_stream_(modify_stream), thread_pool_(std::move(thread_pool))
 {
   if (!thread_pool_) {
     thread_pool_ = default_thread_pool();

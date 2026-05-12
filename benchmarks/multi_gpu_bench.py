@@ -42,7 +42,7 @@ import subprocess
 import warnings
 warnings.filterwarnings("ignore")
 
-from benchmark_util import write_benchmark_csv, benchmark_arg_parser
+from benchmark_util import write_benchmark_csv, benchmark_arg_parser, convert_pareto_to_alpha
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'samples', 'pytorch'))
 from pytorch_samples_common import gen_key, gen_jagged_key, gen_permute, torch_data_type_to_nve_data_type
 
@@ -145,6 +145,7 @@ def get_nve_model(args, mp : MultiProc):
                 rank_device = 0
             else:
                 # next rank in same processor
+                assert rank_device is not None, "rank_device wasn't initialized"
                 rank_device = (rank_device + 1) % num_devices
             if i in args.partial_ranks:
                 partial_devices.append(rank_device)
@@ -343,6 +344,16 @@ def main():
     rank = mp.rank
     if (args.verbose and rank == 0):
         print(args)
+
+    if (args.pareto < 0.):
+        raise RuntimeError(f"Pareto invalid value ({args.pareto}) - must be positive")
+    if (args.pareto > 0.):
+        # Update alpha from pareto
+        args.alpha = convert_pareto_to_alpha(args.pareto, args.num_table_rows)
+        if (not args.alpha) :
+            raise RuntimeError(f"Failed to convert Pareto ratio of {args.pareto} to power-law Alpha")
+        if (args.verbose and rank == 0): print(f"Update alpha to {args.alpha:.3f} from pareto {args.pareto}")
+
     local_device = mp.local_device
     torch.cuda.set_device(local_device)
     stream = torch.cuda.Stream(local_device)

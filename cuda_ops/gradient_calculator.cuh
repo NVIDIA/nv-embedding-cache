@@ -187,8 +187,8 @@ public:
         NVE_CHECK_(cudaFreeHost(h_num_runs_out_));
     }
 
-    void GetAllocRequirements(IndexT num_keys, size_t data_element_size, size_t& tmp_mem_size_device, size_t& tmp_mem_size_host) {
-        deduper_.GetAllocRequirements(num_keys, tmp_mem_size_device, tmp_mem_size_host);
+    void get_alloc_requirements(IndexT num_keys, size_t data_element_size, size_t& tmp_mem_size_device, size_t& tmp_mem_size_host) {
+        deduper_.get_alloc_requirements(num_keys, tmp_mem_size_device, tmp_mem_size_host);
         size_t index_buffer_size = sizeof(IndexT) * (num_keys + 1);
         index_buffer_size = ((index_buffer_size + 511) >> 9) << 9;
         size_t weights_buffer_size = data_element_size * (num_keys + 1);
@@ -202,7 +202,7 @@ public:
         tmp_mem_size_device += index_buffer_size; //d_dedup_offsets_
     }
 
-    void SetAndInitBuffers(IndexT num_keys, size_t data_element_size, char* tmp_mem_device, char* tmp_mem_host) {
+    void set_and_init_buffers(IndexT num_keys, size_t data_element_size, char* tmp_mem_device, char* tmp_mem_host) {
         char* curr_device_ptr = tmp_mem_device;
         size_t index_buffer_size = sizeof(IndexT) * (num_keys + 1);
         index_buffer_size = ((index_buffer_size + 511) >> 9) << 9;
@@ -221,11 +221,11 @@ public:
         curr_device_ptr += index_buffer_size;
         d_dedup_offsets_ = reinterpret_cast<IndexT*>(curr_device_ptr);
         curr_device_ptr += index_buffer_size;
-        deduper_.SetAndInitBuffers(num_keys, curr_device_ptr, tmp_mem_host);
+        deduper_.set_and_init_buffers(num_keys, curr_device_ptr, tmp_mem_host);
     }
 
     template <typename DataT, bool FIXED_HOTNESS = true>
-    uint64_t ComputeGradients(
+    uint64_t compute_gradients(
         const IndexT* __restrict__ keys,
         const IndexT* __restrict__ offsets,
         const DataT* __restrict__ gradients_in,
@@ -240,7 +240,7 @@ public:
         const cudaStream_t stream = 0)
     {
         // Call deduper to get unique keys and inverse weight mapping
-        deduper_.Dedup(
+        deduper_.dedup(
             keys, num_keys, unique_keys_out, d_output_loc_map_, d_output_loc_map_,
             h_num_runs_out_, d_inverse_weight_mapping_, d_dedup_offsets_, stream);
 

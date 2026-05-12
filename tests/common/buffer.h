@@ -32,8 +32,8 @@ struct Buffer
 
     ~Buffer()
     {
-        cudaFree(pd);
-        cudaFreeHost(ph);
+        CHECK_CUDA_ERROR(cudaFree(pd));
+        CHECK_CUDA_ERROR(cudaFreeHost(ph));
     }
 
     void DtoH(cudaStream_t stream)

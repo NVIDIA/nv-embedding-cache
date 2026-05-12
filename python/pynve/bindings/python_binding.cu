@@ -17,10 +17,14 @@
 
 #include "third_party/pybind11/include/pybind11/pybind11.h"
 #include "third_party/pybind11/include/pybind11/functional.h"
+#include "third_party/dlpack/include/dlpack/dlpack.h"
 #include "binding_layers.hpp"
 #include "binding_tables.hpp"
 #include "binding_serialization.hpp"
-#include "binding_memblock.hpp"
+#include "include/memblock.hpp"
+#ifdef NVE_WITH_TORCH_BINDINGS
+#include "python/pynve/torch_bindings/nve_registry.hpp"
+#endif
 #include "third_party/pybind11/include/pybind11/stl.h"
 #include "include/distributed.hpp"
 
@@ -28,6 +32,76 @@ namespace py = pybind11;
 using IndexT = int64_t;
 
 namespace nve {
+
+   
+    void insert_keys_from_numpy_file(std::shared_ptr<ParameterServerTable> table,
+                                     py::object keys_stream,
+                                     py::object values_stream,
+                                     uint64_t batch_size) {
+        std::shared_ptr<StreamWrapperBase> keys_sw    = std::make_shared<PyStreamWrapper>(keys_stream);
+        std::shared_ptr<StreamWrapperBase> values_sw  = std::make_shared<PyStreamWrapper>(values_stream);
+        auto keys_reader   = std::make_shared<NumpyTensorFileFormat>(keys_sw);
+        auto values_reader = std::make_shared<NumpyTensorFileFormat>(values_sw);
+        NVE_CHECK_(keys_reader->get_shape().size() == 1, "Invalid keys shape");
+        NVE_CHECK_(keys_reader->get_shape()[0] == values_reader->get_shape()[0], "Values/Keys shape mismatch");
+        NVE_CHECK_(values_reader->get_row_size_in_bytes() == table->get_row_size_in_bytes(), "Values row size mismatch");
+        NVE_CHECK_(keys_reader->get_row_size_in_bytes() == sizeof(ParameterServerTable::KeyType), "Key size mismatch");
+        table->insert_keys_from_tensor_file(keys_reader, values_reader, batch_size);
+    }
+
+    void insert_keys_from_binary_file(std::shared_ptr<ParameterServerTable> table,
+                                      py::object keys_stream,
+                                      py::object values_stream,
+                                      uint64_t batch_size) {
+        std::shared_ptr<StreamWrapperBase> keys_sw   = std::make_shared<PyStreamWrapper>(keys_stream);
+        std::shared_ptr<StreamWrapperBase> values_sw = std::make_shared<PyStreamWrapper>(values_stream);
+        auto keys_reader   = std::make_shared<BinaryTensorFileFormat>(keys_sw, sizeof(ParameterServerTable::KeyType));
+        auto values_reader = std::make_shared<BinaryTensorFileFormat>(values_sw, table->get_row_size_in_bytes());
+        table->insert_keys_from_tensor_file(keys_reader, values_reader, batch_size);
+    }
+
+    py::capsule get_dl_tensor(std::shared_ptr<LinearUVMEmbedding<IndexT>> layer, nve::DataType_t dtype)
+    {
+        DLManagedTensor* p = layer->create_dlpack_tensor(dtype);
+        return py::capsule(p, "dltensor", [](PyObject* capsule) {
+            const char *name = PyCapsule_GetName(capsule);
+            if (!name || std::strcmp(name, "dltensor") != 0) {
+                return;
+            }
+            auto *managed = static_cast<DLManagedTensor *>(
+                PyCapsule_GetPointer(capsule, "dltensor")
+            );
+            if (!managed) return;
+            if (managed->deleter) {
+                managed->deleter(managed);
+            }
+        });
+    }
+
+    void write_tensor_to_stream(std::shared_ptr<LinearUVMEmbedding<IndexT>> layer, py::object stream, uint64_t name)
+    {
+        nve::PyStreamWrapper sw(stream);
+        layer->write_tensor_to_stream(sw, name);
+    }
+
+    void load_tensor_from_stream(std::shared_ptr<LinearUVMEmbedding<IndexT>> layer, py::object stream, uint64_t name)
+    {
+        nve::PyStreamWrapper sw(stream);
+        layer->load_tensor_from_stream(sw, name);
+    }
+
+    void write_tensor_to_stream(std::shared_ptr<GPUEmbedding<IndexT>> layer, py::object stream, uint64_t name)
+    {
+        nve::PyStreamWrapper sw(stream);
+        layer->write_tensor_to_stream(sw, name);
+    }
+
+    void load_tensor_from_stream(std::shared_ptr<GPUEmbedding<IndexT>> layer, py::object stream, uint64_t name)
+    {
+        nve::PyStreamWrapper sw(stream);
+        layer->load_tensor_from_stream(sw, name);
+    }
+
     class PyDistributedEnv : public DistributedEnv, public py::trampoline_self_life_support {
     public:
         /* Inherit the constructors */
@@ -49,7 +123,9 @@ namespace nve {
     };
 
 PYBIND11_MODULE(nve, m) {
-    py::class_<NVEmbedBinding<IndexT>> (m, "NVEmbedBinding")
+    py::class_<NVEmbedBinding<IndexT>, std::shared_ptr<NVEmbedBinding<IndexT>>> (m, "NVEmbedBinding")
+        .def("get_embedding_dim", &NVEmbedBinding<IndexT>::get_embedding_dim)
+        .def("get_data_type", &NVEmbedBinding<IndexT>::get_data_type)
         .def(py::init<int, size_t, nve::DataType_t, EmbedLayerConfig>())
         .def("lookup", &NVEmbedBinding<IndexT>::lookup, py::call_guard<py::gil_scoped_release>())
         .def("lookup_with_pooling", &NVEmbedBinding<IndexT>::lookup_with_pooling, py::call_guard<py::gil_scoped_release>())
@@ -61,18 +137,17 @@ PYBIND11_MODULE(nve, m) {
         .def("clear", &NVEmbedBinding<IndexT>::clear, py::call_guard<py::gil_scoped_release>())
         .def("erase", &NVEmbedBinding<IndexT>::erase, py::call_guard<py::gil_scoped_release>());
 
-    py::class_<HierarchicalEmbedding<IndexT>, NVEmbedBinding<IndexT>> (m, "HierarchicalEmbedding")
-        .def(py::init<size_t, nve::DataType_t, uint64_t, uint64_t, table_ptr_t, bool, int, EmbedLayerConfig>())
+    py::class_<HierarchicalEmbedding<IndexT>, NVEmbedBinding<IndexT>, std::shared_ptr<HierarchicalEmbedding<IndexT>>> (m, "HierarchicalEmbedding")
+        .def(py::init<size_t, nve::DataType_t, uint64_t, uint64_t, table_ptr_t, uint64_t, bool, int, EmbedLayerConfig>())
         .def("set_ps_table", &HierarchicalEmbedding<IndexT>::set_ps_table);
 
-    py::class_<LinearUVMEmbedding<IndexT>, NVEmbedBinding<IndexT>> (m, "LinearUVMEmbedding")
+    py::class_<LinearUVMEmbedding<IndexT>, NVEmbedBinding<IndexT>, std::shared_ptr<LinearUVMEmbedding<IndexT>>> (m, "LinearUVMEmbedding")
         .def(py::init<size_t, size_t, nve::DataType_t, std::shared_ptr<MemBlock>, size_t, bool, int, EmbedLayerConfig>())
-        .def("get_dl_tensor", &LinearUVMEmbedding<IndexT>::get_dl_tensor)
         .def("load_tensor_from_stream", &LinearUVMEmbedding<IndexT>::load_tensor_from_stream)
         .def("write_tensor_to_stream", &LinearUVMEmbedding<IndexT>::write_tensor_to_stream);
 
-    py::class_<GPUEmbedding<IndexT>, NVEmbedBinding<IndexT>> (m, "GPUEmbedding")
-        .def(py::init<size_t, size_t, nve::DataType_t, uintptr_t, int, EmbedLayerConfig>());
+    py::class_<GPUEmbedding<IndexT>, NVEmbedBinding<IndexT>, std::shared_ptr<GPUEmbedding<IndexT>>> (m, "GPUEmbedding")
+        .def(py::init<size_t, size_t, nve::DataType_t, std::shared_ptr<MemBlock>, int, EmbedLayerConfig>());
 
     py::class_<EmbedLayerConfig>(m, "EmbedLayerConfig")
         .def(py::init<>())
@@ -85,11 +160,16 @@ PYBIND11_MODULE(nve, m) {
 
     py::class_<TensorFileFormat>(m, "TensorFileFormat")
         .def(py::init<>())
-        .def("write_table_file_header", &TensorFileFormat::write_table_file_header);
+        .def("write_table_file_header",
+             [](TensorFileFormat& self, py::object stream) {
+                 PyStreamWrapper sw(stream);
+                 self.write_table_file_header(sw);
+             });
 
     py::enum_<PoolingType_t>(m, "PoolingType_t")
         .value("Concatenate", PoolingType_t::Concatenate)
         .value("Sum", PoolingType_t::Sum)
+        .value("Mean", PoolingType_t::Mean)
         .value("WeightedSum", PoolingType_t::WeightedSum)
         .value("WeightedMean", PoolingType_t::WeightedMean)
         .export_values();
@@ -104,11 +184,22 @@ PYBIND11_MODULE(nve, m) {
         .value("Float64", DataType_t::Float64)
         .export_values();
 
+    py::enum_<MemBlockType>(m, "MemBlockType")
+        .value("Linear", MemBlockType::LINEAR)
+        .value("NVL", MemBlockType::NVL)
+        .value("MPI", MemBlockType::MPI)
+        .value("Managed", MemBlockType::MANAGED)
+        .value("User", MemBlockType::USER)
+        .export_values();
+
     py::class_<MemBlock, std::shared_ptr<MemBlock>>(m, "MemBlock")
-        .def("get_handle", &MemBlock::get_handle);
+        .def("get_handle", &MemBlock::get_handle)
+        .def("get_type", &MemBlock::get_type);
 
     py::class_<LinearMemBlock, MemBlock, std::shared_ptr<LinearMemBlock>>(m, "LinearMemBlock")
-        .def(py::init<size_t, size_t, nve::DataType_t>());
+        .def(py::init<size_t, size_t, nve::DataType_t, int>(),
+             py::arg("row_size"), py::arg("num_embeddings"), py::arg("dtype"),
+             py::arg("device_id") = -1);
 
     py::class_<NVLMemBlock, MemBlock, std::shared_ptr<NVLMemBlock>>(m, "NVLMemBlock")
         .def(py::init<size_t, size_t, nve::DataType_t, std::vector<int>>());
@@ -149,12 +240,41 @@ PYBIND11_MODULE(nve, m) {
             py::arg("initial_size") = 0,
             py::arg("ps_type") = ParameterServerTable::PSType_t::NVHashMap,
             py::arg("extra_params") = std::string())
+        // Plugin-based ctor. manual dict <-> json conversion, via string.
+        .def(py::init([](uint64_t row_elements,
+                         nve::DataType_t data_type,
+                         std::string plugin_name,
+                         const std::string& factory_config_json,
+                         const std::string& table_config_json,
+                         uint64_t num_rows,
+                         table_id_t table_id) {
+                const auto empty_obj = nlohmann::json(nlohmann::json::value_t::object);
+                auto factory_cfg = factory_config_json.empty()
+                    ? empty_obj : nlohmann::json::parse(factory_config_json);
+                auto table_cfg = table_config_json.empty()
+                    ? empty_obj : nlohmann::json::parse(table_config_json);
+                return std::make_shared<ParameterServerTable>(
+                    row_elements, data_type, std::move(plugin_name),
+                    std::move(factory_cfg), std::move(table_cfg),
+                    num_rows, table_id);
+            }),
+            py::arg("row_elements"),
+            py::arg("data_type"),
+            py::arg("plugin_name"),
+            py::arg("factory_config_json") = std::string("{}"),
+            py::arg("table_config_json") = std::string("{}"),
+            py::arg("num_rows") = 0,
+            py::arg("table_id") = table_id_t{1000})
         .def("insert_keys", &ParameterServerTable::insert_keys)
         .def("erase_keys", &ParameterServerTable::erase_keys)
         .def("clear_keys", &ParameterServerTable::clear_keys)
-        .def("insert_keys_from_numpy_file", &ParameterServerTable::insert_keys_from_numpy_file)
         .def("insert_keys_from_filepath", &ParameterServerTable::insert_keys_from_filepath)
-        .def("insert_keys_from_binary_file", &ParameterServerTable::insert_keys_from_binary_file);
+        .def("export_config_json",
+            [](const ParameterServerTable& self) -> std::string {
+                return self.export_config().dump();
+            },
+            "Return the PS configuration as a JSON string. "
+            "Python wrappers should json.loads() this to get a dict.");
 
     py::class_<DistributedEnv, PyDistributedEnv /* <--- trampoline */, py::smart_holder>(m, "DistributedEnv")
         .def(py::init<>())
@@ -171,6 +291,37 @@ PYBIND11_MODULE(nve, m) {
         [](uintptr_t dst, uintptr_t src, uint64_t size) {
             std::memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<void*>(src), size);
         }, "An auxiliary function to copy from raw pointers");
+
+    m.def("get_dl_tensor", &get_dl_tensor);
+    m.def("write_tensor_to_stream",
+          static_cast<void(*)(std::shared_ptr<LinearUVMEmbedding<IndexT>>, py::object, uint64_t)>(&write_tensor_to_stream));
+    m.def("write_tensor_to_stream",
+          static_cast<void(*)(std::shared_ptr<GPUEmbedding<IndexT>>, py::object, uint64_t)>(&write_tensor_to_stream));
+    m.def("load_tensor_from_stream",
+          static_cast<void(*)(std::shared_ptr<LinearUVMEmbedding<IndexT>>, py::object, uint64_t)>(&load_tensor_from_stream));
+    m.def("load_tensor_from_stream",
+          static_cast<void(*)(std::shared_ptr<GPUEmbedding<IndexT>>, py::object, uint64_t)>(&load_tensor_from_stream));
+    m.def("insert_keys_from_numpy_file", &insert_keys_from_numpy_file);
+    m.def("insert_keys_from_binary_file", &insert_keys_from_binary_file);
+
+#ifdef NVE_WITH_TORCH_BINDINGS
+    m.def("register_for_torch",
+        [](int64_t layer_id, std::shared_ptr<NVEmbedBinding<int64_t>> sptr) {
+            NVELayerRegistry::instance().register_binding(layer_id, std::move(sptr));
+        }, py::arg("layer_id"), py::arg("binding"));
+    m.def("unregister_from_torch",
+        [](int64_t layer_id) {
+            NVELayerRegistry::instance().unregister_binding(layer_id);
+        }, py::arg("layer_id"));
+    m.def("get_torch_binding_info",
+        [](int64_t layer_id) {
+            auto binding = NVELayerRegistry::instance().get_binding(layer_id);
+            return std::make_tuple(binding->get_embedding_dim(),
+                                   binding->get_data_type());
+        }, py::arg("layer_id"),
+        "Return (embedding_dim, DataType_t) for a torch-registered layer. "
+        "Used by Python-side register_fake kernels.");
+#endif
 }
 
 }  // namespace nve

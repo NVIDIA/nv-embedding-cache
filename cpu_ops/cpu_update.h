@@ -109,7 +109,7 @@ void cpu_kernel_update_accumulate_dispatch(thread_pool_ptr_t thread_pool,
         case DataType_t::Float32:
         {   
             int res = cpu_kernel_update_accumulate<IndexT, float, float>(
-                thread_pool, n, keys, value_stride, updates, uvm_table_ptr, row_size_in_bytes, num_threads);
+                std::move(thread_pool), n, keys, value_stride, updates, uvm_table_ptr, row_size_in_bytes, num_threads);
             NVE_CHECK_(res == 0);
             break;
         }

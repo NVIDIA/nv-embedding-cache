@@ -53,8 +53,6 @@ class EmbeddingLayerBase {
     const int64_t* key_indices;
     int64_t num_key_indices;
 
-    void* default_values;  // Single vector (row size) to use when a key was missed by all caches,
-                           // null implies pooling isn't allowed with misses
     const void* sparse_weights;  // Weights for weighted_sum pooling
     DataType_t weight_type;  // Datatype for the provided weights (doesn't have to be the same as
                              // Value type, not all combinations supported)

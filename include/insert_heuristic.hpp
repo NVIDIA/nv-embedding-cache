@@ -36,7 +36,7 @@ class DefaultInsertHeuristic : public InsertHeuristic {
   public:
   static constexpr float DEFAULT_THRESHOLD = 0.75f;
 
-  DefaultInsertHeuristic(const std::vector<float>& thresholds);
+  DefaultInsertHeuristic(const std::vector<float> thresholds);
   ~DefaultInsertHeuristic() override = default;
   
   bool insert_needed(const float hitrate, const size_t table_id) override;
@@ -52,7 +52,7 @@ class DefaultInsertHeuristic : public InsertHeuristic {
 class FSMInsertHeuristic :  public InsertHeuristic
 {
 public:
-    FSMInsertHeuristic(const std::vector<float>& thresholds);
+    FSMInsertHeuristic(const std::vector<float> thresholds);
     ~FSMInsertHeuristic() override = default;
     bool insert_needed(const float hitrate, const size_t table_id) override;
 private:

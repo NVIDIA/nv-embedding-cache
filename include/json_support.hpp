@@ -67,6 +67,22 @@
 
 namespace nve {
 
+// Recursively checks whether `subset` is contained in `superset`. For objects, every key in
+// `subset` must exist in `superset` with a value that is itself a subset. For non-object values
+// (numbers, strings, arrays, etc.) equality is required.
+inline bool is_json_subset(const nlohmann::json& subset, const nlohmann::json& superset) {
+  if (subset.is_object() && superset.is_object()) {
+    for (auto it = subset.begin(); it != subset.end(); ++it) {
+      const auto super_it = superset.find(it.key());
+      if (super_it == superset.end() || !is_json_subset(it.value(), *super_it)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return subset == superset;
+}
+
 template <typename T>
 using enum_json_pair_t = const std::pair<const T, const nlohmann::json>;
 

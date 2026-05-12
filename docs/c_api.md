@@ -7,7 +7,9 @@ The header is [`include/nve_c_api.h`](../include/nve_c_api.h).
 ## Compilation
 
 Link with `libnve-common.so` and `libcudart.so`, the same as for the C++ API.
-Any host table plugin used (e.g. `libnve-plugin-nvhm.so`) must be present in the `LD_LIBRARY_PATH` at runtime.
+Pass host table plugins to `nve_load_host_table_plugin()` as shared object
+names that the dynamic linker can resolve (e.g. `libnve-plugin-nvhm.so`) or as
+explicit paths (e.g. `/tmp/my_plugin.so`).
 
 ```c
 #include <nve_c_api.h>
@@ -97,7 +99,7 @@ Host tables are created through a two-step factory pattern:
 
 ```c
 // Load plugin and create factory
-nve_load_host_table_plugin("nvhm");
+nve_load_host_table_plugin("libnve-plugin-nvhm.so");
 nve_host_factory_t factory = NULL;
 nve_create_host_table_factory(&factory, "{\"implementation\": \"nvhm_map\"}");
 

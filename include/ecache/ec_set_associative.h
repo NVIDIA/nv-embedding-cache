@@ -58,7 +58,7 @@ template<typename IndexT, typename TagT>
 cudaError_t call_tag_update_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t nEnries, TagT* tags, cudaStream_t stream);
 
 template<typename IndexT, typename TagT>
-cudaError_t call_tag_invalidate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t nEnries, TagT* tags, cudaStream_t stream);
+cudaError_t call_tag_invalidate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t nEnries, TagT* tags, TagT sentinel_key, cudaStream_t stream);
 
 template<typename IndexT, typename TagT>
 cudaError_t call_mem_update_accumulate_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t nEnries, uint32_t row_size_in_bytes, DataTypeFormat input_format, DataTypeFormat output_format, cudaStream_t stream);
@@ -80,9 +80,9 @@ template<typename IndexT, typename TagT>
 cudaError_t call_mem_update_accumulate_quantized_kernel(typename EmbedCacheSA<IndexT, TagT>::ModifyList* list, uint32_t row_size_in_bytes, DataTypeFormat input_format, DataTypeFormat output_format, cudaStream_t stream);
 
 template<typename IndexT, typename TagT>
-cudaError_t call_sort_gather( const int8_t* uvm, 
-                    int8_t* dst, 
-                    const IndexT* keys, 
+cudaError_t call_sort_gather( const int8_t* uvm,
+                    int8_t* dst,
+                    const IndexT* keys,
                     int8_t* auxBuf,
                     size_t num_keys,
                     size_t row_size_in_bytes,
@@ -90,7 +90,8 @@ cudaError_t call_sort_gather( const int8_t* uvm,
                     typename EmbedCacheSA<IndexT, TagT>::CacheData data,
                     cudaStream_t stream);
 
-#define INVALID_IDX -1 // using define to be able to cast to whatever needed
+template<typename TagT>
+cudaError_t call_fill_tags(TagT* d_tags, size_t n, TagT sentinel_key, cudaStream_t stream);
 
 #define LOG_ERROR_AND_RETURN(ex) { if (this->logger_) { this->logger_->log(LogLevel_t::Error, ex.what());} return ex.m_err;}
 
@@ -116,8 +117,11 @@ public:
         size_t cache_sz_in_bytes = 0; // total size of storage, tags should not exceed this
         uint64_t embed_width_in_bytes = 0;
         uint64_t num_tables = 1;
-        float decay_rate = 0.95f; 
+        float decay_rate = 0.95f;
         bool allocate_data_on_host = false;
+        // Tag value used to mark a free slot. Inserting a key whose tag equals
+        // sentinel_key is undefined behavior.
+        TagT sentinel_key = static_cast<TagT>(-1);
     };
 
     struct ModifyEntry
@@ -375,13 +379,14 @@ public:
                 cache_ = allocate_in_pool(pd, ed - pd, data_size, 16);
             }
             d_tags_ = (TagT*)allocate_in_pool(pd, ed - pd, tag_size, 16);
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemset(d_tags_, INVALID_IDX, tag_size));
+            CACHE_CUDA_ERR_CHK_AND_THROW(call_fill_tags<TagT>(d_tags_, num_sets_ * NUM_WAYS * config_.num_tables, config_.sentinel_key, 0));
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaStreamSynchronize(0));
 
             // always allocate host buffer for tags
             // in gpu_modify mode it is required for get_keys_stored_in_cache method
             h_tags_ = (TagT*)allocate_in_pool(ph, eh - ph, tag_size, 16);
 
-            std::fill(h_tags_, h_tags_ + num_sets_ * NUM_WAYS * config_.num_tables, static_cast<TagT>(INVALID_IDX));
+            std::fill(h_tags_, h_tags_ + num_sets_ * NUM_WAYS * config_.num_tables, config_.sentinel_key);
             
             init_extras_host(config_.num_tables, ph, eh - ph);
             init_extras_device(config_.num_tables, pd, ed - pd);

@@ -101,7 +101,7 @@ RocksDBContext::~RocksDBContext() {
   col_families.clear();
   NVE_CHECK_(db->SyncWAL());
   NVE_CHECK_(db->Close());
-  db.release();
+  db.reset();
 
   NVE_LOG_INFO_("Disconnection from RocksDB database '", path, "' successful.");
 }

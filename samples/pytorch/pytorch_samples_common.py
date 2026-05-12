@@ -15,8 +15,6 @@
 
 import torch
 import pynve.nve as nve
-import sys
-import fnmatch
 import os
 import subprocess
 import re
@@ -118,33 +116,24 @@ def torch_data_type_to_nve_data_type(data_type: torch.dtype):
     else:
         raise ValueError(f"Invalid data type: {data_type}")
 
-def FindFirstPath(file, root_dir=None):
-    if root_dir is None:
-        file_dir = os.path.dirname(os.path.realpath(__file__))
-        git_rev_dir = str(subprocess.run(['git', '-C', file_dir, 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).stdout)
-        root_dir = git_rev_dir.replace('b\'','').replace('\\n\'','')
-
-    for dirpath, dirnames, filenames in os.walk(root_dir):
-        for filename in fnmatch.filter(filenames, file):
-            return dirpath
-    return None
-
 def get_remote_interface(path_to_remote_table: str, num_embeddings: int, embedding_dim: int, data_type: torch.dtype):
-    sys.path.append(path_to_remote_table)
-    try:
-        import sample_remote
-        remote_interface = sample_remote.RemoteTable(num_embeddings, embedding_dim, torch_data_type_to_nve_data_type(data_type))
-    except ModuleNotFoundError as e:
-        print("Failed to import sample_remote - Searching for plugin")
+    """Build a Hierarchical-friendly remote PS via the custom_remote plugin.
 
-        so_name = 'sample_remote.cpython-*.so'
-        dir_path = FindFirstPath(so_name)
-        if dir_path is not None:
-                print("Defaulting to {}".format(dir_path))
-                sys.path.append(dir_path)
-                import sample_remote
-                remote_interface = sample_remote.RemoteTable(num_embeddings, embedding_dim, torch_data_type_to_nve_data_type(data_type))
-    return remote_interface
+    ``path_to_remote_table`` is no longer used (the plugin is resolved by the
+    nve runtime via ``load_host_table_plugin``). The argument is kept so
+    existing callers don't need updating.
+    """
+    nve_dtype = torch_data_type_to_nve_data_type(data_type)
+    elem_bytes = 4 if data_type == torch.float32 else 2
+    return nve.ParameterServerTable(
+        row_elements=embedding_dim,
+        data_type=nve_dtype,
+        plugin_name="libnve-plugin-custom_remote.so",
+        factory_config_json='{"implementation": "custom_remote"}',
+        table_config_json='{"key_size": 8, "max_value_size": '
+                          + str(embedding_dim * elem_bytes) + '}',
+        num_rows=num_embeddings,
+    )
 
 def calc_stats(values):
     """Calculate mean, min, max, and count statistics for a list of values."""

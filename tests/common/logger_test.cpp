@@ -70,7 +70,7 @@ std::map<LogLevel_t, LogTestParams> test_params = {
 
 static void LogMessages(std::vector<LogLevel_t> msg_levels) {
   for (auto lvl : msg_levels) {
-    const auto msg = test_params.at(lvl).message;
+    const auto& msg = test_params.at(lvl).message;
     switch (lvl) {
       case LogLevel_t::Critical:
         NVE_LOG_CRITICAL_(msg);
@@ -113,7 +113,7 @@ static void LogAndTestSingleMessage(LogLevel_t lvl) {
   GetGlobalLogger()->set_verbosity_level(lvl);
   LogCapture lc;
   LogMessages({lvl});
-  const auto msg = test_params.at(lvl).message;
+  const auto& msg = test_params.at(lvl).message;
 
   if (test_params.at(lvl).appears_in_cout) {
     EXPECT_EQ("", lc.GetCerrString());

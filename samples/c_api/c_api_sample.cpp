@@ -83,7 +83,7 @@ int main() {
   // ── Step 2: Create NVHM host table ────────────────────────────────────
   printf("\n[2] Creating NVHM host table...\n");
 
-  CHECK_NVE(nve_load_host_table_plugin("nvhm"));
+  CHECK_NVE(nve_load_host_table_plugin("libnve-plugin-nvhm.so"));
 
   nve_host_factory_t factory = nullptr;
   CHECK_NVE(nve_create_host_table_factory(&factory, R"({"implementation": "nvhm_map"})"));

@@ -221,7 +221,7 @@ int main(int argc, char* argv[]) {
         const int64_t num_partitions = 1; // Single partition is better for inference
         const int64_t keys_per_partition = host_cache_size / row_size / num_partitions;
 
-        std::vector<std::string> plugin_names{"nvhm"};
+        std::vector<std::string> plugin_names{"libnve-plugin-nvhm.so"};
         nlohmann::json nvhm_conf = {
           {"key_size", sizeof(IndexT)},
           {"max_value_size", row_size},
@@ -532,4 +532,3 @@ int main(int argc, char* argv[]) {
   }
   return 0;
 }
-

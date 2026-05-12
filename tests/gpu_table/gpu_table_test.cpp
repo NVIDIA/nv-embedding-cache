@@ -144,6 +144,55 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     EXPECT_FALSE(found);
   }
 
+  // Negative keys must not crash insert/find. -1 collides with the INVALID
+  // tag sentinel, so its hit/miss is undefined; we only check that no CUDA
+  // error escapes.
+  void test_negative_key() {
+    const auto& params = GetParam();
+    const size_t data_elements = static_cast<size_t>(params.row_size_bytes) / sizeof(float);
+    std::vector<float> h_data;
+    for (size_t i = 0; i < data_elements; i++) {
+      h_data.push_back(float(i));
+    }
+
+    KeyType neg_key = static_cast<KeyType>(-1);
+    insert(neg_key, &(h_data[0]), params.row_size_bytes);
+
+    std::vector<float> h_output(data_elements, 0.0f);
+    KeyType h_keys[] = {neg_key};
+    (void) find(h_keys, 1, h_output.data(), params.row_size_bytes);
+
+    NVE_CHECK_(cudaPeekAtLastError());
+  }
+
+  // Non-sentinel negative keys must round-trip correctly through insert +
+  // non-UVM find. GpuTable<KeyType> uses EmbedCacheSA<KeyType, KeyType> so
+  // TagT == KeyT and the unsigned-cast hash + reconstruction recover the
+  // original key bit-for-bit.
+  void test_negative_key_hits() {
+    const auto& params = GetParam();
+    if (params.allocate_uvm_table) {
+      return;  // UVM lookup falls back to table[key] on miss; OOB for negatives.
+    }
+    const size_t data_elements = static_cast<size_t>(params.row_size_bytes) / sizeof(float);
+    std::vector<float> h_data;
+    for (size_t i = 0; i < data_elements; i++) {
+      h_data.push_back(float(i));
+    }
+
+    KeyType neg_key = static_cast<KeyType>(-100);
+    insert(neg_key, &(h_data[0]), params.row_size_bytes);
+
+    std::vector<float> h_output(data_elements, 0.0f);
+    KeyType h_keys[] = {neg_key};
+    bool found = find(h_keys, 1, h_output.data(), params.row_size_bytes);
+
+    EXPECT_TRUE(found);
+    for (size_t i = 0; i < data_elements; i++) {
+      EXPECT_FLOAT_EQ(h_data[i], h_output[i]);
+    }
+  }
+
   void test_erase() {
     const auto& params = GetParam();
     const size_t data_elements = static_cast<size_t>(params.row_size_bytes) / sizeof(float);
@@ -354,6 +403,8 @@ TEST_P(GTFixture_INT64_T, test_name)      \
 TEST_FORMAT(insert, test_insert);
 TEST_FORMAT(update, test_update);
 TEST_FORMAT(missing_key, test_missing_key);
+TEST_FORMAT(negative_key, test_negative_key);
+TEST_FORMAT(negative_key_hits, test_negative_key_hits);
 TEST_FORMAT(erase, test_erase);
 TEST_FORMAT(find, test_find_uvm);
 TEST_FORMAT(DISABLED_combine, test_combine); // Disabled - pooling path not implemented yet
@@ -369,5 +420,171 @@ INSTANTIATE_TEST_SUITE_P(
     GpuTableTestInt64,
     GTFixture_INT64_T,
     testing::ValuesIn(test_params));
+
+TEST(GpuTableInvalidKey, GetInvalidKeyCustom) {
+  GPUTableConfig cfg;
+  cfg.device_id = GT_TEST_DEVICE;
+  cfg.cache_size = 1l << 20;
+  cfg.row_size_in_bytes = 1l << 7;
+  cfg.uvm_table = nullptr;
+  cfg.invalid_key = 12345;
+  GpuTable<int64_t> tab(cfg);
+  EXPECT_EQ(int64_t{12345}, tab.get_invalid_key());
+}
+
+// A batch containing the configured invalid_key sentinel must not crash insert/find,
+// and other (valid) keys in the same batch must still round-trip correctly.
+TEST(GpuTableInvalidKey, ValidKeysSurviveBatchWithSentinel) {
+  using KeyType = int64_t;
+  constexpr int64_t row_size = 1l << 7;  // 128 bytes = 32 floats
+  constexpr int64_t batch_size = 4;
+  constexpr KeyType invalid_key = static_cast<KeyType>(0x7fffffffffffffffLL);
+  constexpr int64_t hit_mask_bytes = sizeof(max_bitmask_repr_t);
+
+  GPUTableConfig cfg;
+  cfg.device_id = GT_TEST_DEVICE;
+  cfg.cache_size = 1l << 20;
+  cfg.row_size_in_bytes = row_size;
+  cfg.uvm_table = nullptr;
+  cfg.invalid_key = static_cast<int64_t>(invalid_key);
+  GpuTable<KeyType> tab(cfg);
+  auto ctx = tab.create_execution_context(0, 0, nullptr, nullptr);
+
+  // Build a batch: three valid keys + one sentinel.
+  std::vector<KeyType> keys{static_cast<KeyType>(101),
+                            static_cast<KeyType>(202),
+                            invalid_key,
+                            static_cast<KeyType>(404)};
+  ASSERT_EQ(static_cast<size_t>(batch_size), keys.size());
+
+  const size_t row_floats = static_cast<size_t>(row_size) / sizeof(float);
+  std::vector<float> values(static_cast<size_t>(batch_size) * row_floats, 0.0f);
+  for (int64_t i = 0; i < batch_size; ++i) {
+    for (size_t j = 0; j < row_floats; ++j) {
+      values[static_cast<size_t>(i) * row_floats + j] = static_cast<float>(i * 1000 + static_cast<int64_t>(j));
+    }
+  }
+
+  auto allocator = GetDefaultAllocator();
+  void* d_keys = nullptr;
+  void* d_values = nullptr;
+  void* d_hitmask = nullptr;
+  NVE_CHECK_(allocator->device_allocate(&d_keys, sizeof(KeyType) * batch_size));
+  NVE_CHECK_(allocator->device_allocate(&d_values, static_cast<size_t>(row_size) * batch_size));
+  NVE_CHECK_(allocator->device_allocate(&d_hitmask, hit_mask_bytes));
+
+  NVE_CHECK_(cudaMemcpy(d_values, values.data(),
+                        static_cast<size_t>(row_size) * batch_size, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
+
+  tab.insert(ctx, batch_size, d_keys, row_size, row_size, d_values);
+  NVE_CHECK_(cudaDeviceSynchronize());
+  NVE_CHECK_(cudaPeekAtLastError());
+
+  // Find back: keys/values/hitmask all device-side.
+  NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemset(d_values, 0, static_cast<size_t>(row_size) * batch_size));
+  NVE_CHECK_(cudaMemset(d_hitmask, 0, hit_mask_bytes));
+  tab.find(ctx, batch_size, d_keys, static_cast<max_bitmask_repr_t*>(d_hitmask),
+           row_size, d_values, nullptr);
+  NVE_CHECK_(cudaDeviceSynchronize());
+  NVE_CHECK_(cudaPeekAtLastError());
+
+  std::vector<float> out(static_cast<size_t>(batch_size) * row_floats, 0.0f);
+  max_bitmask_repr_t hitmask_host = 0;
+  NVE_CHECK_(cudaMemcpy(out.data(), d_values,
+                        static_cast<size_t>(row_size) * batch_size, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemcpy(&hitmask_host, d_hitmask, hit_mask_bytes, cudaMemcpyDefault));
+
+  // Valid keys (indices 0, 1, 3) must hit and round-trip exactly. Sentinel slot is undefined.
+  for (int64_t i : {int64_t{0}, int64_t{1}, int64_t{3}}) {
+    const bool hit = (hitmask_host >> i) & 0x1u;
+    EXPECT_TRUE(hit) << "valid key at slot " << i << " should hit";
+    for (size_t j = 0; j < row_floats; ++j) {
+      EXPECT_FLOAT_EQ(values[static_cast<size_t>(i) * row_floats + j],
+                      out[static_cast<size_t>(i) * row_floats + j])
+          << "slot " << i << " float " << j;
+    }
+  }
+
+  allocator->device_free(d_keys);
+  allocator->device_free(d_values);
+  allocator->device_free(d_hitmask);
+}
+
+// With a non-default sentinel, -1 becomes a regular key and must round-trip.
+TEST(GpuTableInvalidKey, MinusOneRoundTripsWhenSentinelIsCustom) {
+  using KeyType = int64_t;
+  constexpr int64_t row_size = 1l << 7;  // 128 bytes = 32 floats
+  constexpr int64_t batch_size = 3;
+  constexpr KeyType custom_sentinel = static_cast<KeyType>(0x7fffffffffffffffLL);
+  constexpr KeyType target_key = static_cast<KeyType>(-1);
+  constexpr int64_t hit_mask_bytes = sizeof(max_bitmask_repr_t);
+
+  GPUTableConfig cfg;
+  cfg.device_id = GT_TEST_DEVICE;
+  cfg.cache_size = 1l << 20;
+  cfg.row_size_in_bytes = row_size;
+  cfg.uvm_table = nullptr;
+  cfg.invalid_key = static_cast<int64_t>(custom_sentinel);
+  GpuTable<KeyType> tab(cfg);
+  auto ctx = tab.create_execution_context(0, 0, nullptr, nullptr);
+
+  std::vector<KeyType> keys{static_cast<KeyType>(101), target_key, static_cast<KeyType>(303)};
+  ASSERT_EQ(static_cast<size_t>(batch_size), keys.size());
+
+  const size_t row_floats = static_cast<size_t>(row_size) / sizeof(float);
+  std::vector<float> values(static_cast<size_t>(batch_size) * row_floats, 0.0f);
+  for (int64_t i = 0; i < batch_size; ++i) {
+    for (size_t j = 0; j < row_floats; ++j) {
+      values[static_cast<size_t>(i) * row_floats + j] = static_cast<float>(i * 1000 + static_cast<int64_t>(j));
+    }
+  }
+
+  auto allocator = GetDefaultAllocator();
+  void* d_keys = nullptr;
+  void* d_values = nullptr;
+  void* d_hitmask = nullptr;
+  NVE_CHECK_(allocator->device_allocate(&d_keys, sizeof(KeyType) * batch_size));
+  NVE_CHECK_(allocator->device_allocate(&d_values, static_cast<size_t>(row_size) * batch_size));
+  NVE_CHECK_(allocator->device_allocate(&d_hitmask, hit_mask_bytes));
+
+  NVE_CHECK_(cudaMemcpy(d_values, values.data(),
+                        static_cast<size_t>(row_size) * batch_size, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
+
+  tab.insert(ctx, batch_size, d_keys, row_size, row_size, d_values);
+  NVE_CHECK_(cudaDeviceSynchronize());
+  NVE_CHECK_(cudaPeekAtLastError());
+
+  NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemset(d_values, 0, static_cast<size_t>(row_size) * batch_size));
+  NVE_CHECK_(cudaMemset(d_hitmask, 0, hit_mask_bytes));
+  tab.find(ctx, batch_size, d_keys, static_cast<max_bitmask_repr_t*>(d_hitmask),
+           row_size, d_values, nullptr);
+  NVE_CHECK_(cudaDeviceSynchronize());
+  NVE_CHECK_(cudaPeekAtLastError());
+
+  std::vector<float> out(static_cast<size_t>(batch_size) * row_floats, 0.0f);
+  max_bitmask_repr_t hitmask_host = 0;
+  NVE_CHECK_(cudaMemcpy(out.data(), d_values,
+                        static_cast<size_t>(row_size) * batch_size, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemcpy(&hitmask_host, d_hitmask, hit_mask_bytes, cudaMemcpyDefault));
+
+  // All three keys (including -1) must hit and round-trip exactly.
+  for (int64_t i = 0; i < batch_size; ++i) {
+    const bool hit = (hitmask_host >> i) & 0x1u;
+    EXPECT_TRUE(hit) << "key " << keys[static_cast<size_t>(i)] << " at slot " << i << " should hit";
+    for (size_t j = 0; j < row_floats; ++j) {
+      EXPECT_FLOAT_EQ(values[static_cast<size_t>(i) * row_floats + j],
+                      out[static_cast<size_t>(i) * row_floats + j])
+          << "slot " << i << " float " << j;
+    }
+  }
+
+  allocator->device_free(d_keys);
+  allocator->device_free(d_values);
+  allocator->device_free(d_hitmask);
+}
 
 }  // namespace nve

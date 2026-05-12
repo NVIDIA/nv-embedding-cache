@@ -154,7 +154,7 @@ private:
     }
     
     void Cleanup() {
-        cudaDeviceSynchronize();
+        NVE_CHECK_(cudaDeviceSynchronize());
         if (d_keys_) {
             NVE_CHECK_(cudaFree(d_keys_));
             d_keys_ = nullptr;

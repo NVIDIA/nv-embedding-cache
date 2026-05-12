@@ -86,12 +86,12 @@ class Deduper
 {
 public:
     Deduper() {
-        NVE_CHECK_(cudaMalloc(&m_d_num_runs_out, sizeof(IndexT)));
+        NVE_CHECK_(cudaMalloc(&d_num_runs_out_, sizeof(IndexT)));
     }
 
     ~Deduper()
     {
-        NVE_CHECK_(cudaFree(m_d_num_runs_out));
+        NVE_CHECK_(cudaFree(d_num_runs_out_));
     }
 
     // input d_keys, an array of size num_keys with keys to de duplicate
@@ -108,7 +108,7 @@ public:
     //      inverse_locations[d_counts[i]]
     //      for j < d_counts[i]
     //          inverse_locations[j] = d_inverse_buffer[d_offsets[i]+j]
-    void Dedup(const IndexT* d_keys, 
+    void dedup(const IndexT* d_keys, 
         const uint64_t num_keys, 
         IndexT* d_unique_out, 
         IndexT* d_counts_out,
@@ -124,10 +124,10 @@ public:
         // 3. perform exclusive sum on the length array to get the offsets for each key inverse mapping 
 
         // Run sorting operation
-        NVE_CHECK_(cudaMemcpyAsync(m_d_location_buffer, m_h_location_buffer, sizeof(IndexT)*num_keys, cudaMemcpyDefault, stream));
+        NVE_CHECK_(cudaMemcpyAsync(d_location_buffer_, h_location_buffer_, sizeof(IndexT)*num_keys, cudaMemcpyDefault, stream));
         
-        NVE_CHECK_(cub::DeviceRadixSort::SortPairs(m_d_temp_storage_sort, m_temp_storage_bytes_sort,
-            d_keys, m_d_sorted_buffer, m_d_location_buffer, d_inverse_buffer, num_keys, 0, sizeof(IndexT)*8, stream));
+        NVE_CHECK_(cub::DeviceRadixSort::SortPairs(d_temp_storage_sort_, temp_storage_bytes_sort_,
+            d_keys, d_sorted_buffer_, d_location_buffer_, d_inverse_buffer, num_keys, 0, sizeof(IndexT)*8, stream));
 
         // set d_counts_out to zeros and call ExclusiveSum on + 1, to make sure prefix sum 
         // returns sum of all counts in last element
@@ -135,39 +135,39 @@ public:
 
         // Run encoding
         NVE_CHECK_(cub::DeviceRunLengthEncode::Encode(
-            m_d_temp_storage_encode, m_temp_storage_bytes_encode,
-            m_d_sorted_buffer, d_unique_out, d_counts_out, m_d_num_runs_out, static_cast<int>(num_keys), stream));
+            d_temp_storage_encode_, temp_storage_bytes_encode_,
+            d_sorted_buffer_, d_unique_out, d_counts_out, d_num_runs_out_, static_cast<int>(num_keys), stream));
         
-        NVE_CHECK_(cudaMemcpyAsync(h_num_runs_out, m_d_num_runs_out, sizeof(IndexT), cudaMemcpyDefault, stream));
+        NVE_CHECK_(cudaMemcpyAsync(h_num_runs_out, d_num_runs_out_, sizeof(IndexT), cudaMemcpyDefault, stream));
         NVE_CHECK_(cudaStreamSynchronize(stream));
 
-        IndexT* d_output_offset_buffer = (MAX_RUN_SIZE != -1) ? m_d_tmp_offset_buffer : d_offsets;
+        IndexT* d_output_offset_buffer = (MAX_RUN_SIZE != -1) ? d_tmp_offset_buffer_ : d_offsets;
         auto num_unique_out = static_cast<int>(*h_num_runs_out);
         
         // Run exclusive prefix sum
         NVE_CHECK_(cub::DeviceScan::ExclusiveSum(
-            m_d_temp_storage_ex_sum, m_temp_storage_bytes_ex_sum,
+            d_temp_storage_ex_sum_, temp_storage_bytes_ex_sum_,
             d_counts_out, d_output_offset_buffer, num_unique_out + 1, stream));
 
         // split runs to chunks of limited length, if required
         if (MAX_RUN_SIZE != -1) {
              // Run split count compute
-             CallComputeSplitCounts<IndexT, MAX_RUN_SIZE>(d_counts_out, m_d_split_count_buffer, num_unique_out, stream);
+             CallComputeSplitCounts<IndexT, MAX_RUN_SIZE>(d_counts_out, d_split_count_buffer_, num_unique_out, stream);
 
             // Run exclusive prefix sum on split data
             NVE_CHECK_(cub::DeviceScan::ExclusiveSum(
-                m_d_temp_storage_ex_sum, m_temp_storage_bytes_ex_sum,
-                m_d_split_count_buffer, m_d_split_offset_buffer, num_unique_out + 1, stream));
+                d_temp_storage_ex_sum_, temp_storage_bytes_ex_sum_,
+                d_split_count_buffer_, d_split_offset_buffer_, num_unique_out + 1, stream));
 
             // The number of chunks is the last element in ExclusiveSum output
             // Return both numbers, because both are needed for backward path
-            NVE_CHECK_(cudaMemcpyAsync(h_num_runs_out + 1, m_d_split_offset_buffer + num_unique_out, sizeof(IndexT), cudaMemcpyDefault, stream));
+            NVE_CHECK_(cudaMemcpyAsync(h_num_runs_out + 1, d_split_offset_buffer_ + num_unique_out, sizeof(IndexT), cudaMemcpyDefault, stream));
 
             // Compute final input/output offsets compute
             CallComputeLocationMapping<IndexT, MAX_RUN_SIZE>(
-                m_d_split_count_buffer,
-                m_d_split_offset_buffer,
-                m_d_tmp_offset_buffer,
+                d_split_count_buffer_,
+                d_split_offset_buffer_,
+                d_tmp_offset_buffer_,
                 d_loc_map_out,
                 d_offsets,
                 num_unique_out,
@@ -178,32 +178,32 @@ public:
         NVE_CHECK_(cudaStreamSynchronize(stream));
     }
 
-    IndexT* GetSorted() const
+    IndexT* get_sorted() const
     {
-        return m_d_sorted_buffer;
+        return d_sorted_buffer_;
     }
 
-    void GetAllocRequirements(uint64_t num_keys, size_t& tmp_mem_size_device, size_t& tmp_mem_size_host) {
+    void get_alloc_requirements(uint64_t num_keys, size_t& tmp_mem_size_device, size_t& tmp_mem_size_host) {
         tmp_mem_size_host = 0;
         tmp_mem_size_device = 0;
 
         IndexT* p = nullptr;
         {
             // determing and allocate temporary storage for sort
-            NVE_CHECK_(cub::DeviceRadixSort::SortPairs(p, m_temp_storage_bytes_sort,
+            NVE_CHECK_(cub::DeviceRadixSort::SortPairs(p, temp_storage_bytes_sort_,
                     p, p, p, p, num_keys, 0, sizeof(IndexT)*8));
             // align everyrhing to 512B
-            m_temp_storage_bytes_sort = ((m_temp_storage_bytes_sort + 511) >> 9) << 9;
-            tmp_mem_size_device += m_temp_storage_bytes_sort;
+            temp_storage_bytes_sort_ = ((temp_storage_bytes_sort_ + 511) >> 9) << 9;
+            tmp_mem_size_device += temp_storage_bytes_sort_;
         }
         {
             // determing and allocate temporary storage for encode
             NVE_CHECK_(cub::DeviceRunLengthEncode::Encode(
-                    p, m_temp_storage_bytes_encode,
+                    p, temp_storage_bytes_encode_,
                     p, p, p, p, static_cast<int>(num_keys)));
 
-            m_temp_storage_bytes_encode = ((m_temp_storage_bytes_encode + 511) >> 9) << 9;
-            tmp_mem_size_device += m_temp_storage_bytes_encode;
+            temp_storage_bytes_encode_ = ((temp_storage_bytes_encode_ + 511) >> 9) << 9;
+            tmp_mem_size_device += temp_storage_bytes_encode_;
         }
         {
             // determing and allocate temporary storage for ex sum
@@ -212,72 +212,72 @@ public:
             int num_keys_ = static_cast<int>(num_keys) + 1;
 
             NVE_CHECK_(cub::DeviceScan::ExclusiveSum(
-                    p, m_temp_storage_bytes_ex_sum,
+                    p, temp_storage_bytes_ex_sum_,
                     p, p, num_keys_));
-            m_temp_storage_bytes_ex_sum = ((m_temp_storage_bytes_ex_sum + 511) >> 9) << 9;
-            tmp_mem_size_device += m_temp_storage_bytes_ex_sum;
+            temp_storage_bytes_ex_sum_ = ((temp_storage_bytes_ex_sum_ + 511) >> 9) << 9;
+            tmp_mem_size_device += temp_storage_bytes_ex_sum_;
         }
         size_t index_buffer_size = sizeof(IndexT) * (num_keys + 1);
         index_buffer_size = ((index_buffer_size + 1023) >> 10) << 10;
 
-        tmp_mem_size_device += index_buffer_size; //m_d_sorted_buffer
-        tmp_mem_size_device += index_buffer_size; //m_d_location_buffer
+        tmp_mem_size_device += index_buffer_size; //d_sorted_buffer_
+        tmp_mem_size_device += index_buffer_size; //d_location_buffer_
 
         if (MAX_RUN_SIZE != -1) {
-            tmp_mem_size_device += index_buffer_size; // m_d_split_count_buffer
-            tmp_mem_size_device += index_buffer_size; //m_d_tmp_offset_buffer
-            tmp_mem_size_device += index_buffer_size; //m_d_split_offset_buffer
+            tmp_mem_size_device += index_buffer_size; // d_split_count_buffer_
+            tmp_mem_size_device += index_buffer_size; //d_tmp_offset_buffer_
+            tmp_mem_size_device += index_buffer_size; //d_split_offset_buffer_
         }
-        tmp_mem_size_host += index_buffer_size; //m_h_location_buffer
+        tmp_mem_size_host += index_buffer_size; //h_location_buffer_
     }
 
-    void SetAndInitBuffers(uint64_t num_keys, char* tmp_mem_device, char* tmp_mem_host) {
+    void set_and_init_buffers(uint64_t num_keys, char* tmp_mem_device, char* tmp_mem_host) {
         char* curr_device_ptr = tmp_mem_device;
         size_t index_buffer_size = sizeof(IndexT) * (num_keys + 1);
         index_buffer_size = ((index_buffer_size + 511) >> 9) << 9;
 
-        m_d_temp_storage_sort = curr_device_ptr;
-        curr_device_ptr += m_temp_storage_bytes_sort;
-        m_d_temp_storage_encode = curr_device_ptr;
-        curr_device_ptr += m_temp_storage_bytes_encode;
-        m_d_temp_storage_ex_sum = curr_device_ptr;
-        curr_device_ptr += m_temp_storage_bytes_ex_sum;
-        m_d_sorted_buffer = reinterpret_cast<IndexT*>(curr_device_ptr);
+        d_temp_storage_sort_ = curr_device_ptr;
+        curr_device_ptr += temp_storage_bytes_sort_;
+        d_temp_storage_encode_ = curr_device_ptr;
+        curr_device_ptr += temp_storage_bytes_encode_;
+        d_temp_storage_ex_sum_ = curr_device_ptr;
+        curr_device_ptr += temp_storage_bytes_ex_sum_;
+        d_sorted_buffer_ = reinterpret_cast<IndexT*>(curr_device_ptr);
         curr_device_ptr += index_buffer_size;
-        m_d_location_buffer = reinterpret_cast<IndexT*>(curr_device_ptr);
+        d_location_buffer_ = reinterpret_cast<IndexT*>(curr_device_ptr);
         curr_device_ptr += index_buffer_size;
 
         if (MAX_RUN_SIZE != -1) {
-            m_d_split_count_buffer = reinterpret_cast<IndexT*>(curr_device_ptr);
+            d_split_count_buffer_ = reinterpret_cast<IndexT*>(curr_device_ptr);
             curr_device_ptr += index_buffer_size;
-            m_d_tmp_offset_buffer = reinterpret_cast<IndexT*>(curr_device_ptr);
+            d_tmp_offset_buffer_ = reinterpret_cast<IndexT*>(curr_device_ptr);
             curr_device_ptr += index_buffer_size;
-            m_d_split_offset_buffer = reinterpret_cast<IndexT*>(curr_device_ptr);
+            d_split_offset_buffer_ = reinterpret_cast<IndexT*>(curr_device_ptr);
             curr_device_ptr += index_buffer_size;
         }
 
-        m_h_location_buffer = reinterpret_cast<IndexT*>(tmp_mem_host);
+        h_location_buffer_ = reinterpret_cast<IndexT*>(tmp_mem_host);
         for (IndexT i = 0; i < static_cast<IndexT>(num_keys); i++) {
-            m_h_location_buffer[i] = i;
+            h_location_buffer_[i] = i;
         }
     }
 
 private:
-    size_t   m_temp_storage_bytes_sort = 0;
-    size_t   m_temp_storage_bytes_encode = 0;
-    size_t   m_temp_storage_bytes_ex_sum = 0;
+    size_t   temp_storage_bytes_sort_ = 0;
+    size_t   temp_storage_bytes_encode_ = 0;
+    size_t   temp_storage_bytes_ex_sum_ = 0;
 
-    void     *m_d_temp_storage_sort = nullptr;
-    void     *m_d_temp_storage_encode = nullptr;
-    void     *m_d_temp_storage_ex_sum = nullptr;
+    void     *d_temp_storage_sort_ = nullptr;
+    void     *d_temp_storage_encode_ = nullptr;
+    void     *d_temp_storage_ex_sum_ = nullptr;
 
-    IndexT   *m_d_location_buffer = nullptr; // [1, 2, ..., ] helper buffer to build the reverse map
-    IndexT   *m_h_location_buffer = nullptr;
-    IndexT   *m_d_sorted_buffer = nullptr; // holds the sorted output
-    IndexT   *m_d_num_runs_out = nullptr;    // e.g., [ ]
-    IndexT   *m_d_split_count_buffer = nullptr;
-    IndexT   *m_d_tmp_offset_buffer = nullptr;
-    IndexT   *m_d_split_offset_buffer = nullptr;
+    IndexT   *d_location_buffer_ = nullptr; // [1, 2, ..., ] helper buffer to build the reverse map
+    IndexT   *h_location_buffer_ = nullptr;
+    IndexT   *d_sorted_buffer_ = nullptr; // holds the sorted output
+    IndexT   *d_num_runs_out_ = nullptr;    // e.g., [ ]
+    IndexT   *d_split_count_buffer_ = nullptr;
+    IndexT   *d_tmp_offset_buffer_ = nullptr;
+    IndexT   *d_split_offset_buffer_ = nullptr;
 };
 
 template<typename IndexT, uint32_t SUBWARP_WIDTH, typename DataType>

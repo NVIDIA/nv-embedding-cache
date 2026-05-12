@@ -20,18 +20,8 @@
 #include <cuda_runtime.h> // for cudaSuccess
 
 #ifdef __COVERITY__
-#define CHECK_EC(ecerror)           \
-do {                                \
-  if ((ecerror) != ECERROR_SUCCESS) { \
-    ADD_FAILURE();                  \
-  }                                 \
-} while (false)
-#define CHECK_CUDA_ERROR(cudares)   \
-do {                                \
-  if ((cudares) != cudaSuccess) {     \
-    ADD_FAILURE();                  \
-  }                                 \
-} while (false)
+#define CHECK_EC(ecerror) do {if ((ecerror) != ECERROR_SUCCESS) std::exit(1);} while(0)
+#define CHECK_CUDA_ERROR(cudares) do {if ((cudares) != cudaSuccess) std::exit(1);}  while(0)
 #else // __COVERITY__
 #define CHECK_EC(ecerror) EXPECT_EQ((ecerror), ECERROR_SUCCESS)
 #define CHECK_CUDA_ERROR(cudares) EXPECT_EQ((cudares), cudaSuccess)

@@ -19,7 +19,7 @@
 
 namespace nve {
 
-DefaultInsertHeuristic::DefaultInsertHeuristic(const std::vector<float>& thresholds)
+DefaultInsertHeuristic::DefaultInsertHeuristic(const std::vector<float> thresholds)
     : thresholds_(std::move(thresholds)),
     gen_(seed_),
     dis_(0.0, 1.0) {}
@@ -34,10 +34,10 @@ bool DefaultInsertHeuristic::insert_needed(const float hitrate, const size_t tab
             (dis_(gen_) < steadystate_chance);
 }
 
-FSMInsertHeuristic::FSMInsertHeuristic(const std::vector<float>& threshold) :
+FSMInsertHeuristic::FSMInsertHeuristic(const std::vector<float> threshold) :
     threshold_(std::move(threshold))
 {
-    const auto num_tables = threshold.size();
+    const auto num_tables = threshold_.size();
     for(size_t i=0 ; i<num_tables ; i++) {
         prev_hitrate_.push_back(0);
         state_.push_back(State::Start);

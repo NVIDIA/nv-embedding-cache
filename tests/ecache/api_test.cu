@@ -416,6 +416,68 @@ protected:
         EXPECT_EQ(*this->m_hMissingLen[0], 0);
     }
 
+    // Negative keys must not crash insert/lookup (non-UVM path). -1 collides
+    // with the INVALID tag sentinel, so its hit/miss is undefined and we only
+    // check that no CUDA error escapes.
+    void NegativeKeyNoCrashInternal()
+    {
+        TestCase t = GetParam();
+        if (t.idx.tcIdx != 0 || t.idx.scIdx != 0 || t.idx.ecIdx != 0)
+        {
+            return;
+        }
+
+        DefaultECEvent syncEvent(m_streams);
+        std::vector<IndexT> hIdx = {
+            static_cast<IndexT>(-1),
+            static_cast<IndexT>(-100),
+            static_cast<IndexT>(-12345)
+        };
+
+        // is_linear=false so DefaultHistogram offsets data pointers by array
+        // position rather than key value (key * stride underflows for negatives).
+        DefaultHistogram hist(hIdx.data(), hIdx.size(), (const int8_t*)m_pTable[0], t.table.rowStride, false);
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &syncEvent, m_streams[0]));
+        CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
+
+        CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], hIdx.data(), hIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
+        this->m_pCache->lookup(this->m_hLookup[0], this->m_dKeys[0], hIdx.size(), (int8_t*)this->m_dValues[0], this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
+        CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
+        CHECK_CUDA_ERROR(cudaPeekAtLastError());
+    }
+
+    // Non-sentinel negative keys (anything != -1) must round-trip correctly
+    // through insert + non-UVM lookup whenever TagT == IndexT — which is the
+    // case for both ApiTest fixtures (CacheSAHostModify<IndexT, IndexT> and
+    // CacheSADeviceModify<IndexT, IndexT>). Stronger assertion than
+    // NegativeKeyNoCrashInternal: every key must be found.
+    void NegativeKeyHitsInternal()
+    {
+        TestCase t = GetParam();
+        if (t.idx.tcIdx != 0 || t.idx.scIdx != 0 || t.idx.ecIdx != 0)
+        {
+            return;
+        }
+
+        DefaultECEvent syncEvent(m_streams);
+        std::vector<IndexT> hIdx = {
+            static_cast<IndexT>(-2),
+            static_cast<IndexT>(-100),
+            static_cast<IndexT>(-12345)
+        };
+
+        // is_linear=false: see NegativeKeyNoCrashInternal — key * stride underflows for negative keys.
+        DefaultHistogram hist(hIdx.data(), hIdx.size(), (const int8_t*)m_pTable[0], t.table.rowStride, false);
+        CHECK_EC(m_pCache->insert(m_hModify[0], hist.get_keys(), hist.get_priority(), hist.get_data(), hist.get_num_bins(), 0, &syncEvent, m_streams[0]));
+        CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
+
+        CHECK_CUDA_ERROR(cudaMemcpy(this->m_dKeys[0], hIdx.data(), hIdx.size()*sizeof(IndexT), cudaMemcpyDefault));
+        this->m_pCache->lookup(this->m_hLookup[0], this->m_dKeys[0], hIdx.size(), (int8_t*)this->m_dValues[0], this->m_dMissingIndex[0], this->m_dMissingKeys[0], this->m_dMissingLen[0], 0, t.table.rowSizeInBytes, this->m_streams[0]);
+        CHECK_CUDA_ERROR(cudaMemcpyAsync(this->m_hMissingLen[0], this->m_dMissingLen[0], sizeof(size_t), cudaMemcpyDefault, this->m_streams[0]));
+        CHECK_CUDA_ERROR(cudaStreamSynchronize(this->m_streams[0]));
+        EXPECT_EQ(*this->m_hMissingLen[0], 0u);
+    }
+
     void SimpleInvalidate()
     {
         // First put indices make sure those are in the cache
@@ -703,6 +765,12 @@ TEST_FORMAT(EmptyLookup, EmptyLookupInternal);
 TEST_FORMAT(SimpleLookup, SimpleLookupInternal);
 TEST_FORMAT(SimpleLookupUVM, SimpleLookupUVMInternal);
 TEST_FORMAT(Insert, InsertInternal);
+
+// Only registered for signed-key fixtures — negative literals are a no-op for unsigned types.
+TEST_P(Test_INT32_T_FLOAT, NegativeKeyNoCrash) { NegativeKeyNoCrashInternal(); }
+TEST_P(Test_INT64_T_FLOAT, NegativeKeyNoCrash) { NegativeKeyNoCrashInternal(); }
+TEST_P(Test_INT32_T_FLOAT, NegativeKeyHits) { NegativeKeyHitsInternal(); }
+TEST_P(Test_INT64_T_FLOAT, NegativeKeyHits) { NegativeKeyHitsInternal(); }
 
 TEST_P(Test_UINT32_T_INT8, Initialization)
 {

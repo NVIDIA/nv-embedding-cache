@@ -70,7 +70,7 @@ class ReplyParser {
 
   inline ReplyParser& operator*() noexcept { return *this; }
 
-  inline ReplyParser& operator=(const view_type& view) {
+  inline ReplyParser& operator=(const view_type view) {
     callback_(idx_, std::move(view));
     return *this;
   }

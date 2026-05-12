@@ -299,6 +299,9 @@ struct HostTableConfig {
                               // 2^32-5], should be a multiple of value_dtype.
   DataType_t value_dtype{DataType_t::Unknown};  // Storage data type of the table values. Only used
                                                 // by `update_accumulate()`.
+  int64_t invalid_key{-1};  // Key used to signal invalid entries (cast to int64_t)
+                            // All operations on such keys (lookup, insert, ...) have undefined results
+                            // Other keys in the same batch are unaffected
 
   void check() const;
 
@@ -339,6 +342,8 @@ class HostTableLike : public Table {
   int32_t get_device_id() const override final { return -1; }
 
   int64_t get_max_row_size() const override final { return config().max_value_size; }
+
+  virtual int64_t get_invalid_key() const override final { return config().invalid_key; }
 
   bool lookup_counter_hits() override final { return true; }
 
@@ -443,8 +448,9 @@ class HostTableFactory : public HostTableLikeFactory {
 /**
  * Loads a host table plugin DLL, and registers all table implementations
  *
- * @param plugin_name Name of the DLL, must follow NV Embedding Cache naming convention, which is
- * `libnve-plugin-<plugin_name>.so`.
+ * @param plugin_name Shared object name/path to load. Bare names such as
+ * `libnve-plugin-abseil.so` are resolved by the dynamic linker; absolute or
+ * relative paths such as `/tmp/my_plugin.so` are loaded directly.
  */
 void load_host_table_plugin(const std::string_view& plugin_name);
 
@@ -467,6 +473,7 @@ host_table_factory_ptr_t create_host_table_factory(const nlohmann::json& json);
  * All-in-one function to process `host_database` JSON configuration.
  *
  * @param json JSON object containing the `plugins`, `table_factories`, and `tables` sub-objects.
+ * `plugins` entries are shared object names/paths passed directly to `dlopen()`.
  *
  * @return Set of tables that represent the provided database implementation.
  */

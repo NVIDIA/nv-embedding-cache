@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import pynve.torch.nve_ops as nve_ops
+from pynve.torch import HAS_TORCH_OPS
 from pynve.torch.nve_tensors import CachedTable
 import pynve.nve as nve
 import pynve.torch.nve_ps as nve_ps
@@ -136,6 +137,7 @@ class NVEmbeddingBase(torch.nn.Module):
         self.layer_data_type = torch_type_to_nve_type(data_type)
         self.save_stream = None
         self.gpu_cache_size = gpu_cache_size
+        self.host_cache_size = host_cache_size
         self.optimize_for_training = optimize_for_training
         # set up device shananigans
         self.device = device if device is not None else torch.device("cuda")
@@ -150,15 +152,18 @@ class NVEmbeddingBase(torch.nn.Module):
                 tensor_storage = weight_init.detach().clone().to(self.device)
             else:
                 tensor_storage = torch.empty(num_embeddings, embedding_size, dtype=data_type, device=self.device)
-            self.emb_layer = nve.GPUEmbedding(embedding_size, num_embeddings, self.layer_data_type, tensor_storage.data_ptr(), self.device_index, self.config)
+            memblock = nve.UserMemBlock(tensor_storage.data_ptr())
+            self.memblock_type = memblock.get_type()
+            self.emb_layer = nve.GPUEmbedding(embedding_size, num_embeddings, self.layer_data_type, memblock, self.device_index, self.config)
             self.table_ids = {0: 'gpu'}
         elif cache_type == CacheType.LinearUVM:
             if gpu_cache_size == 0:
                 raise ValueError("GPU cache size > 0 is required for UVM embedding")
             if memblock is None:
                 memblock = nve.ManagedMemBlock(embedding_size, num_embeddings, self.layer_data_type, [self.device_index])
+            self.memblock_type = memblock.get_type()
             self.emb_layer = nve.LinearUVMEmbedding(embedding_size, num_embeddings, self.layer_data_type, memblock, gpu_cache_size, optimize_for_training, self.device_index, self.config)
-            tensor_storage = torch.utils.dlpack.from_dlpack(self.emb_layer.get_dl_tensor(self.layer_data_type))
+            tensor_storage = torch.utils.dlpack.from_dlpack(nve.get_dl_tensor(self.emb_layer, self.layer_data_type))
             if (weight_init != None):
                 tensor_storage.copy_(weight_init)
             self.table_ids = {0: 'gpu_cache'}
@@ -169,14 +174,26 @@ class NVEmbeddingBase(torch.nn.Module):
                 raise ValueError("GPU cache size > 0 is required for hierarchical embedding")
             if weight_init != None:
                 raise ValueError("Weight init is not supported for hierarchical embedding")
+            self.remote_interface = remote_interface
             if isinstance(remote_interface, nve_ps.NVEParameterServer):
+                if remote_interface.data_type != data_type:
+                    raise ValueError(
+                        f"NVEmbedding(Hierarchical): remote_interface.data_type="
+                        f"{remote_interface.data_type} doesn't match layer "
+                        f"data_type={data_type} — they must match")
                 remote_interface = remote_interface.parameter_server
-            self.emb_layer = nve.HierarchicalEmbedding(embedding_size, self.layer_data_type, gpu_cache_size, host_cache_size, remote_interface, optimize_for_training, self.device_index, self.config)
+            self.emb_layer = nve.HierarchicalEmbedding(embedding_size, self.layer_data_type, gpu_cache_size, host_cache_size, remote_interface, num_embeddings, optimize_for_training, self.device_index, self.config)
             tensor_storage = torch.sparse_coo_tensor(size=(num_embeddings, embedding_size), dtype=data_type, device=self.device)
+            self.table_ids = {0: 'gpu_cache'}
+            self.table_ids |= {1: 'host_cache', 2: 'remote_ps'} if host_cache_size > 0 else {1: 'remote_ps'}
         self.weight = CachedTable(tensor_storage, cache=self.emb_layer)
-        self.table_ids = {0: 'gpu_cache'}
-        self.table_ids |= {1: 'host_cache', 2: 'remote_ps'} if host_cache_size > 0 else {1: 'remote_ps'}
+        if HAS_TORCH_OPS:
+            nve.register_for_torch(self.id, self.emb_layer)
 
+    def __del__(self):
+        if HAS_TORCH_OPS:
+            nve.unregister_from_torch(self.id)
+        
     def to(self, *args, **kwargs):
         # since the weights need to remain on cpu in case of non dummy weight need to hijack this function 
         # and keep weights on the cpu
@@ -240,7 +257,7 @@ class NVEmbeddingBase(torch.nn.Module):
         self.emb_layer.erase(torch.numel(keys), keys.data_ptr(), table_id, torch.cuda.current_stream(self.device).cuda_stream)
 
     def load_from_stream(self, stream):
-        self.emb_layer.load_tensor_from_stream(stream, self.id)
+        nve.load_tensor_from_stream(self.emb_layer, stream, self.id)
 
     def set_save_stream(self, stream):
         self.save_stream = stream
@@ -292,11 +309,17 @@ class NVEmbedding(NVEmbeddingBase):
         Returns:
             torch.Tensor: Embedding vectors for the input keys
         """
-        return nve_ops.CacheEmbeddingOp.apply(keys, self.weight)
+        if HAS_TORCH_OPS:
+            if self.optimize_for_training:
+                return nve_ops.NVEmbeddingOpTraining.apply(keys, self.weight, self.id)
+            else:
+                return nve_ops.NVEmbeddingOp.apply(keys, self.id)
+        else:
+            return nve_ops.CacheEmbeddingOp.apply(keys, self.weight)
 
     def __reduce_ex__(self, protocol):
-        if self.save_stream is not None and self.cache_type == CacheType.LinearUVM:
-            self.emb_layer.write_tensor_to_stream(self.save_stream, self.id)
+        if self.save_stream is not None and self.cache_type in (CacheType.LinearUVM, CacheType.NoCache):
+            nve.write_tensor_to_stream(self.emb_layer, self.save_stream, self.id)
             return (NVEmbedding._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "id": self.id}), None )
         else:
             return (NVEmbedding._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "weight_init": self.weight, "id": self.id}), None )
@@ -357,14 +380,34 @@ class NVEmbeddingBag(NVEmbeddingBase):
                          concatenated embeddings. For other modes ('sum', 'mean', 'max'), returns
                          the reduced embeddings according to the specified mode.
         """
-        if (self.mode == "concat"):
-            return nve_ops.CacheEmbeddingOp.apply(input, self.weight)
+        if not HAS_TORCH_OPS:
+            if self.mode == "concat":
+                return nve_ops.CacheEmbeddingOp.apply(input, self.weight)
+            else:
+                return nve_ops.CacheEmbeddingBagOp.apply(
+                    input, self.weight, offsets, self.mode, per_sample_weights)
+        elif self.mode == "concat":
+            if self.optimize_for_training:
+                return nve_ops.NVEmbeddingOpTraining.apply(input, self.weight, self.id)
+            else:
+                return nve_ops.NVEmbeddingOp.apply(input, self.id)
         else:
-            return nve_ops.CacheEmbeddingBagOp.apply(input, self.weight, offsets, self.mode, per_sample_weights)
+            if per_sample_weights is not None:
+                pooling_type = int(nve.PoolingType_t.WeightedSum) if self.mode == "sum" \
+                               else int(nve.PoolingType_t.WeightedMean)
+            else:
+                pooling_type = int(nve.PoolingType_t.Sum) if self.mode == "sum" \
+                               else int(nve.PoolingType_t.Mean)
+            if self.optimize_for_training:
+                return nve_ops.NVEmbeddingBagOpTraining.apply(
+                    input, self.weight, offsets, per_sample_weights, pooling_type, self.id)
+            else:
+                return nve_ops.NVEmbeddingBagOp.apply(
+                    input, offsets, per_sample_weights, pooling_type, self.id)
 
     def __reduce_ex__(self, protocol):
-        if self.save_stream is not None and self.cache_type == CacheType.LinearUVM:
-            self.emb_layer.write_tensor_to_stream(self.save_stream, self.id)
+        if self.save_stream is not None and self.cache_type in (CacheType.LinearUVM, CacheType.NoCache):
+            nve.write_tensor_to_stream(self.emb_layer, self.save_stream, self.id)
             return (NVEmbeddingBag._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, self.mode, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "id": self.id}), None )
         else:
             return (NVEmbeddingBag._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, self.mode, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "weight_init": self.weight, "id": self.id}), None )

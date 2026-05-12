@@ -17,6 +17,7 @@
 
 #pragma once
 #include "ec_set_associative.h"
+#include "ec_hash.h"
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
@@ -154,18 +155,18 @@ public:
             for (uint32_t i = 0; i < num_keys; i++)
             {
                 auto input_key = keys[i];
-                auto set = input_key % this->num_sets_;
+                auto set = embed_cache_hash_set_idx(input_key, this->num_sets_);
                 TagT* set_ways = curr_tags + set * NUM_WAYS;
                 for (uint32_t j = 0; j < NUM_WAYS; j++)
                 {
                     auto tag = set_ways[j];
-                    IndexT stored_key = static_cast<IndexT>(tag * this->num_sets_ + set);
+                    IndexT stored_key = embed_cache_construct_key<IndexT>(tag, set, this->num_sets_);
                     if (stored_key == input_key)
                     {
                         //hit
-                        set_ways[j] = static_cast<TagT>(-1);
+                        set_ways[j] = this->config_.sentinel_key;
                         assert(context->list->num_entries <= context->max_update_sz);
-                        context->list->entries[context->list->num_entries++] = {nullptr, nullptr, static_cast<uint32_t>(set), j, static_cast<TagT>(INVALID_IDX)};
+                        context->list->entries[context->list->num_entries++] = {nullptr, nullptr, static_cast<uint32_t>(set), j, this->config_.sentinel_key};
                     }
                 }
             }
@@ -195,7 +196,7 @@ public:
     {
         try 
         {
-            std::fill(this->h_tags_, this->h_tags_ + this->num_sets_ * NUM_WAYS * this->config_.num_tables, static_cast<TagT>(INVALID_IDX));
+            std::fill(this->h_tags_, this->h_tags_ + this->num_sets_ * NUM_WAYS * this->config_.num_tables, this->config_.sentinel_key);
             std::fill(this->h_counters_, this->h_counters_ + this->num_sets_ * NUM_WAYS * this->config_.num_tables, 0);
             CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(this->d_tags_, this->h_tags_, this->num_sets_*sizeof(TagT) * NUM_WAYS* this->config_.num_tables, cudaMemcpyDefault, stream));
 
@@ -248,13 +249,13 @@ public:
             for (size_t i = 0; (i < num_keys) && (insertMap.size() < context->max_update_sz); i++ )
             {
                 IndexT index = keys[i];
-                uint64_t set = index % this->num_sets_;
+                uint64_t set = embed_cache_hash_set_idx(index, this->num_sets_);
                 TagT* set_ways = curr_tags + set * NUM_WAYS;
                 bool found = false;
                 for (uint32_t j = 0; j < NUM_WAYS; j++)
                 {
                     auto tag = set_ways[j];
-                    IndexT key = static_cast<IndexT>(tag * this->num_sets_ + set);
+                    IndexT key = embed_cache_construct_key<IndexT>(tag, set, this->num_sets_);
                     if (key == index)
                     {
                         //hit
@@ -277,7 +278,7 @@ public:
                     if (!insertMap.count(hashkey))
                     {
                         *candidate = priority[i];
-                        set_ways[candidate_index] = static_cast<TagT>(index / this->num_sets_);
+                        set_ways[candidate_index] = embed_cache_construct_tag<TagT>(index, this->num_sets_);
                         int8_t* dst = curr_cache + ( set * NUM_WAYS + candidate_index ) * this->config_.embed_width_in_bytes;
                         TagT tag = *(curr_tags + set * NUM_WAYS + candidate_index);
                         // the insert map make sure we will only put one item per (set,way) pair
@@ -390,7 +391,7 @@ public:
                 for (size_t j = 0; j < NUM_WAYS; j++)
                 {
                     TagT tag = this->h_tags_[i * NUM_WAYS + j];
-                    if (tag == static_cast<TagT>(INVALID_IDX))
+                    if (tag == this->config_.sentinel_key)
                     {
                         continue;
                     }
@@ -435,7 +436,7 @@ private:
             
             auto dst_tags = this->d_tags_ + table_index * this->num_sets_ * NUM_WAYS;
 
-            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_invalidate_kernel<IndexT, TagT>(context->d_list, context->list->num_entries, dst_tags, stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_invalidate_kernel<IndexT, TagT>(context->d_list, context->list->num_entries, dst_tags, this->config_.sentinel_key, stream)));
             CACHE_CUDA_ERR_CHK_AND_THROW(cudaStreamSynchronize(stream));
             typename EmbedCacheSA<IndexT, TagT>::WriteLock lock(this->custom_flow_mutex_);
             {
@@ -480,12 +481,12 @@ private:
         for (uint32_t i = 0; (i < num_keys) && (context->list->num_entries < context->max_update_sz); i++)
         {
             auto index = keys[i];
-            IndexT set = static_cast<IndexT>(index % this->num_sets_);
+            IndexT set = static_cast<IndexT>(embed_cache_hash_set_idx(index, this->num_sets_));
             TagT* set_ways = curr_tags + set * NUM_WAYS;
             for (uint32_t j = 0; j < NUM_WAYS; j++)
             {
                 auto tag = set_ways[j];
-                IndexT key = static_cast<IndexT>(tag * this->num_sets_ + set);
+                IndexT key = embed_cache_construct_key<IndexT>(tag, set, this->num_sets_);
                 if (key == index)
                 {
                     //hit

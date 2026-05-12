@@ -90,8 +90,8 @@ int main(int argc, char* argv[]) {
     }
     std::shared_ptr<nve::StreamWrapperBase> keys_sw = std::make_shared<nve::InputFileStreamWrapper>(keys_filename);
     std::shared_ptr<nve::StreamWrapperBase> values_sw = std::make_shared<nve::InputFileStreamWrapper>(values_filename);
-    nve::NumpyTensorFileFormat keys_file_reader(keys_sw);
-    nve::NumpyTensorFileFormat values_file_reader(values_sw);
+    nve::NumpyTensorFileFormat keys_file_reader(std::move(keys_sw));
+    nve::NumpyTensorFileFormat values_file_reader(std::move(values_sw));
     auto keys_shape = keys_file_reader.get_shape();
     auto values_shape = values_file_reader.get_shape();
     if ((keys_shape.size() != 1) ||
@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
 
     // Create host table
     LogVerbose(verbose, std::string("Creating Host table"));
-    std::vector<std::string> plugin_names{"nvhm"};
+    std::vector<std::string> plugin_names{"libnve-plugin-nvhm.so"};
     nve::load_host_table_plugins(plugin_names.begin(), plugin_names.end());
     // We don't limit the size of the host table (to do that, use the overflow policy arg)
     nlohmann::json nvhm_conf = {{"mask_size", 8},
@@ -131,7 +131,6 @@ int main(int argc, char* argv[]) {
                                 {"initial_capacity", 1024},
                                 {"value_alignment", 32},
                             };
-    nve::load_host_table_plugins(plugin_names.begin(), plugin_names.end());
     nve::host_table_factory_ptr_t nvhm_fac{
         nve::create_host_table_factory(R"({"implementation": "nvhm_map"})"_json)};
     auto host_tab = nvhm_fac->produce(0, nvhm_conf);

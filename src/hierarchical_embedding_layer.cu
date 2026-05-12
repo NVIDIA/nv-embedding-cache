@@ -42,7 +42,7 @@ context_ptr_t HierarchicalEmbeddingLayer<KeyType>::create_execution_context(
   for (auto& t : tables_) {
     auto ctx = t->create_execution_context(lookup_stream, modify_stream, thread_pool, actual_allocator);
     NVE_CHECK_(ctx != nullptr, "Failed to create table execution context");
-    table_contexts.push_back(ctx);
+    table_contexts.push_back(std::move(ctx));
   }
   return std::make_shared<LayerExecutionContext>(
     lookup_stream,
@@ -74,6 +74,10 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
     }
     NVE_CHECK_(table->get_max_row_size() == tables_.at(0)->get_max_row_size(), "All layer tables must have the same row size");
   }
+  if (config_.default_embedding.size() > 0) {
+    NVE_CHECK_(tables_.at(0)->get_max_row_size() == static_cast<int64_t>(config_.default_embedding.size()), "Default embedding row size must match table row size");
+    NVE_CHECK_((*tables_.rbegin())->get_device_id() < 0, "Default embedding row requires last table to be on host");
+  }
   auto heuristic = config_.insert_heuristic;
   if (!heuristic) {
     // Build default thresholds: DEFAULT_THRESHOLD for GPU and host tables, 0.0 for the last host table
@@ -97,6 +101,7 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
   for (size_t i=0 ; i < tables_.size() ; i++) {
     auto table = tables_.at(i);
     bool gpu_table = (table->get_device_id() >= 0);
+    KeyType invalid_key = static_cast<KeyType>(table->get_invalid_key());
     auto_insert_handlers_.push_back(std::make_shared<AutoInsertHandler>(
       heuristic,
       table,
@@ -105,7 +110,8 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
       gpu_table ? config_.min_insert_freq_gpu : config_.min_insert_freq_host,
       gpu_table ? config_.min_insert_size_gpu : config_.min_insert_size_host,
       sizeof(KeyType),
-      gpu_device_
+      gpu_device_,
+      &invalid_key
     ));
   }
 }
@@ -171,13 +177,68 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
     // Call table->find and collect counters
     table->reset_lookup_counter(table_ctx);
     std::shared_ptr<BufferWrapper<int64_t>> value_sizes{nullptr}; // for now variable value size is not supported at the layer level
-    table->find_bw(table_ctx, num_keys, keys_bw, hitmask_bw, output_stride, output_bw, value_sizes);
+    table->find_bw(table_ctx, num_keys, keys_bw, hitmask_bw, output_stride, output_bw, std::move(value_sizes));
     table->get_lookup_counter(table_ctx, table_hits.data() + i);
   }
 
-  // Combine hits
+  // Handle hit counters
   const bool first_table_on_gpu = (*tables_.begin())->get_device_id() >= 0;
   const bool last_table_on_host = (*tables_.rbegin())->get_device_id() < 0;
+  if (first_table_on_gpu && !last_table_on_host) {
+    NVE_CHECK_(cudaStreamSynchronize(lookup_stream)); // Synchronizing for reading counters from at least one gpu table
+    // Optimized out when we have both GPU and CPU tables and final output is on GPU
+    // in this case we already had a sync copying the hitmask from GPU to CPU
+  }
+  int64_t left_keys = num_keys;
+  for (size_t i=0; i<table_hits.size(); i++) {
+    if (tables_.at(i)->lookup_counter_hits() == false) {
+      // Table counts misses
+      table_hits.at(i) = left_keys - table_hits.at(i);
+    }
+    const auto hits = table_hits.at(i);
+    table_hitrates[i] = static_cast<float>(hits) / static_cast<float>(left_keys);
+    left_keys -= hits;
+  }
+  // Update hitrates
+  if (hitrates) {
+    for (size_t i=0 ; i<num_tables ; i++) {
+      hitrates[i] = static_cast<float>(table_hits[i]) / static_cast<float>(num_keys);
+    }
+  }
+
+  // Handle default embedding
+  if ((left_keys > 0) && (config_.default_embedding.size() > 0)) {
+    NVE_ASSERT_((*tables_.rbegin())->get_device_id() < 0); // Last table must be on host (checked during construction)
+                                                           // Relying on this to have triggered a sync if needed (copying hitmask from gpu to host)
+
+    // Get buffers (shouldn't trigger any copy since last layer was already on host)
+    auto* hit_mask_buf = hitmask_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, ctx->get_lookup_stream());
+    auto* output_buf = output_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, ctx->get_lookup_stream());
+
+    // Fill default embedding rows for keys missing from all tables, in parallel via the context's thread pool.
+    auto thread_pool = layer_ctx->get_thread_pool();
+    const int64_t num_workers = thread_pool->num_workers();
+    const int64_t keys_per_task = std::max<int64_t>(1, (num_keys + num_workers - 1) / num_workers);
+    const int64_t num_tasks = (num_keys + keys_per_task - 1) / keys_per_task;
+    const auto row_size = static_cast<size_t>(tables_.at(0)->get_max_row_size());
+    const uint8_t* default_emb = config_.default_embedding.data();
+    auto* output_bytes = static_cast<uint8_t*>(output_buf);
+
+    const auto fill_default_task = [=](const int64_t idx) {
+      const int64_t start_key = idx * keys_per_task;
+      const int64_t end_key = std::min<int64_t>(start_key + keys_per_task, num_keys);
+      for (int64_t k = start_key; k < end_key; k++) {
+        const auto elem = hit_mask_buf[k / hitmask_elem_bits];
+        const auto bit = (elem >> (k % hitmask_elem_bits)) & static_cast<max_bitmask_repr_t>(1);
+        if (bit == 0) {
+          std::memcpy(output_bytes + k * output_stride, default_emb, row_size);
+        }
+      }
+    };
+    thread_pool->execute_n(0, num_tasks, fill_default_task);
+  }
+
+  // Combine hits
   auto h_output = output_bw->get_buffer(cudaMemoryTypeHost);
   bool unregistered_output = false;
   if (h_output == nullptr) {
@@ -199,7 +260,7 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
       static_cast<uint32_t>(tables_.at(0)->get_max_row_size()),
       static_cast<uint32_t>(output_stride),
       static_cast<uint32_t>(output_stride),
-      reinterpret_cast<uint64_t*>(hitmask_bw->get_buffer(cudaMemoryTypeDevice)),
+      reinterpret_cast<uint64_t*>(hitmask_bw->get_buffer(cudaMemoryTypeDevice)), // We use the GPU hitmask to copy everything missed by the GPU table (potentially default values too)
       static_cast<int32_t>(num_keys),
       lookup_stream);
   }
@@ -216,40 +277,18 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
     NVE_CHECK_(cudaMemcpyAsync(output_hitmask, final_hitmask, hitmask_buffer_size, cudaMemcpyDefault, lookup_stream));
   }
 
-  // Handle counters
-  if (gpu_device_ >= 0) {
-    NVE_CHECK_(cudaStreamSynchronize(lookup_stream)); // Synchronizing for reading counters from at least one gpu table
-    // todo: can optimize this out when we have both GPU and CPU tables and final output is on GPU
-    // in this case we already had a sync copying the hitmask from GPU to CPU
-  }
-  int64_t left_keys = num_keys;
-  for (size_t i=0; i<table_hits.size(); i++) {
-    if (tables_.at(i)->lookup_counter_hits() == false) {
-      // Table counts misses
-      table_hits.at(i) = left_keys - table_hits.at(i);
-    }
-    const auto hits = table_hits.at(i);
-    table_hitrates[i] = static_cast<float>(hits) / static_cast<float>(left_keys);
-    left_keys -= hits;
-  }
-
   // Handle automatic inserts
   if (!auto_insert_handlers_.empty()) {
     for (size_t i=0; i<table_hits.size(); i++) {
-      auto_insert_handlers_.at(i)->auto_insert(layer_ctx, keys_bw, output_bw, table_hitrates[i], num_keys, output_stride);
+      auto_insert_handlers_.at(i)->auto_insert(
+        layer_ctx, keys_bw, output_bw, table_hitrates[i], num_keys, output_stride,
+        (left_keys > 0) ? hitmask_bw : nullptr // If there are no unbresolved keys then we can skip processing the hitmask
+      );
     }
   }
 
   if (pool_params) {
-    // Either all keys were resolved or we allow default values for misses
-    NVE_ASSERT_(((gpu_hits + host_hits + remote_hits) == num_keys) || pool_params->default_values);
     NVE_THROW_NOT_IMPLEMENTED_();
-  }
-
-  if (hitrates) {
-    for (size_t i=0 ; i<num_tables ; i++) {
-      hitrates[i] = static_cast<float>(table_hits[i]) / static_cast<float>(num_keys);
-    }
   }
 }
 
@@ -279,7 +318,7 @@ void HierarchicalEmbeddingLayer<KeyType>::insert(context_ptr_t& ctx, const int64
 
   auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
   auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx, "values", values, values_buffer_size);
-  table->insert_bw(table_ctx, num_keys, keys_bw, value_stride, value_size, values_bw);
+  table->insert_bw(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
 }
 
 template <typename KeyType>
@@ -307,7 +346,7 @@ void HierarchicalEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
-    table->update_bw(table_ctx, num_keys, keys_bw, value_stride, value_size, values_bw);
+    table->update_bw(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
@@ -340,7 +379,7 @@ void HierarchicalEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const i
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
-    table->update_accumulate_bw(table_ctx, num_keys, keys_bw, value_stride, value_size, values_bw, value_type);
+    table->update_accumulate_bw(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw), value_type);
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
@@ -398,7 +437,7 @@ void HierarchicalEmbeddingLayer<KeyType>::erase(context_ptr_t& ctx, const int64_
   if (!auto_insert_handlers_.empty()) {
     auto_insert_handlers_.at(table_id)->lock_modify();
   }
-  table->erase_bw(table_ctx, num_keys, keys_bw);
+  table->erase_bw(table_ctx, num_keys, std::move(keys_bw));
   if (!auto_insert_handlers_.empty()) {
     auto_insert_handlers_.at(table_id)->unlock_modify();
   }

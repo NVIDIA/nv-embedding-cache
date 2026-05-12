@@ -103,7 +103,7 @@ int main() {
   /* -- Step 2: phmap host table (L2 cache) --------------------------------- */
   printf("\n[2] Creating phmap host table (L2 cache)...\n");
 
-  CHECK_NVE(nve_load_host_table_plugin("phmap"));
+  CHECK_NVE(nve_load_host_table_plugin("libnve-plugin-phmap.so"));
 
   nve_host_factory_t phmap_factory = nullptr;
   CHECK_NVE(nve_create_host_table_factory(
@@ -131,7 +131,7 @@ int main() {
   // Load the custom_remote plugin — this is the custom remote table
   // implementation that lives in libnve-plugin-custom_remote.so.
   // See plugins/custom_remote/ for the source.
-  CHECK_NVE(nve_load_host_table_plugin("custom_remote"));
+  CHECK_NVE(nve_load_host_table_plugin("libnve-plugin-custom_remote.so"));
 
   nve_host_factory_t remote_factory = nullptr;
   CHECK_NVE(nve_create_host_table_factory(

@@ -17,6 +17,7 @@
 
 #pragma once
 #include "ec_set_associative.h"
+#include "ec_set_associative.cuh"
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
@@ -68,9 +69,11 @@ public:
         ModifyContext* context = nullptr;
         try
         {
-            // check erros
+            // check errors
             CHECK_ERR_AND_THROW(this->allocator_->host_allocate((void**)&context, sizeof(ModifyContext)));
             memset(context, 0, sizeof(ModifyContext));
+            // New context is not published until out_handle.handle is assigned below.
+            // coverity[MISSING_LOCK]
             CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&context->d_list, sizeof(ModifyList)));
             CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&context->d_entries, max_update_size * sizeof(ModifyEntry)));
 
@@ -92,6 +95,7 @@ public:
                 this->num_sets_,
                 context->max_update_sz,
                 context->d_list,
+                this->config_.sentinel_key,
                 0)));
 
             CHECK_ERR_AND_THROW(this->allocator_->device_allocate((void**)&context->d_tmp_storage, context->tmp_storage_sz));
@@ -121,6 +125,8 @@ public:
     {
         try
         {
+            std::lock_guard<std::mutex> lock(modify_mutex_);
+
             CacheSADeviceModify::ModifyContext* context = (CacheSADeviceModify::ModifyContext*)out_handle.handle;
             if (!context)
             {
@@ -137,7 +143,6 @@ public:
         {
            LOG_ERROR_AND_RETURN(e);
         }
-        
     }
 
     ECError invalidate(
@@ -151,7 +156,7 @@ public:
         try
         {
             std::lock_guard<std::mutex> lock(modify_mutex_);
-            
+
             ModifyContext* context = (ModifyContext*)modify_context_handle.handle;
             if (!context)
             {
@@ -167,7 +172,7 @@ public:
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetInvalidateData<IndexT, TagT, NUM_WAYS>(
                 keys, num_keys, this->num_sets_, dst_tags, context->max_update_sz,
-                context->d_list, stream)));
+                context->d_list, this->config_.sentinel_key, stream)));
 
             invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
@@ -197,9 +202,9 @@ public:
 
     virtual ECError clear_cache(cudaStream_t stream) override
     {
-        try 
+        try
         {
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemsetAsync(this->d_tags_, INVALID_IDX, this->num_sets_*sizeof(TagT) * NUM_WAYS* this->config_.num_tables, stream));
+            CACHE_CUDA_ERR_CHK_AND_THROW(call_fill_tags<TagT>(this->d_tags_, this->num_sets_ * NUM_WAYS * this->config_.num_tables, this->config_.sentinel_key, stream));
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -252,6 +257,7 @@ public:
                 this->num_sets_,
                 context->max_update_sz,
                 context->d_list,
+                this->config_.sentinel_key,
                 stream)));
 
             invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
@@ -300,7 +306,7 @@ public:
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetUpdateData<IndexT, TagT, NUM_WAYS>(
                 cache_ptr, d_values, keys, num_keys, this->num_sets_, stride, this->config_.embed_width_in_bytes, dst_tags,
-                context->max_update_sz, context->d_list, stream)));
+                context->max_update_sz, context->d_list, this->config_.sentinel_key, stream)));
 
             invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
@@ -349,7 +355,7 @@ public:
 
             CACHE_CUDA_ERR_CHK_AND_THROW((ComputeSetUpdateData<IndexT, TagT, NUM_WAYS>(
                 cache_ptr, d_values, keys, num_keys, this->num_sets_, stride, this->config_.embed_width_in_bytes, dst_tags,
-                context->max_update_sz, context->d_list, stream)));
+                context->max_update_sz, context->d_list, this->config_.sentinel_key, stream)));
 
             invalidate_tags_and_sync(context, num_keys, dst_tags, sync_event, stream);
 
@@ -389,7 +395,7 @@ public:
                 for (size_t j = 0; j < NUM_WAYS; j++)
                 {
                     TagT tag = this->h_tags_[i * NUM_WAYS + j];
-                    if (tag == static_cast<TagT>(INVALID_IDX))
+                    if (tag == this->config_.sentinel_key)
                     {
                         continue;
                     }
@@ -415,7 +421,7 @@ private:
         try 
         {
             
-            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_invalidate_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_entries), tags, stream)));
+            CACHE_CUDA_ERR_CHK_AND_THROW((call_tag_invalidate_kernel<IndexT, TagT>(context->d_list, static_cast<uint32_t>(num_entries), tags, this->config_.sentinel_key, stream)));
 
             CACHE_CUDA_ERR_CHK_AND_THROW(cudaStreamSynchronize(stream));  
             {
@@ -451,7 +457,7 @@ private:
         return CACHE_ALIGN(sizeof(CounterT) * NUM_WAYS, 16);
     }
 
-    std::mutex modify_mutex_;
-    CounterT* d_counters_; // device allocated counters to modify
+    mutable std::mutex modify_mutex_;
+    CounterT* d_counters_ = nullptr; // device allocated counters to modify
 };
 }

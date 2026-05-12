@@ -10,12 +10,12 @@ These simple samples are meant to show basic API usage, and ignore any efficienc
 |-|-|-|
 |C++ simple sample|[../samples/simple_cpp/](../samples/simple_cpp/)|Basic API usage in C++ (single layer lookup)|
 |C API sample|[../samples/c_api/](../samples/c_api/)|Hierarchical layer with GPU cache and NVHM host table using the C API|
-|C API custom remote plugin|[../samples/c_api_custom_remote/](../samples/c_api_custom_remote/)|Custom remote host table plugin with three-tier hierarchical layer using the C API|
 |Embedding cache simple_sample|[../samples/ecache/simple_sample/](../samples/ecache/simple_sample/)|Basic API usage for the GPU embedding cache with mock system memory cache and parameter server|
 |PyTorch API|[../samples/pytorch/simple_sample/](../samples/pytorch/simple_sample/)|Simple pytorch usage|
 |Import Dynamic Embedding (C++)|[../samples/import_sample](../samples/import_sample)|Import embeddings trained with the Dynamic Embedding SDK (see: [NVIDIA/recsys-examples](https://github.com/NVIDIA/recsys-examples))|
 |Import Dynamic Embedding (Py)|[../samples/pytorch/simple_sample/](../samples/pytorch/simple_sample/)|The [simple_hierarchical_embedding](../samples/pytorch/simple_sample/simple_hierarchical_embedding.py) sample demonstrates importing of embeddings trained with the Dynamic Embedding SDK (see: [NVIDIA/recsys-examples](https://github.com/NVIDIA/recsys-examples))|
 |Load Checkpoint Sample|[../samples/pytorch/load_checkpoint_sample](../samples/pytorch/load_checkpoint_sample/)| Shows an example of how to load a saved torch.distributed.checkpoint into a NVE implementation of a saved model|
+|Export Sample (Py)|[../samples/pytorch/export_sample/](../samples/pytorch/export_sample/)|Export and reload a Hierarchical `NVEmbedding` with a remote parameter server — `simple_remote_ps_export.py` uses an NVHashMap-backed PS, `custom_remote_ps_export.py` uses a user-defined host-table plugin|
 ||[]()||
 
 ## Advanced Samples
@@ -26,5 +26,7 @@ These samples demonstrate more complex usages.
 |-|-|-|
 |Layer sample|[../samples/layer_sample/](../samples/layer_sample/)|Layer inference (lookup)|
 |PyTorch Inference|[../samples/pytorch/inference_sample/](../samples/pytorch/inference_sample/)|Multi threaded inference with parallel updates|
+|C API custom remote plugin|[../samples/c_api_custom_remote/](../samples/c_api_custom_remote/)|Custom remote host table plugin with three-tier hierarchical layer using the C API|
 |Triton Inference Server|[../samples/triton_server_sample/](../samples/triton_server_sample/)|Inference deployment using [NVIDIA Triton Inference Server](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/introduction/index.html)|
+|C++ Inference|[../samples/cpp_inference/](../samples/cpp_inference/)|End-to-end C++ inference of an NVEmbedding model exported from Python via AOTInductor — supports both LinearUVM and Hierarchical (plugin-backed remote PS) modes|
 ||[]()||

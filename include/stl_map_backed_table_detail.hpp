@@ -75,6 +75,8 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
       const auto it{part.slot_map.find(key)};
       if (it == part.slot_map.end()) continue;
 
+      // Protected by part.read_write above; Coverity merges lock evidence across template instantiations.
+      // coverity[MISSING_LOCK]
       part.available_slots.emplace_back(it->second);
       part.slot_map.erase(it);
     }
@@ -177,6 +179,8 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
       {
         const auto it{part.slot_map.find(key)};
         if (it != part.slot_map.end()) {
+          // Protected by part.read_write above; Coverity merges lock evidence across template instantiations.
+          // coverity[MISSING_LOCK]
           std::copy_n(&values[i * value_stride], value_size, it->second);
           continue;
         }
@@ -314,6 +318,8 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
       const auto it{part.slot_map.find(key)};
       if (it == slot_map_end) continue;
 
+      // Protected by part.read_write above; Coverity merges lock evidence across template instantiations.
+      // coverity[MISSING_LOCK]
       std::copy_n(&values[i * value_stride], value_size, it->second);
     }
   }};
@@ -352,6 +358,8 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
       const auto it{part.slot_map.find(key)};
       if (it == slot_map_end) continue;
 
+      // Protected by part.read_write above; Coverity merges lock evidence across template instantiations.
+      // coverity[MISSING_LOCK]
       update_kernel(it->second, &updates[i * update_stride], update_size);
     }
   }};
@@ -422,6 +430,8 @@ int64_t STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerTy
 
           const auto pos{slot_map.find(key)};
           if (pos == slot_map_end) continue;
+          // Protected by the shared lock above; Coverity does not model std::shared_lock here.
+          // coverity[MISSING_LOCK]
           char* const __restrict src{pos->second};
 
           // TODO: Support variable length vector sizes.

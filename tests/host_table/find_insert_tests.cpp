@@ -105,24 +105,24 @@ TEST(find_insert_find, stl_map_table) { find_insert_find(R"({"implementation": "
 
 TEST(find_insert_find, nvhm_table) {
   SKIP_IF_NVHM_UNAVAILABLE();
-  load_host_table_plugin("nvhm");
+  load_host_table_plugin(nve_test::plugin_full_path("nvhm"));
   find_insert_find(R"({"implementation": "nvhm_map"})"_json);
 }
 
 TEST(find_insert_find, abseil_flat_map_table) {
   SKIP_IF_ABSEIL_UNAVAILABLE();
-  load_host_table_plugin("abseil");
+  load_host_table_plugin(nve_test::plugin_full_path("abseil"));
   find_insert_find(R"({"implementation": "abseil_flat_map"})"_json);
 }
 
 TEST(find_insert_find, phmap_flat_map_table) {
   SKIP_IF_PHMAP_UNAVAILABLE();
-  load_host_table_plugin("phmap");
+  load_host_table_plugin(nve_test::plugin_full_path("phmap"));
   find_insert_find(R"({"implementation": "phmap_flat_map"})"_json);
 }
 
 TEST(find_insert_find, rocksdb_table) {
   SKIP_IF_ROCKSDB_UNAVAILABLE();
-  load_host_table_plugin("rocksdb");
+  load_host_table_plugin(nve_test::plugin_full_path("rocksdb"));
   find_insert_find(R"({"implementation": "rocksdb"})"_json);
 }

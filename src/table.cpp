@@ -35,7 +35,7 @@ class TableExecutionContext: public ExecutionContext {
     cudaStream_t modify_stream,
     thread_pool_ptr_t thread_pool,
     allocator_ptr_t allocator)
-    : base_type(lookup_stream, modify_stream, thread_pool, allocator) {}
+    : base_type(lookup_stream, modify_stream, std::move(thread_pool), std::move(allocator)) {}
 
   ~TableExecutionContext() override = default;
 };

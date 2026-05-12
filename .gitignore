@@ -19,3 +19,4 @@ python/pynve.egg-info/
 # misc
 .devcontainer/.env
 .cache/
+.claude/

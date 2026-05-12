@@ -18,6 +18,7 @@
 #include <distributed.hpp>
 #include <common.hpp>
 #include <cuda_support.hpp>
+#include <cerrno>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -29,8 +30,9 @@
 do { \
   auto res = (_expr_); \
   if (res != 0) { \
+    const int err = (res < 0) ? errno : static_cast<int>(res); \
     std::ostringstream oss; \
-    oss << "Error (" << std::strerror(res) << ") at " << __FILE__ << ":" << __LINE__ << " :: " #_expr_ << std::endl; \
+    oss << "Error (" << std::strerror(err) << ") at " << __FILE__ << ":" << __LINE__ << " :: " #_expr_ << std::endl; \
     throw std::runtime_error(oss.str());\
   } \
 } while (0);
@@ -121,6 +123,7 @@ void CUDADistributedBuffer::init_single_host(uint64_t size, BufferLocation locat
   const bool root_proc = (env_->rank() == 0);
   NVE_CHECK_(env_->single_host());
   num_shards_ = collect_devices(all_devices_);
+  NVE_CHECK_(num_shards_ > 0);
   const size_t world_size = env_->world_size();
 
   CUmemAllocationProp prop = {};
@@ -133,7 +136,7 @@ void CUDADistributedBuffer::init_single_host(uint64_t size, BufferLocation locat
 
   // Round shard to multiple of num_shards_ * granularity (need every shard to be aligned to granularity)
   total_size_ = ROUND_UP(size, num_shards_ * granularity);
-  shard_size_ = total_size_ / num_shards_;
+  shard_size_ = num_shards_ ? total_size_ / num_shards_ : 0;
 
   // Rank 0 should do all cuMemCreate and export
   std::vector<int> shareable_handles(world_size, -1);
@@ -235,6 +238,7 @@ void CUDADistributedBuffer::init_multi_host(uint64_t size) {
 
   const auto local_device = env_->local_device();
   num_shards_ = collect_devices(all_devices_);
+  NVE_CHECK_(num_shards_ > 0);
   const size_t world_size = env_->world_size();
 
   CUmemAllocationProp prop = {};
@@ -247,7 +251,7 @@ void CUDADistributedBuffer::init_multi_host(uint64_t size) {
 
   // Round shard to multiple of num_shards_ * granularity (need every shard to be aligned to granularity)
   total_size_ = ROUND_UP(size, num_shards_ * granularity);
-  shard_size_ = total_size_ / num_shards_;
+  shard_size_ = num_shards_ ? total_size_ / num_shards_ : 0;
 
   // Allocate & export handle
   CUmemFabricHandle fabric_handle = {};

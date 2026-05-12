@@ -1,6 +1,10 @@
 # Requirements for benchmarks
---extra-index-url https://download.pytorch.org/whl/
-fbgemm_gpu==1.5.0+cu130
+
+# Workaround for SHA mismatch in https://download.pytorch.org/whl/
+fbgemm-gpu @ https://download-r2.pytorch.org/whl/cu130/fbgemm_gpu-1.5.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl
+# --extra-index-url https://download.pytorch.org/whl/
+# fbgemm_gpu==1.5.0+cu130
+
 git+https://github.com/meta-pytorch/torchrec.git@v1.5.0-rc2
 mpi4py==4.1.1
 nvtx==0.2.14

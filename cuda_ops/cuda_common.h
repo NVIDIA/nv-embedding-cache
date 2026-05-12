@@ -38,23 +38,23 @@ inline void ECAssert_(ErrType code, const char *file, int line, bool abort=true)
 class ScopedDevice
 {
 public:
-    ScopedDevice(int device_id) : m_device_id(device_id), m_curr_device(0), m_swap_device(false)
+    ScopedDevice(int device_id) : device_id_(device_id), curr_device_(0), swap_device_(false)
     {
-        NVE_CHECK_(cudaGetDevice(&m_curr_device));
-        m_swap_device = (m_device_id >= 0) && m_curr_device != m_device_id;
-        if (m_swap_device) {
-            NVE_CHECK_(cudaSetDevice(m_device_id));
+        NVE_CHECK_(cudaGetDevice(&curr_device_));
+        swap_device_ = (device_id_ >= 0) && curr_device_ != device_id_;
+        if (swap_device_) {
+            NVE_CHECK_(cudaSetDevice(device_id_));
         }
-        
+
     }
     ~ScopedDevice()
     {
-        if (m_swap_device) {
-            NVE_CHECK_(cudaSetDevice(m_curr_device));
+        if (swap_device_) {
+            NVE_CHECK_(cudaSetDevice(curr_device_));
         }
     }
 private:
-    int m_device_id;
-    int m_curr_device;
-    bool m_swap_device;
+    int device_id_;
+    int curr_device_;
+    bool swap_device_;
 };
