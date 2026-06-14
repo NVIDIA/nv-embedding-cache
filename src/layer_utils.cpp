@@ -227,7 +227,7 @@ void AutoInsertHandler::launch_insert(
       NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
       // Coverity complains about insert_keys_bw copied to the lambda function [=], leaving as intentional
       // coverity[COPY_INSTEAD_OF_MOVE]
-      table_->insert_bw(table_ctx, collected_keys_, std::move(insert_keys_bw), output_stride, table_->get_max_row_size(), std::move(insert_output_bw));
+      table_->insert(table_ctx, collected_keys_, std::move(insert_keys_bw), output_stride, table_->get_max_row_size(), std::move(insert_output_bw));
       insert_freq_cnt_ = min_insert_wait_; // reset freq counters
       collected_keys_ = 0; // clear collected keys
       insert_lock_.unlock();

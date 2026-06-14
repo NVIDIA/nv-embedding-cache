@@ -20,6 +20,7 @@ There are several layer types, differentiated by the embedding storage:
 1. [GPUEmbeddingLayer](../include/gpu_embedding_layer.hpp) holds all embedding data in GPU memory.
 2. [LinearUVMEmbeddingLayer](../include/linear_embedding_layer.hpp) holds the embedding data in linear system memory and also keeps a cache in GPU memory.
 3. [HierarchicalEmbeddingLayer](../include/hierarchical_embedding_layer.hpp) holds the embedding data in a remote parameter server (e.g. Redis or RocksDB) and optional caches in GPU and system memory.
+4. [HostEmbeddingLayer](../include/host_embedding_layer.hpp) holds all embedding data in host memory and runs lookup/update operations on CPU threads. It is intended for CPU-only inference.
 
 The main operations supported by layers are:
 1. Lookup: given a list of keys, return the embeddings rows corresponding to them. This can involve lookups in multiple tables and reading from local or remote memories, depending on the layer. This op may change the content of tables (see [insert heuristic](advanced.md#insert-heuristic)).
@@ -51,13 +52,10 @@ The main table API is in: [table.hpp](../include/table.hpp) and specific table t
 2. [NvhmMapTable](../plugins/nvhm/include/nvhm_map_table.hpp) - a table holding a cache in system memory based on the [nvHashMap](https://github.com/NVIDIA/nvhashmap) hashmap.
 3. [AbseilFlatMapTable](../plugins/abseil/include/abseil_flat_map_table.hpp) - a table holding a cache in system memory based on the [Abseil](https://github.com/abseil/abseil-cpp) library.
 4. [PHMapFlatMapTable](../plugins/phmap/include/phmap_flat_map_table.hpp) - a table holding a cache in system memory based on the [parallel-hashmap](https://github.com/greg7mdp/parallel-hashmap) library.
-5. [RedisClusterTable](../plugins/redis/include/redis_cluster_table.hpp) - a table accessing a remote [Redis](https://redis.io/) cluster.
+5. [RedisClusterTable](../plugins/redis/include/redis_cluster_table.hpp) - a table accessing a remote [Redis](https://redis.io/) deployment: either a Redis **Cluster** (hash-sharded) or a **standalone single-node** server using Redis strings. The mode is selected with the `single_node` factory option. In standalone string mode `num_partitions` controls client-side parallelism (the MSET/MGET work is split across that many threads) while storage stays plain Redis strings.
 6. [RocksDBTable](../plugins/rocksdb/include/rocksdb_table.hpp) - a table accessing remote [RocksDB](https://rocksdb.org/) storage.
 
 Tables (except the GPUTable) are built separately as plugins, to reduce dependencies where possible.
-
-### Samples
-* TBD
 
 ## Low-level Componmenets API
 

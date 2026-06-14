@@ -13,12 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(kernel_unit_tests gpu_kernel_unit_tests.cu cpu_kernel_unit_tests.cpp)
+add_executable(kernel_unit_tests
+    gpu_kernel_unit_tests.cu
+    cpu_kernel_unit_tests.cpp
+    cpu_pooling_unit_tests.cpp
+    ../embedding_layer/emb_layer_utils.cpp)
 add_executable(gpu_insert_tests gpu_insert_tests.cu)
 
 include_directories(${PROJECT_SOURCE_DIR})
 include_directories(${PROJECT_SOURCE_DIR}/include/ecache)
 include_directories(${PROJECT_SOURCE_DIR}/samples/common)
+include_directories(${PROJECT_SOURCE_DIR}/tests/embedding_layer)
 
 target_link_libraries(kernel_unit_tests PUBLIC gtest_main nve-common)
 target_link_libraries(gpu_insert_tests PUBLIC gtest_main nve-common)

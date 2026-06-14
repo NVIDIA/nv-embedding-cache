@@ -62,9 +62,8 @@ class ToyModelSparse(nn.Module):
             self.env = TorchDistEnv()
             self.memblock = nve.DistMemBlock(self.env, num_embeddings, embedding_dim, nve.DataType_t.Float32)
             cache_size = 1024
-            self.cache_type = nve_layers.CacheType.LinearUVM
-            self.remote_interface = nve_ps.NVEParameterServer(0, embedding_dim, torch.float32, None) if self.cache_type == nve_layers.CacheType.Hierarchical else None
-            self.embed = nve_layers.NVEmbedding(num_embeddings, embedding_dim, torch.float32, cache_type=self.cache_type, memblock=self.memblock, gpu_cache_size=cache_size, remote_interface=self.remote_interface, optimize_for_training=False, device=device)
+            self.layer_type = nve_layers.LayerType.LinearUVM
+            self.embed = nve_layers.NVEmbedding(num_embeddings, embedding_dim, torch.float32, layer_type=self.layer_type, storage=self.memblock, gpu_cache_size=cache_size, optimize_for_training=False, device=device)
         elif embedding_type == EmbeddingType.TORCHREC:
             from torchrec.modules.embedding_modules import EmbeddingCollection
             from torchrec.modules.embedding_configs import EmbeddingConfig

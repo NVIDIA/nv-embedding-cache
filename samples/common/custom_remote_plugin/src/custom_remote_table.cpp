@@ -16,6 +16,7 @@
  */
 
 #include <custom_remote_table.hpp>
+#include <buffer_wrapper.hpp>
 
 #include <cstring>
 #include <stdexcept>
@@ -38,38 +39,55 @@ int64_t CustomRemoteTable::size(context_ptr_t& /*ctx*/, bool /*exact*/) const {
 }
 
 /* -- find ------------------------------------------------------------------ */
-void CustomRemoteTable::find(context_ptr_t& ctx, int64_t n, const void* keys,
-                             max_bitmask_repr_t* hit_mask, int64_t value_stride,
-                             void* values, int64_t* value_sizes) const {
-  const auto* typed_keys = static_cast<const int64_t*>(keys);
-  auto*       out        = static_cast<char*>(values);
+void CustomRemoteTable::find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+                             buffer_ptr<max_bitmask_repr_t> hit_mask, int64_t value_stride,
+                             buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const {
+  auto lookup_stream = ctx->get_lookup_stream();
+  const void* keys_buf = keys ? keys->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, lookup_stream)
+                              : nullptr;
+  max_bitmask_repr_t* hit_mask_buf =
+      hit_mask ? hit_mask->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, lookup_stream)
+               : nullptr;
+  void* values_buf = values ? values->access_buffer(cudaMemoryTypeUnregistered, false /*copy_content*/, lookup_stream)
+                            : nullptr;
+  int64_t* value_sizes_buf =
+      value_sizes ? value_sizes->access_buffer(cudaMemoryTypeUnregistered, false /*copy_content*/, lookup_stream)
+                  : nullptr;
+  const auto* typed_keys = static_cast<const int64_t*>(keys_buf);
+  auto*       out        = static_cast<char*>(values_buf);
   int64_t     hits       = 0;
 
   for (int64_t i = 0; i < n; ++i) {
-    if (hit_mask && ((hit_mask[i / 64] >> (i % 64)) & 1)) continue;
+    if (hit_mask_buf && ((hit_mask_buf[i / 64] >> (i % 64)) & 1)) continue;
 
     auto it = store_.find(typed_keys[i]);
     if (it == store_.end()) continue;
 
     if (out) {
       std::memcpy(out + i * value_stride, it->second.data(), static_cast<size_t>(row_size_));
-      if (value_sizes) value_sizes[i] = row_size_;
+      if (value_sizes_buf) value_sizes_buf[i] = row_size_;
     }
 
-    if (hit_mask) hit_mask[i / 64] |= (uint64_t{1} << (i % 64));
+    if (hit_mask_buf) hit_mask_buf[i / 64] |= (uint64_t{1} << (i % 64));
     ++hits;
   }
 
-  auto* counter = get_internal_counter(ctx);
+  auto* counter = lookup_counter_storage(ctx);
   if (counter) *counter += hits;
 }
 
 /* -- insert ---------------------------------------------------------------- */
-void CustomRemoteTable::insert(context_ptr_t& /*ctx*/, int64_t n,
-                               const void* keys, int64_t value_stride,
-                               int64_t value_size, const void* values) {
-  const auto* typed_keys = static_cast<const int64_t*>(keys);
-  const auto* in         = static_cast<const char*>(values);
+void CustomRemoteTable::insert(context_ptr_t& ctx, int64_t n,
+                               buffer_ptr<const void> keys, int64_t value_stride,
+                               int64_t value_size, buffer_ptr<const void> values) {
+  auto modify_stream = ctx->get_modify_stream();
+  const void* keys_buf = keys ? keys->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                              : nullptr;
+  const void* values_buf =
+      values ? values->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+             : nullptr;
+  const auto* typed_keys = static_cast<const int64_t*>(keys_buf);
+  const auto* in         = static_cast<const char*>(values_buf);
 
   for (int64_t i = 0; i < n; ++i) {
     auto& slot = store_[typed_keys[i]];
@@ -79,11 +97,17 @@ void CustomRemoteTable::insert(context_ptr_t& /*ctx*/, int64_t n,
 }
 
 /* -- update ---------------------------------------------------------------- */
-void CustomRemoteTable::update(context_ptr_t& /*ctx*/, int64_t n,
-                               const void* keys, int64_t value_stride,
-                               int64_t value_size, const void* values) {
-  const auto* typed_keys = static_cast<const int64_t*>(keys);
-  const auto* in         = static_cast<const char*>(values);
+void CustomRemoteTable::update(context_ptr_t& ctx, int64_t n,
+                               buffer_ptr<const void> keys, int64_t value_stride,
+                               int64_t value_size, buffer_ptr<const void> values) {
+  auto modify_stream = ctx->get_modify_stream();
+  const void* keys_buf = keys ? keys->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                              : nullptr;
+  const void* values_buf =
+      values ? values->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+             : nullptr;
+  const auto* typed_keys = static_cast<const int64_t*>(keys_buf);
+  const auto* in         = static_cast<const char*>(values_buf);
 
   for (int64_t i = 0; i < n; ++i) {
     auto it = store_.find(typed_keys[i]);
@@ -94,18 +118,24 @@ void CustomRemoteTable::update(context_ptr_t& /*ctx*/, int64_t n,
 }
 
 /* -- update_accumulate ----------------------------------------------------- */
-void CustomRemoteTable::update_accumulate(context_ptr_t& /*ctx*/, int64_t n,
-                                          const void* keys,
+void CustomRemoteTable::update_accumulate(context_ptr_t& ctx, int64_t n,
+                                          buffer_ptr<const void> keys,
                                           int64_t update_stride,
                                           int64_t update_size,
-                                          const void* updates,
+                                          buffer_ptr<const void> updates,
                                           DataType_t update_dtype) {
   if (update_dtype != DataType_t::Float32) {
     throw std::invalid_argument(
         "custom_remote plugin only supports update_dtype=Float32 in update_accumulate");
   }
-  const auto* typed_keys     = static_cast<const int64_t*>(keys);
-  const auto* in             = static_cast<const float*>(updates);
+  auto modify_stream = ctx->get_modify_stream();
+  const void* keys_buf = keys ? keys->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                              : nullptr;
+  const void* updates_buf =
+      updates ? updates->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr;
+  const auto* typed_keys     = static_cast<const int64_t*>(keys_buf);
+  const auto* in             = static_cast<const float*>(updates_buf);
   const int64_t floats_per_row = update_size / static_cast<int64_t>(sizeof(float));
   const int64_t float_stride   = update_stride / static_cast<int64_t>(sizeof(float));
 
@@ -122,9 +152,12 @@ void CustomRemoteTable::update_accumulate(context_ptr_t& /*ctx*/, int64_t n,
 /* -- clear / erase --------------------------------------------------------- */
 void CustomRemoteTable::clear(context_ptr_t& /*ctx*/) { store_.clear(); }
 
-void CustomRemoteTable::erase(context_ptr_t& /*ctx*/, int64_t n,
-                              const void* keys) {
-  const auto* typed_keys = static_cast<const int64_t*>(keys);
+void CustomRemoteTable::erase(context_ptr_t& ctx, int64_t n,
+                              buffer_ptr<const void> keys) {
+  const void* keys_buf = keys ? keys->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                                    ctx->get_modify_stream())
+                              : nullptr;
+  const auto* typed_keys = static_cast<const int64_t*>(keys_buf);
   for (int64_t i = 0; i < n; ++i) store_.erase(typed_keys[i]);
 }
 

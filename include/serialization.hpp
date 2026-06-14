@@ -118,16 +118,15 @@ public:
 
 private:
     static constexpr uint32_t VERSION_MAJOR = 0;
-    static constexpr uint32_t VERSION_MINOR = 1;
+    static constexpr uint32_t VERSION_MINOR = 2;
 
     struct TableKey {
         static constexpr uint64_t ROW_SIZE_BITS = 16;
         static constexpr uint64_t DATA_TYPE_BITS = 4;
         static constexpr uint64_t ROWS_BITS = 64 - (ROW_SIZE_BITS + DATA_TYPE_BITS);
-        static constexpr uint64_t AUX_BITS = 32;
-        static constexpr uint64_t RESERVED_BITS = 64 - (AUX_BITS);
-        uint64_t key1{0};
-        uint64_t key2{0};
+        static constexpr uint64_t ID_BITS = 64;
+        uint64_t key1{0}; // stores row_size, data_type and rows
+        uint64_t key2{0}; // stores id
     };
 
     struct TableEntry {

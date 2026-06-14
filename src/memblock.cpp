@@ -195,6 +195,24 @@ void* UserMemBlock::get_ptr() const {
     return ptr_;
 }
 
+HostMemBlock::HostMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype)
+    : HostMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype))) {}
+
+HostMemBlock::HostMemBlock(size_t size_to_alloc)
+    : MemBlock(MemBlockType::HOST), ptr_(nullptr), allocator_(GetDefaultAllocator()) {
+    NVE_CHECK_(allocator_ != nullptr);
+    NVE_CHECK_((allocator_->host_allocate(&ptr_, size_to_alloc)));
+    NVE_CHECK_(ptr_ != nullptr);
+}
+
+HostMemBlock::~HostMemBlock() {
+    allocator_->host_free(ptr_);
+}
+
+void* HostMemBlock::get_ptr() const {
+    return ptr_;
+}
+
 ManagedMemBlock::ManagedMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, const std::vector<int>& gpu_ids) 
     : ManagedMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype)), gpu_ids) {}
 
@@ -225,6 +243,28 @@ void* ManagedMemBlock::get_ptr() const {
 
 ManagedMemBlock::~ManagedMemBlock() {
     NVE_CHECK_(cudaFree(ptr_));
+}
+
+std::vector<int> resolve_memblock_devices(
+    MemBlockType type, int def_index,
+    const std::vector<int>& override)
+{
+    if (!override.empty()) {
+        return override;
+    }
+    if (type == MemBlockType::NVL) {
+        int num_gpus = 0;
+        NVE_CHECK_(cudaGetDeviceCount(&num_gpus));
+        NVE_CHECK_(def_index >= 0 && def_index < num_gpus,
+                   "resolve_memblock_devices: def_index=" + std::to_string(def_index) +
+                   " out of range, system has " + std::to_string(num_gpus) + " GPUs");
+        std::vector<int> ids;
+        ids.reserve(static_cast<size_t>(num_gpus - def_index));
+        for (int i = def_index; i < num_gpus; ++i)
+            ids.push_back(i);
+        return ids;
+    }
+    return {def_index};
 }
 
 } // namespace nve 

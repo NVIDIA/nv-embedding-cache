@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <buffer_wrapper.hpp>
 #include <execution_context.hpp>
 #include <host_table.hpp>
 #include <random>
@@ -64,20 +65,32 @@ void find_insert_find(const nlohmann::json& fac_json) {
 
     int64_t cnt;
 
+    const size_t keys_bytes = static_cast<size_t>(n) * sizeof(key_type);
+    const size_t hit_mask_bytes =
+        static_cast<size_t>(max_bitmask_t::mask_size(n)) * sizeof(max_bitmask_repr_t);
+
+    auto make_keys_bw = [&](const key_type* p) {
+      return std::make_shared<BufferWrapper<const void>>(ctx, "keys", p, keys_bytes);
+    };
+    auto make_hit_mask_bw = [&]() {
+      return std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+          ctx, "hit_mask", hit_mask.data(), hit_mask_bytes);
+    };
+
     std::fill(hit_mask.begin(), hit_mask.end(), 0);
     tab->reset_lookup_counter(ctx);
-    tab->find(ctx, n, keys.data(), hit_mask.data(), max_value_size, nullptr, nullptr);
+    tab->find(ctx, n, make_keys_bw(keys.data()), make_hit_mask_bw(), max_value_size, nullptr, nullptr);
     tab->get_lookup_counter(ctx, &cnt);
     ASSERT_EQ(cnt, 0);
-    tab->insert(ctx, n, keys.data(), value_stride, 0, nullptr);
+    tab->insert(ctx, n, make_keys_bw(keys.data()), value_stride, 0, nullptr);
     tab->reset_lookup_counter(ctx);
-    tab->find(ctx, n, keys.data(), hit_mask.data(), max_value_size, nullptr, nullptr);
+    tab->find(ctx, n, make_keys_bw(keys.data()), make_hit_mask_bw(), max_value_size, nullptr, nullptr);
     tab->get_lookup_counter(ctx, &cnt);
     ASSERT_EQ(cnt, n);
 
     std::fill(hit_mask.begin(), hit_mask.end(), max_bitmask_t::full());
     tab->reset_lookup_counter(ctx);
-    tab->find(ctx, n, keys.data(), hit_mask.data(), max_value_size, nullptr, nullptr);
+    tab->find(ctx, n, make_keys_bw(keys.data()), make_hit_mask_bw(), max_value_size, nullptr, nullptr);
     tab->get_lookup_counter(ctx, &cnt);
     ASSERT_EQ(cnt, 0);
 
@@ -88,7 +101,7 @@ void find_insert_find(const nlohmann::json& fac_json) {
     })};
     std::fill(hit_mask.begin(), hit_mask.end(), 0);
     tab->reset_lookup_counter(ctx);
-    tab->find(ctx, n, keys2.data(), hit_mask.data(), max_value_size, nullptr, nullptr);
+    tab->find(ctx, n, make_keys_bw(keys2.data()), make_hit_mask_bw(), max_value_size, nullptr, nullptr);
     tab->get_lookup_counter(ctx, &cnt);
     ASSERT_EQ(cnt, act_cnt);
 

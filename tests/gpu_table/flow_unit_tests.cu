@@ -16,6 +16,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <buffer_wrapper.hpp>
 #include <common.hpp>
 #include <cuda_ops/pipeline_gather.cuh>
 #include <include/ecache/ec_set_associative.cuh>
@@ -74,7 +75,12 @@ public:
         
         // Call the function under test
         try {
-            gpu_table_->find(ctx_, params.num_keys, d_keys_, nullptr, params.row_size_in_bytes, d_values_, nullptr);
+            auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+              ctx_, "keys", d_keys_, params.num_keys * sizeof(IndexT));
+            auto values_bw = std::make_shared<BufferWrapper<void>>(
+              ctx_, "values", d_values_, params.num_keys * params.row_size_in_bytes);
+            gpu_table_->find(ctx_, params.num_keys, std::move(keys_bw), nullptr,
+                                params.row_size_in_bytes, std::move(values_bw), nullptr);
             // Synchronize to ensure completion
             NVE_CHECK_(cudaStreamSynchronize(main_stream_));
 
@@ -104,7 +110,13 @@ private:
             }
         }
         NVE_CHECK_(cudaMemcpy(d_values_for_insert_, h_values.data(), params.num_keys_to_insert * params.row_size_in_bytes, cudaMemcpyHostToDevice));
-        gpu_table_->insert(ctx_, params.num_keys_to_insert, h_keys.data(), params.row_size_in_bytes, params.row_size_in_bytes, d_values_for_insert_);
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          ctx_, "keys", h_keys.data(), params.num_keys_to_insert * sizeof(IndexT));
+        auto values_bw = std::make_shared<BufferWrapper<const void>>(
+          ctx_, "values", d_values_for_insert_, params.num_keys_to_insert * params.row_size_in_bytes);
+        gpu_table_->insert(ctx_, params.num_keys_to_insert, std::move(keys_bw),
+                              params.row_size_in_bytes, params.row_size_in_bytes,
+                              std::move(values_bw));
         NVE_CHECK_(cudaDeviceSynchronize());
     }
 

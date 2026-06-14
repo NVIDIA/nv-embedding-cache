@@ -34,14 +34,26 @@
 // AtenTensorHandle is an opaque pointer (at::Tensor* underneath).
 // Input handles are BORROWED; output handles are OWNING (new at::Tensor*).
 // ---------------------------------------------------------------------------
+// The layer is located via the per-layer marker tensor's data_ptr (see
+// NVELayerRegistry). embedding_size / dtype are baked into the op only for the
+// Python meta/fake impl; the real kernels read shape+dtype from the binding, so
+// those scalars are not forwarded here.
 extern "C" {
 AtenTensorHandle nve_embedding_lookup_cuda(
-    AtenTensorHandle keys, int64_t layer_id);
+    AtenTensorHandle marker, AtenTensorHandle keys);
 
 AtenTensorHandle nve_embedding_lookup_with_pooling_cuda(
-    AtenTensorHandle keys, AtenTensorHandle offsets,
+    AtenTensorHandle marker, AtenTensorHandle keys, AtenTensorHandle offsets,
     AtenTensorHandle weights,  // nullptr when optional is empty
-    int64_t pooling_type, int64_t layer_id);
+    int64_t pooling_type);
+
+AtenTensorHandle nve_embedding_lookup_cpu(
+    AtenTensorHandle marker, AtenTensorHandle keys);
+
+AtenTensorHandle nve_embedding_lookup_with_pooling_cpu(
+    AtenTensorHandle marker, AtenTensorHandle keys, AtenTensorHandle offsets,
+    AtenTensorHandle weights,  // nullptr when optional is empty
+    int64_t pooling_type);
 }
 
 // ---------------------------------------------------------------------------
@@ -52,30 +64,57 @@ AtenTensorHandle nve_embedding_lookup_with_pooling_cuda(
 // tensor handle back to stack[0] with from().
 // ---------------------------------------------------------------------------
 
-// embedding_lookup(Tensor keys, int layer_id) -> Tensor
+// embedding_lookup(Tensor marker, Tensor keys, int embedding_size, int dtype) -> Tensor
+// embedding_size/dtype (stack[2]/stack[3]) are consumed by the Python fake only.
 static void embedding_lookup_cuda_boxed(
     StableIValue* stack, uint64_t /*num_inputs*/, uint64_t /*num_outputs*/)
 {
-    AtenTensorHandle keys = to<AtenTensorHandle>(stack[0]);
-    int64_t layer_id = to<int64_t>(stack[1]);
-    AtenTensorHandle result = nve_embedding_lookup_cuda(keys, layer_id);
+    AtenTensorHandle marker = to<AtenTensorHandle>(stack[0]);
+    AtenTensorHandle keys   = to<AtenTensorHandle>(stack[1]);
+    AtenTensorHandle result = nve_embedding_lookup_cuda(marker, keys);
     stack[0] = from(result);
 }
 
-// embedding_lookup_with_pooling(Tensor keys, Tensor offsets,
-//     Tensor? weights, int pooling_type, int layer_id) -> Tensor
+// embedding_lookup_with_pooling(Tensor marker, Tensor keys, Tensor offsets,
+//     Tensor? weights, int pooling_type, int embedding_size, int dtype) -> Tensor
 static void embedding_lookup_with_pooling_cuda_boxed(
     StableIValue* stack, uint64_t /*num_inputs*/, uint64_t /*num_outputs*/)
 {
-    AtenTensorHandle keys    = to<AtenTensorHandle>(stack[0]);
-    AtenTensorHandle offsets = to<AtenTensorHandle>(stack[1]);
-    auto weights_opt = to<std::optional<AtenTensorHandle>>(stack[2]);
-    int64_t pooling_type = to<int64_t>(stack[3]);
-    int64_t layer_id     = to<int64_t>(stack[4]);
+    AtenTensorHandle marker  = to<AtenTensorHandle>(stack[0]);
+    AtenTensorHandle keys    = to<AtenTensorHandle>(stack[1]);
+    AtenTensorHandle offsets = to<AtenTensorHandle>(stack[2]);
+    auto weights_opt = to<std::optional<AtenTensorHandle>>(stack[3]);
+    int64_t pooling_type = to<int64_t>(stack[4]);
     AtenTensorHandle weights_handle =
         weights_opt.has_value() ? weights_opt.value() : nullptr;
     AtenTensorHandle result = nve_embedding_lookup_with_pooling_cuda(
-        keys, offsets, weights_handle, pooling_type, layer_id);
+        marker, keys, offsets, weights_handle, pooling_type);
+    stack[0] = from(result);
+}
+
+// CPU dispatch — mirrors the CUDA boxed wrappers, just routes to the *_cpu
+// kernel which never touches the CUDA runtime.
+static void embedding_lookup_cpu_boxed(
+    StableIValue* stack, uint64_t /*num_inputs*/, uint64_t /*num_outputs*/)
+{
+    AtenTensorHandle marker = to<AtenTensorHandle>(stack[0]);
+    AtenTensorHandle keys   = to<AtenTensorHandle>(stack[1]);
+    AtenTensorHandle result = nve_embedding_lookup_cpu(marker, keys);
+    stack[0] = from(result);
+}
+
+static void embedding_lookup_with_pooling_cpu_boxed(
+    StableIValue* stack, uint64_t /*num_inputs*/, uint64_t /*num_outputs*/)
+{
+    AtenTensorHandle marker  = to<AtenTensorHandle>(stack[0]);
+    AtenTensorHandle keys    = to<AtenTensorHandle>(stack[1]);
+    AtenTensorHandle offsets = to<AtenTensorHandle>(stack[2]);
+    auto weights_opt = to<std::optional<AtenTensorHandle>>(stack[3]);
+    int64_t pooling_type = to<int64_t>(stack[4]);
+    AtenTensorHandle weights_handle =
+        weights_opt.has_value() ? weights_opt.value() : nullptr;
+    AtenTensorHandle result = nve_embedding_lookup_with_pooling_cpu(
+        marker, keys, offsets, weights_handle, pooling_type);
     stack[0] = from(result);
 }
 
@@ -83,9 +122,9 @@ static void embedding_lookup_with_pooling_cuda_boxed(
 // Schema definitions (STABLE_TORCH_LIBRARY uses C shim, no std::string)
 // ---------------------------------------------------------------------------
 STABLE_TORCH_LIBRARY(nve_ops, m) {
-    m.def("embedding_lookup(Tensor keys, int layer_id) -> Tensor");
-    m.def("embedding_lookup_with_pooling(Tensor keys, Tensor offsets, "
-          "Tensor? weights, int pooling_type, int layer_id) -> Tensor");
+    m.def("embedding_lookup(Tensor marker, Tensor keys, int embedding_size, int dtype) -> Tensor");
+    m.def("embedding_lookup_with_pooling(Tensor marker, Tensor keys, Tensor offsets, "
+          "Tensor? weights, int pooling_type, int embedding_size, int dtype) -> Tensor");
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +139,15 @@ STABLE_TORCH_LIBRARY_IMPL(nve_ops, CUDA, m) {
     m.impl("embedding_lookup", embedding_lookup_cuda_boxed);
     m.impl("embedding_lookup_with_pooling",
            embedding_lookup_with_pooling_cuda_boxed);
+}
+
+// ---------------------------------------------------------------------------
+// CPU dispatch — used by LayerType.HostLayer with device='cpu'.
+// ---------------------------------------------------------------------------
+STABLE_TORCH_LIBRARY_IMPL(nve_ops, CPU, m) {
+    m.impl("embedding_lookup", embedding_lookup_cpu_boxed);
+    m.impl("embedding_lookup_with_pooling",
+           embedding_lookup_with_pooling_cpu_boxed);
 }
 
 #pragma GCC diagnostic pop

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <default_allocator.hpp>
 #include <sstream>
 #include <table.hpp>
@@ -54,7 +55,7 @@ struct GPUTableConfig {
   int64_t max_modify_size{1 << 20};         // Maximal amount of modify entries allowed in a single op (insert/update/accumulate)
                                             // Using a small amount here can cause modify ops to be less efficient.
   DataType_t value_dtype{
-      DataType_t::Unknown};                 // Storage data type of the table values. Only used for accumulate
+      DataType_t::Unknown};                 // Storage data type of the table values. Only used for pooling/accumulate
   cudaStream_t private_stream{0};           // When non-zero will be used for all loookup/modify ops.
                                             // Execution contexts' stream will be synchronized with the private stream.
   bool disable_uvm_update{false};           // When true, update/update_accumulate will not update the uvm table.
@@ -108,7 +109,7 @@ class GpuTable : public Table {
    * @param keys An array of entry keys to erase.
    * This array should reside in host memory when modify_on_gpu was set to true.
    */
-  void erase(context_ptr_t& ctx, int64_t num_keys, const void* keys) override;
+  virtual void erase(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys) override;
 
   /**
    * Find entries for a given set of keys.
@@ -126,8 +127,8 @@ class GpuTable : public Table {
    * memory).
    * @param value_sizes Must be nullptr (not supported)
    */
-  void find(context_ptr_t& ctx, int64_t num_keys, const void* keys, max_bitmask_repr_t* hit_mask,
-               int64_t value_stride, void* values, int64_t* value_sizes) const override;
+  virtual void find(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, buffer_ptr<max_bitmask_repr_t> hit_mask,
+                       int64_t value_stride, buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override;
 
   /**
    * Insert new key-value pairs to the databases.
@@ -143,8 +144,8 @@ class GpuTable : public Table {
    * @param values An array of values to read entries from.
    * This array should reside in GPU accessible memory.
    */
-  void insert(context_ptr_t& ctx, int64_t num_keys, const void* h_keys, int64_t value_stride,
-              int64_t value_size, const void* values) override;
+  virtual void insert(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, int64_t value_stride,
+                      int64_t value_size, buffer_ptr<const void> values) override;
 
   /**
    * Update (overwrite) values for a given set of keys iff they already exist in the database.
@@ -159,8 +160,8 @@ class GpuTable : public Table {
    * @param updates An array of values to read entries from.
    * This array should reside in GPU accessible memory.
    */
-  void update(context_ptr_t& ctx, int64_t num_keys, const void* keys, int64_t update_stride,
-              int64_t update_size, const void* updates) override;
+  virtual void update(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, int64_t update_stride,
+                      int64_t update_size, buffer_ptr<const void> updates) override;
 
   /**
    * Update (accumulate) values for a given set of keys iff they already exist in the database.
@@ -177,9 +178,9 @@ class GpuTable : public Table {
    * This array should reside in GPU accessible memory.
    * @param update_dtype The data type of the updates (can be different from the table data type).
    */
-  void update_accumulate(context_ptr_t& ctx, int64_t num_keys, const void* keys, int64_t update_stride,
-                         int64_t update_size, const void* updates,
-                         DataType_t update_dtype) override;
+  virtual void update_accumulate(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys,
+                                 int64_t update_stride, int64_t update_size, buffer_ptr<const void> updates,
+                                 DataType_t update_dtype) override;
 
   /**
    * Find entries in the database and combine them.
@@ -212,10 +213,11 @@ class GpuTable : public Table {
                                               // ValueType only when combining multiple rows)
             typename WeightType =
                 float>  // Type used for weights used by some combiner types (e.g. weighted sum)
-  void find_and_combine(context_ptr_t& ctx, int64_t num_keys, const void* keys, SparseType_t sparse_type,
-                        int64_t num_offsets, const OffsetType* offsets, int64_t fixed_hotness,
-                        PoolingType_t pooling_type, const WeightType* weights, int64_t value_stride,
-                        OutputType* values);
+  void find_and_combine(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys,
+                        SparseType_t sparse_type, int64_t num_offsets,
+                        buffer_ptr<const OffsetType> offsets, int64_t fixed_hotness,
+                        PoolingType_t pooling_type, buffer_ptr<const WeightType> weights,
+                        int64_t value_stride, buffer_ptr<void> values);
 
   const GPUTableConfig& config() const { return config_; }
   allocator_ptr_t get_allocator() { return allocator_; }
@@ -233,12 +235,12 @@ class GpuTable : public Table {
    * @note GPU tables use the context's lookup stream and require a sync call before reading counter.
    * (e.g. "cudaStreamSynchronize(ctx->get_lookup_stream())")
    */
-  void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) override;
+  void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) const override;
   /**
    * Checks whether the key count refers to lookup hits or misses
    * @return True iff the table counts hits, otherwise the table counts misses.
    */
-  bool lookup_counter_hits() override;
+  bool lookup_counter_hits() const override;
 
   /**
    * Create an execution context for the table.
@@ -266,31 +268,17 @@ class GpuTable : public Table {
    */
   virtual int64_t get_max_row_size() const override;
   /**
+   * @returns Size of a key in bytes.
+   */
+  virtual int64_t get_key_size() const override;
+  /**
    * @returns Key used to signal invalid entries (cast to int64_t)
    */
   virtual int64_t get_invalid_key() const override;
-
-  virtual void erase_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
-  virtual void find_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, buffer_ptr<max_bitmask_repr_t> hit_mask,
-                       int64_t value_stride, buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override;
-  virtual void insert_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
-                      int64_t value_size, buffer_ptr<const void> values) override;
-  virtual void update_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
-                         int64_t value_size, buffer_ptr<const void> values) override;
-  virtual void update_accumulate_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
-                                 int64_t update_stride, int64_t update_size, buffer_ptr<const void> updates,
-                                 DataType_t update_dtype) override;
-
-  template <typename OffsetType = KeyType,    // Type used for Offset during lookup of COO/CSR
-            typename ValueType = float,       // Type used for the data vectors
-            typename OutputType = ValueType,  // Type used for output data vectors (can differ from
-                                              // ValueType only when combining multiple rows)
-            typename WeightType =
-                float>  // Type used for weights used by some combiner types (e.g. weighted sum)
-  void find_and_combine_bw(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type,
-                        int64_t num_offsets, buffer_ptr<const OffsetType> offsets, int64_t fixed_hotness,
-                        PoolingType_t pooling_type, buffer_ptr<const WeightType> weights, int64_t value_stride,
-                        buffer_ptr<void> values);
+  /**
+   * @returns DataType of the table elements (only needed for pooling/dequant)
+   */
+  virtual DataType_t get_value_type() const override;
 
  private:
   const GPUTableConfig config_;
@@ -301,7 +289,7 @@ class GpuTable : public Table {
   std::shared_ptr<ContextRegistry> contexts_;
   std::shared_ptr<DefaultECEvent> create_sync_event();
 
-  mutable std::mutex uvm_table_mutex_;
+  mutable std::shared_mutex uvm_table_mutex_; // R/W lock for preventing lookups during update of the UVM linear table
 };
 
 }  // namespace nve

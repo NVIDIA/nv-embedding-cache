@@ -21,6 +21,7 @@
 #include <vector>
 #include <limits>
 #include <random>
+#include <cuda_fp16.h>
 #include <embedding_layer.hpp>
 #include <insert_heuristic.hpp>
 
@@ -108,9 +109,10 @@ public:
 template <typename OffsetT>
 class SetupCSROffsets {
 public:
-  SetupCSROffsets(OffsetT num_keys, size_t seed = 59371) {
+  SetupCSROffsets(OffsetT num_keys, OffsetT max_bag = 64, size_t seed = 59371) {
+    NVE_CHECK_(max_bag >= 1, "max_bag must be positive");
     std::mt19937 gen(seed);
-    std::uniform_int_distribution<OffsetT> dist_offset(1, 64);
+    std::uniform_int_distribution<OffsetT> dist_offset(1, max_bag);
 
     OffsetT curr_offset = 0;
     while (curr_offset < num_keys) {
@@ -121,7 +123,7 @@ public:
 
     offsets_buffer_.push_back(num_keys);
     num_offsets = offsets_buffer_.size();
-    offsets_buffer = offsets_buffer_.data(); 
+    offsets_buffer = offsets_buffer_.data();
   }
 
   uint64_t num_offsets{0};
@@ -133,5 +135,12 @@ float load_as_float(const void* ptr, int64_t idx, DataType_t dtype);
 void store_as_dtype(void* ptr, int64_t idx, DataType_t dtype, float val);
 void GenerateWeights(std::vector<int8_t>& weights, uint64_t num_weights, DataType_t dtype, size_t seed = 31337);
 void InitTableRows(int8_t* table, uint64_t row_size, uint64_t start_row, uint64_t end_row, DataType_t dtype, size_t seed = 1337);
+
+// Dequantize element at index `e` from a per-row quantized row.
+// row_ptr:     start of the full row (value bytes followed by trailing scale[+offset] metadata)
+// e:           element index in the value region [0, value_count)
+// value_count: number of value bytes per row (= number of int8/uint8 elements)
+// dtype:       must be a per-row quant type: QInt8RowwiseF32/F16 or QUint8RowwiseF32/F16
+float load_quant_row_element_as_float(const int8_t* row_ptr, int64_t e, int64_t value_count, DataType_t dtype);
 
 }  // namespace nve

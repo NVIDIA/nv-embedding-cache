@@ -48,16 +48,24 @@ class ExecutionContext {
   bool is_owned(const void* ptr, const std::string& name, bool host_alloc);
 
   // get aux streams
-  std::vector<cudaStream_t> get_aux_streams(const std::string& name, size_t num_streams);
+  virtual std::vector<cudaStream_t> get_aux_streams(const std::string& name, size_t num_streams);
 
   // Wait until pending work is complete
   // Note that this may include additional tasks offloaded to other threads
+  //
+  // CUDA stream sync is gated on driver_available_: on a system with no CUDA
+  // driver (host-only inference) the runtime calls would fail, so we skip them.
+  // The flag is read directly off a base member rather than via a virtual, so it
+  // stays correct even when wait() is invoked from ~ExecutionContext() (where
+  // virtual dispatch resolves to this base implementation, not a derived override).
   virtual void wait() {
-    NVE_CHECK_(cudaStreamSynchronize(lookup_stream_));
-    NVE_CHECK_(cudaStreamSynchronize(modify_stream_));
-    for (auto& kv : aux_streams_storage_) {
-      for (auto& stream : kv.second) {
-        NVE_CHECK_(cudaStreamSynchronize(stream));
+    if (driver_available_) {
+      NVE_CHECK_(cudaStreamSynchronize(lookup_stream_));
+      NVE_CHECK_(cudaStreamSynchronize(modify_stream_));
+      for (auto& kv : aux_streams_storage_) {
+        for (auto& stream : kv.second) {
+          NVE_CHECK_(cudaStreamSynchronize(stream));
+        }
       }
     }
   }
@@ -74,6 +82,9 @@ class ExecutionContext {
   cudaStream_t modify_stream_;
   thread_pool_ptr_t thread_pool_;
   allocator_ptr_t allocator_;
+  // Whether a usable CUDA driver is present in this process (detected via cuInit).
+  // When false, the context must not enter the CUDA runtime during wait()/teardown.
+  const bool driver_available_;
   std::unordered_map<std::string, std::shared_ptr<ResizeableBuffer>> buffer_storage_;
   std::unordered_map<std::string, std::vector<cudaStream_t>> aux_streams_storage_;
   static std::string internal_name(const std::string& name, bool host_alloc);

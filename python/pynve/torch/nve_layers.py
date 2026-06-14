@@ -21,6 +21,7 @@ import pynve.torch.nve_ps as nve_ps
 import torch
 from enum import Enum
 from typing import Optional
+import builtins
 
 def nve_type_to_torch_type(nve_type: nve.DataType_t):
     if nve_type == nve.DataType_t.Float32:
@@ -38,6 +39,17 @@ def torch_type_to_nve_type(torch_type: torch.dtype):
     else:
         raise ValueError(f"Invalid data type: {torch_type}")
 
+def _current_stream_handle(device: torch.device) -> int:
+    """Return the CUDA stream handle to pass into the C++ binding, or 0 on CPU.
+
+    NVE's binding identifies execution contexts by stream pointer; on the host-only
+    path (device.type == 'cpu') we use 0 as the sentinel — the underlying layer
+    never touches the CUDA runtime in that case.
+    """
+    if device.type == 'cpu':
+        return 0
+    return torch.cuda.current_stream(device).cuda_stream
+
 def config_to_nve_config(config: dict):
     embed_config = nve.EmbedLayerConfig()
     if config is None:
@@ -50,42 +62,24 @@ def config_to_nve_config(config: dict):
         embed_config.kernel_mode_value_1 = config["kernel_mode_value_1"]
     if "kernel_mode_value_2" in config:
         embed_config.kernel_mode_value_2 = config["kernel_mode_value_2"]
+    if "max_modify_size" in config:
+        embed_config.max_modify_size = config["max_modify_size"]
     return embed_config
 
-class CacheType(Enum):
-    """Enum class defining the different types of caching strategies available.
+class LayerType(Enum):
+    """Enum class defining the different layer implementations available.
 
     Attributes:
-        None: No caching is used - embeddings are stored directly in GPU memory
-        LinearUVM: Linear UVM caching - embeddings are stored in CPU memory with a GPU cache
-        Hierarchical: Hierarchical caching - embeddings are stored remotely with a GPU cache
+        GPULayer: Embeddings stored directly in GPU memory (no cache).
+        LinearUVM: Embeddings stored in UVM/host memory with a GPU cache.
+        Hierarchical: GPU cache + optional host cache + remote parameter server.
+        HostLayer: Embeddings stored on the CPU host via LinearHostTable (no GPU cache).
     """
-    NoCache = 1
-    LinearUVM = 2  
+    GPULayer = 1
+    LinearUVM = 2
     Hierarchical = 3
+    HostLayer = 4
 
-# class to manage ids for NVEmbedding and NVEmbeddingBag
-# the class will try to assign a unique id to each instance if not provided
-# if provided the id will be used as is
-class _NVENameManager:
-    _id_dict = []
-    _instance_counter = 0
-
-    @staticmethod
-    def get_id(id : Optional[int] = None) -> int:
-        if id is not None:
-            if id not in _NVENameManager._id_dict:
-                _NVENameManager._id_dict.append(id)
-            return id
-        else:
-            ret = _NVENameManager._instance_counter
-            _NVENameManager._instance_counter += 1
-            while ret in _NVENameManager._id_dict:
-                ret = _NVENameManager._instance_counter
-                _NVENameManager._instance_counter += 1
-            _NVENameManager._id_dict.append(ret)
-            return ret
-        
 class NVEmbeddingBase(torch.nn.Module):
     """Base class for NVEmbedding layers.
 
@@ -103,97 +97,176 @@ class NVEmbeddingBase(torch.nn.Module):
         num_embeddings (int): Size of the embedding dictionary
         embedding_size (int): Size of each embedding vector
         data_type (torch.dtype): Data type of embedding vectors (float32 or float16)
-        cache_type (CacheType): Type of caching strategy to use, see CacheType enum for more details
+        layer_type (LayerType): Layer implementation to use, see LayerType enum for details.
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Required for LinearUVM and Hierarchical. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
-        remote_interface (Optional[nve.Table | nve_ps.NVEParameterServer], optional): Interface for remote storage. Required for Hierarchical. Defaults to None.
+        storage (Optional[nve.MemBlock | nve.Table | nve_ps.NVEParameterServer]):
+            Backing storage for the layer.
+            - GPULayer / LinearUVM / HostLayer: a ``nve.MemBlock`` (optional; one
+              is allocated if omitted — HostLayer auto-allocates a pinned host
+              tensor, GPULayer a CUDA tensor, LinearUVM a ManagedMemBlock).
+            - Hierarchical: required ``nve.Table`` or ``nve_ps.NVEParameterServer``.
         weight_init (Optional[torch.Tensor], optional): Initial values for embeddings. Not supported with Hierarchical. Defaults to None.
-        memblock (Optional[nve.MemBlock], optional): Memblock for LinearUVM. Defaults to None.
         optimize_for_training (bool, optional): Whether to optimize caching for training vs inference. Defaults to True.
         device (torch.device, optional): Device to use for the embedding layer. Defaults to 'cuda', note gpu cache currently unable to move between devices
         id (int, optional): Identifier for the embedding layer. Defaults to None, if None the layer will be assigned a Id automatically. Ids must be unique inside a nested model, in order for serialization to work.
     """
-    def __init__(self, 
-                 num_embeddings: int, 
-                 embedding_size: int, 
-                 data_type: torch.dtype, 
-                 cache_type: CacheType, * ,  
-                 gpu_cache_size: int = 0, 
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_size: int,
+                 data_type: torch.dtype,
+                 layer_type: LayerType, * ,
+                 gpu_cache_size: int = 0,
                  host_cache_size: int = 0,
-                 remote_interface: Optional[nve.Table | nve_ps.NVEParameterServer] = None, 
-                 weight_init: Optional[torch.Tensor] = None, 
-                 memblock: Optional[nve.MemBlock] = None,
-                 optimize_for_training: bool = True, 
-                 device : Optional[torch.device] = None, 
+                 storage: Optional[nve.MemBlock | nve.Table | nve_ps.NVEParameterServer] = None,
+                 weight_init: Optional[torch.Tensor] = None,
+                 optimize_for_training: bool = True,
+                 device : Optional[torch.device] = None,
                  id : Optional[int] = None,
                  config: Optional[dict] = None):
         super().__init__()
 
         self.config = config_to_nve_config(config)
-        self.cache_type = cache_type
+        self.layer_type = layer_type
         self.num_embeddings = num_embeddings
         self.embedding_size = embedding_size
         self.data_type = data_type
         self.layer_data_type = torch_type_to_nve_type(data_type)
-        self.save_stream = None
         self.gpu_cache_size = gpu_cache_size
         self.host_cache_size = host_cache_size
         self.optimize_for_training = optimize_for_training
         # set up device shananigans
         self.device = device if device is not None else torch.device("cuda")
-        if self.device.type != 'cuda':
-            raise ValueError("NV Embedding only supports cuda devices")
-        self.device_index = self.device.index if self.device.index is not None else torch.cuda.current_device()
-        self.id = _NVENameManager.get_id(id)
+        if self.device.type == 'cpu':
+            if layer_type != LayerType.HostLayer:
+                raise ValueError(
+                    f"device='cpu' is only supported with LayerType.HostLayer, got layer_type={layer_type}")
+            # -1 is the binding-level sentinel for "no GPU".
+            self.device_index = -1
+        elif self.device.type == 'cuda':
+            self.device_index = self.device.index if self.device.index is not None else torch.cuda.current_device()
+        else:
+            raise ValueError(f"NV Embedding only supports cuda or cpu devices, got {self.device.type}")
+        self.id = id if id is not None else builtins.id(self)
         self.table_ids = {}
 
-        if cache_type == CacheType.NoCache:
+        if layer_type == LayerType.GPULayer:
+            if storage is not None and not isinstance(storage, nve.MemBlock):
+                raise ValueError("GPULayer requires storage to be a MemBlock or None")
             if (weight_init != None):
                 tensor_storage = weight_init.detach().clone().to(self.device)
             else:
                 tensor_storage = torch.empty(num_embeddings, embedding_size, dtype=data_type, device=self.device)
-            memblock = nve.UserMemBlock(tensor_storage.data_ptr())
+            memblock = storage if storage is not None else nve.UserMemBlock(tensor_storage.data_ptr())
             self.memblock_type = memblock.get_type()
+            self.storage = memblock
             self.emb_layer = nve.GPUEmbedding(embedding_size, num_embeddings, self.layer_data_type, memblock, self.device_index, self.config)
             self.table_ids = {0: 'gpu'}
-        elif cache_type == CacheType.LinearUVM:
+        elif layer_type == LayerType.LinearUVM:
             if gpu_cache_size == 0:
                 raise ValueError("GPU cache size > 0 is required for UVM embedding")
-            if memblock is None:
-                memblock = nve.ManagedMemBlock(embedding_size, num_embeddings, self.layer_data_type, [self.device_index])
+            if storage is not None and not isinstance(storage, nve.MemBlock):
+                raise ValueError("LinearUVM requires storage to be a MemBlock or None")
+            memblock = storage if storage is not None else nve.ManagedMemBlock(embedding_size, num_embeddings, self.layer_data_type, [self.device_index])
             self.memblock_type = memblock.get_type()
+            self.storage = memblock
             self.emb_layer = nve.LinearUVMEmbedding(embedding_size, num_embeddings, self.layer_data_type, memblock, gpu_cache_size, optimize_for_training, self.device_index, self.config)
             tensor_storage = torch.utils.dlpack.from_dlpack(nve.get_dl_tensor(self.emb_layer, self.layer_data_type))
             if (weight_init != None):
                 tensor_storage.copy_(weight_init)
             self.table_ids = {0: 'gpu_cache'}
-        elif cache_type == CacheType.Hierarchical:
-            if remote_interface == None:
-                raise ValueError("Remote interface is required for hierarchical embedding")
+        elif layer_type == LayerType.Hierarchical:
+            if storage is None:
+                raise ValueError("Hierarchical requires storage to be a Table or NVEParameterServer")
+            if not isinstance(storage, (nve.Table, nve_ps.NVEParameterServer)):
+                raise ValueError("Hierarchical requires storage to be a Table or NVEParameterServer")
             if gpu_cache_size == 0:
                 raise ValueError("GPU cache size > 0 is required for hierarchical embedding")
             if weight_init != None:
                 raise ValueError("Weight init is not supported for hierarchical embedding")
-            self.remote_interface = remote_interface
-            if isinstance(remote_interface, nve_ps.NVEParameterServer):
-                if remote_interface.data_type != data_type:
+            self.storage = storage
+            if isinstance(storage, nve_ps.NVEParameterServer):
+                if storage.data_type != data_type:
                     raise ValueError(
-                        f"NVEmbedding(Hierarchical): remote_interface.data_type="
-                        f"{remote_interface.data_type} doesn't match layer "
+                        f"NVEmbedding(Hierarchical): storage.data_type="
+                        f"{storage.data_type} doesn't match layer "
                         f"data_type={data_type} — they must match")
-                remote_interface = remote_interface.parameter_server
+                remote_interface = storage.parameter_server
+            else:
+                remote_interface = storage
             self.emb_layer = nve.HierarchicalEmbedding(embedding_size, self.layer_data_type, gpu_cache_size, host_cache_size, remote_interface, num_embeddings, optimize_for_training, self.device_index, self.config)
             tensor_storage = torch.sparse_coo_tensor(size=(num_embeddings, embedding_size), dtype=data_type, device=self.device)
             self.table_ids = {0: 'gpu_cache'}
             self.table_ids |= {1: 'host_cache', 2: 'remote_ps'} if host_cache_size > 0 else {1: 'remote_ps'}
+        elif layer_type == LayerType.HostLayer:
+            # HostLayer is inference-only: gradient computation requires a CUDA device
+            # and the C++ binding rejects backprop on a host layer. Fail fast here rather
+            # than at backward-pass time (forward() would route through the training op).
+            if optimize_for_training:
+                raise ValueError(
+                    "HostLayer is inference-only and does not support training. "
+                    "Pass optimize_for_training=False when using LayerType.HostLayer.")
+            if storage is not None and not isinstance(storage, nve.MemBlock):
+                raise ValueError("HostLayer requires storage to be a MemBlock or None")
+            if storage is not None and storage.get_type() in (nve.MemBlockType.NVL, nve.MemBlockType.MPI):
+                # LinearHostTable's CPU gather/update require host accessible memblock
+                raise ValueError(
+                    f"HostLayer requires a host-accessible memblock; "
+                    f"got memblock_type={storage.get_type()}. Use HostMemBlock, "
+                    f"ManagedMemBlock, UserMemBlock around a pinned tensor, or a "
+                    f"host-side LinearMemBlock (device_id=-1).")
+            if storage is None:
+                # pin_memory() requires a CUDA driver — skip it for cpu-device HostLayer.
+                pin = self.device.type != 'cpu'
+                if weight_init is not None:
+                    tensor_storage = weight_init.detach().to(device="cpu", dtype=data_type).contiguous()
+                    if pin:
+                        tensor_storage = tensor_storage.pin_memory()
+                else:
+                    tensor_storage = torch.empty(num_embeddings, embedding_size, dtype=data_type)
+                    if pin:
+                        tensor_storage = tensor_storage.pin_memory()
+                memblock = nve.UserMemBlock(tensor_storage.data_ptr())
+            else:
+                #user gave both weight_init and memblock (we should consider removing this path)
+                memblock = storage
+                if weight_init is not None:
+                    src = weight_init.detach().to(device="cpu", dtype=data_type).contiguous()
+                    size_bytes = num_embeddings * embedding_size * src.element_size()
+                    nve.raw_copy(memblock.get_handle(), src.data_ptr(), size_bytes)
+                tensor_storage = torch.sparse_coo_tensor(size=(num_embeddings, embedding_size), dtype=data_type, device=self.device)
+            self.memblock_type = memblock.get_type()
+            self.storage = memblock
+            self.emb_layer = nve.HostEmbedding(embedding_size, num_embeddings, self.layer_data_type, memblock, self.device_index, self.config)
+            self.table_ids = {0: 'host'}
+        else:
+            raise ValueError(f"Unknown layer_type: {layer_type}")
         self.weight = CachedTable(tensor_storage, cache=self.emb_layer)
+        # Per-layer identity marker. Its data_ptr() is the registry key the
+        # custom op dispatches on at runtime (globally unique across host + all
+        # CUDA devices under UVA), so multiple models/instances coexist in one
+        # process. persistent=False keeps it out of state_dict; torch.export
+        # still captures it as a graph constant threaded into every op call.
+        # Value = self.id for per-layer distinctness (avoids AOTI constant
+        # dedup) and debuggability.
+        self.register_buffer(
+            "marker_tensor",
+            torch.tensor([self.id], dtype=torch.int64, device=self.device),
+            persistent=False)
+        # dtype op-arg (int value of the nve DataType_t enum) — baked into the
+        # op so the meta/fake impl can infer the output dtype without a registry
+        # lookup.
+        self.dtype_tag = int(self.layer_data_type)
         if HAS_TORCH_OPS:
-            nve.register_for_torch(self.id, self.emb_layer)
+            nve.register_for_torch(self.marker_tensor.data_ptr(), self.emb_layer)
 
     def __del__(self):
-        if HAS_TORCH_OPS:
-            nve.unregister_from_torch(self.id)
-        
+        # marker_tensor may not exist if __init__ raised before assigning it
+        # (e.g. an invalid device/layer_type/storage combination). Guard so
+        # __del__ stays quiet.
+        if HAS_TORCH_OPS and hasattr(self, "marker_tensor"):
+            nve.unregister_from_torch(self.marker_tensor.data_ptr())
+
     def to(self, *args, **kwargs):
         # since the weights need to remain on cpu in case of non dummy weight need to hijack this function 
         # and keep weights on the cpu
@@ -206,8 +279,11 @@ class NVEmbeddingBase(torch.nn.Module):
                 if param._grad is not None:
                     param._grad.data = param._grad.data.to(device, dtype if dtype else param.dtype, non_blocking)
 
-        # Move all buffers to the specified device
+        # Move all buffers to the specified device, except the identity marker:
+        # its data_ptr() is the live registry key, so it must not be relocated.
         for name, buf in self.named_buffers():
+            if name == 'marker_tensor':
+                continue
             buf.data = buf.data.to(device, dtype if dtype else buf.dtype, non_blocking)
     
 
@@ -223,7 +299,7 @@ class NVEmbeddingBase(torch.nn.Module):
             keys (torch.Tensor): Tensor of integer keys identifying the embedding vectors to update
             updates (torch.Tensor): Tensor containing the new embedding vector values
         """
-        self.emb_layer.update(torch.numel(keys), keys.data_ptr(), updates.data_ptr(), torch.cuda.current_stream(self.device).cuda_stream)
+        self.emb_layer.update(torch.numel(keys), keys.data_ptr(), updates.data_ptr(), _current_stream_handle(self.device))
 
     def insert(self, keys : torch.Tensor, values : torch.Tensor, table_id : int):
         """Insert values to a table in the embedding layer.
@@ -238,10 +314,10 @@ class NVEmbeddingBase(torch.nn.Module):
             values (torch.Tensor): Tensor containing the new embedding vector values
             table_id (int) : Index of the table in the layer to insert to
         """
-        self.emb_layer.insert(torch.numel(keys), keys.data_ptr(), values.data_ptr(), table_id, torch.cuda.current_stream(self.device).cuda_stream)
+        self.emb_layer.insert(torch.numel(keys), keys.data_ptr(), values.data_ptr(), table_id, _current_stream_handle(self.device))
 
     def clear(self):
-        self.emb_layer.clear(torch.cuda.current_stream(self.device).cuda_stream)
+        self.emb_layer.clear(_current_stream_handle(self.device))
 
     def erase(self, keys : torch.Tensor, table_id : int):
         """Erase keys from a table in the embedding layer.
@@ -254,51 +330,48 @@ class NVEmbeddingBase(torch.nn.Module):
             keys (torch.Tensor): Tensor of integer keys to erase
             table_id (int): Index of the table in the layer to erase from
         """
-        self.emb_layer.erase(torch.numel(keys), keys.data_ptr(), table_id, torch.cuda.current_stream(self.device).cuda_stream)
+        self.emb_layer.erase(torch.numel(keys), keys.data_ptr(), table_id, _current_stream_handle(self.device))
 
     def load_from_stream(self, stream):
         nve.load_tensor_from_stream(self.emb_layer, stream, self.id)
 
-    def set_save_stream(self, stream):
-        self.save_stream = stream
-
 class NVEmbedding(NVEmbeddingBase):
-    """A Wrapper similar to torch.nn.Embedding that supports different caching strategies.
+    """A Wrapper similar to torch.nn.Embedding that supports different layer implementations.
 
-    This layer performs embedding lookups with caching support. It inherits from NVEmbeddingBase
-    which provides the core caching functionality.
+    This layer performs embedding lookups with optional caching. It inherits from NVEmbeddingBase
+    which provides the core functionality.
     See torch.nn.Embedding for more information on the operation.
 
     Args:
         num_embeddings (int): Size of the embedding dictionary
         embedding_size (int): Size of each embedding vector
         data_type (torch.dtype): Data type of the embedding weights
-        cache_type (CacheType): Type of caching strategy to use
+        layer_type (LayerType): Layer implementation to use
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
-        memblock (Optional[nve.MemBlock]): Memblock for LinearUVM. Defaults to None.
-        remote_interface (Optional[nve.Table | nve_ps.NVEParameterServer]): Interface for remote storage. Required for hierarchical embedding. Defaults to None.
-        weight_init (Optional[torch.Tensor]): Initial values for embedding weights. Not supported for hierarchical embedding. Defaults to None.
+        storage (Optional[nve.MemBlock | nve.Table | nve_ps.NVEParameterServer]):
+            Backing storage. MemBlock for GPULayer/LinearUVM/HostLayer; Table or
+            NVEParameterServer for Hierarchical. Defaults to None.
+        weight_init (Optional[torch.Tensor]): Initial values for embedding weights. Not supported for Hierarchical. Defaults to None.
         optimize_for_training (bool): Whether to optimize caching for training vs inference. Defaults to True.
         id (int, optional): Identifier for the embedding layer. Defaults to None, if None the layer will be assigned a Id automatically. Ids must be unique inside a nested model, in order for serialization to work.
     """
 
-    def __init__(self, 
-                    num_embeddings: int, 
-                    embedding_size: int, 
-                    data_type: torch.dtype, 
-                    cache_type: CacheType, 
-                    * ,  
-                    gpu_cache_size: int = 0, 
+    def __init__(self,
+                    num_embeddings: int,
+                    embedding_size: int,
+                    data_type: torch.dtype,
+                    layer_type: LayerType,
+                    * ,
+                    gpu_cache_size: int = 0,
                     host_cache_size: int = 0,
-                    memblock: Optional[nve.MemBlock] = None, 
-                    remote_interface: Optional[nve.Table | nve_ps.NVEParameterServer] = None, 
-                    weight_init: Optional[torch.Tensor] = None, 
-                    optimize_for_training: bool = True, 
-                    device : Optional[torch.device] = None, 
+                    storage: Optional[nve.MemBlock | nve.Table | nve_ps.NVEParameterServer] = None,
+                    weight_init: Optional[torch.Tensor] = None,
+                    optimize_for_training: bool = True,
+                    device : Optional[torch.device] = None,
                     id : Optional[int] = None,
                     config: Optional[dict] = None):
-        super().__init__(num_embeddings, embedding_size, data_type, cache_type, gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, memblock=memblock, remote_interface=remote_interface, weight_init=weight_init, optimize_for_training=optimize_for_training, device=device, id=id, config=config)
+        super().__init__(num_embeddings, embedding_size, data_type, layer_type, gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, storage=storage, weight_init=weight_init, optimize_for_training=optimize_for_training, device=device, id=id, config=config)
 
     def forward(self, keys : torch.Tensor):
         """Performs embedding lookup for the input keys.
@@ -311,27 +384,21 @@ class NVEmbedding(NVEmbeddingBase):
         """
         if HAS_TORCH_OPS:
             if self.optimize_for_training:
-                return nve_ops.NVEmbeddingOpTraining.apply(keys, self.weight, self.id)
+                return nve_ops.NVEmbeddingOpTraining.apply(
+                    self.marker_tensor, keys, self.weight,
+                    self.embedding_size, self.dtype_tag)
             else:
-                return nve_ops.NVEmbeddingOp.apply(keys, self.id)
+                return nve_ops.NVEmbeddingOp.apply(
+                    self.marker_tensor, keys,
+                    self.embedding_size, self.dtype_tag)
         else:
             return nve_ops.CacheEmbeddingOp.apply(keys, self.weight)
 
-    def __reduce_ex__(self, protocol):
-        if self.save_stream is not None and self.cache_type in (CacheType.LinearUVM, CacheType.NoCache):
-            nve.write_tensor_to_stream(self.emb_layer, self.save_stream, self.id)
-            return (NVEmbedding._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "id": self.id}), None )
-        else:
-            return (NVEmbedding._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "weight_init": self.weight, "id": self.id}), None )
-
-    def _custom_builder(num_embeddings, embedding_size, data_type, cache_type, kwargs):
-            return NVEmbedding(num_embeddings, embedding_size, data_type, cache_type, **kwargs)
-
 class NVEmbeddingBag(NVEmbeddingBase):
-    """A Wrapper similar to torch.nn.EmbeddingBag that supports different caching strategies.
+    """A Wrapper similar to torch.nn.EmbeddingBag that supports different layer implementations.
 
-    This layer performs embedding bag operations with caching support. It inherits from NVEmbeddingBase
-    which provides the core caching functionality. Embedding bag operations combine multiple embeddings
+    This layer performs embedding bag operations with optional caching. It inherits from NVEmbeddingBase
+    which provides the core functionality. Embedding bag operations combine multiple embeddings
     into a single output vector using operations like sum, mean or concatenation.
     See torch.nn.EmbeddingBag for more information on the operation.
 
@@ -339,32 +406,44 @@ class NVEmbeddingBag(NVEmbeddingBase):
         num_embeddings (int): Size of the embedding dictionary
         embedding_size (int): Size of each embedding vector
         data_type (torch.dtype): Data type of the embedding weights
-        cache_type (CacheType): Type of caching strategy to use
+        layer_type (LayerType): Layer implementation to use
         mode (str): The operation to use for combining embeddings ('sum', 'mean', 'max', or 'concat')
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
-        memblock (Optional[nve.MemBlock]): Memblock for LinearUVM. Defaults to None.
-        remote_interface (Optional[nve.Table | nve_ps.NVEParameterServer]): Interface for remote storage. Required for hierarchical embedding. Defaults to None.
-        weight_init (Optional[torch.Tensor]): Initial values for embedding weights. Not supported for hierarchical embedding. Defaults to None.
+        storage (Optional[nve.MemBlock | nve.Table | nve_ps.NVEParameterServer]):
+            Backing storage. MemBlock for GPULayer/LinearUVM; Table or
+            NVEParameterServer for Hierarchical. Defaults to None.
+        weight_init (Optional[torch.Tensor]): Initial values for embedding weights. Not supported for Hierarchical. Defaults to None.
         optimize_for_training (bool): Whether to optimize caching for training vs inference. Defaults to True.
         device (torch.device, optional): Device to use for the embedding layer. Defaults to 'cuda', note gpu cache currently unable to move between devices
         id (int, optional): Identifier for the embedding layer. Defaults to None, if None the layer will be assigned a Id automatically. Ids must be unique inside a nested model, in order for serialization to work.
+
+    Note:
+        LayerType.HostLayer is not supported by NVEmbeddingBag — pooled lookups
+        are not implemented for the host layer. Use NVEmbedding for HostLayer.
     """
-    def __init__(self, 
-                 num_embeddings: int, 
-                 embedding_size: int, 
-                 data_type: torch.dtype, 
-                 cache_type: CacheType, 
-                 mode : str, * ,  
-                 gpu_cache_size: int = 0, 
-                 host_cache_size: int = 0, 
-                 remote_interface: Optional[nve.Table | nve_ps.NVEParameterServer] = None, 
-                 memblock: Optional[nve.MemBlock] = None, 
-                 weight_init: Optional[torch.Tensor] = None, 
-                 optimize_for_training: bool = True, 
-                 device : Optional[torch.device] = None, 
-                 id : Optional[int] = None):
-        super().__init__(num_embeddings, embedding_size, data_type, cache_type, gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, remote_interface=remote_interface, memblock=memblock, weight_init=weight_init, optimize_for_training=optimize_for_training, device=device, id=id)
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_size: int,
+                 data_type: torch.dtype,
+                 layer_type: LayerType,
+                 mode : str, * ,
+                 gpu_cache_size: int = 0,
+                 host_cache_size: int = 0,
+                 storage: Optional[nve.MemBlock | nve.Table | nve_ps.NVEParameterServer] = None,
+                 weight_init: Optional[torch.Tensor] = None,
+                 optimize_for_training: bool = True,
+                 device : Optional[torch.device] = None,
+                 id : Optional[int] = None,
+                 config: Optional[dict] = None):
+        # HostLayer has no pooled-lookup implementation (HostEmbeddingLayer::lookup
+        # rejects pool_params), and the bag forward always issues a pooled lookup.
+        # Fail fast at construction rather than at the first forward().
+        if layer_type == LayerType.HostLayer:
+            raise ValueError(
+                "NVEmbeddingBag does not support LayerType.HostLayer (pooled lookups "
+                "are not implemented for the host layer). Use NVEmbedding for HostLayer.")
+        super().__init__(num_embeddings, embedding_size, data_type, layer_type, gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, storage=storage, weight_init=weight_init, optimize_for_training=optimize_for_training, device=device, id=id, config=config)
         self.mode = mode
 
     def forward(self, input: torch.Tensor, offsets: torch.Tensor, per_sample_weights: Optional[torch.Tensor] = None):
@@ -388,9 +467,13 @@ class NVEmbeddingBag(NVEmbeddingBase):
                     input, self.weight, offsets, self.mode, per_sample_weights)
         elif self.mode == "concat":
             if self.optimize_for_training:
-                return nve_ops.NVEmbeddingOpTraining.apply(input, self.weight, self.id)
+                return nve_ops.NVEmbeddingOpTraining.apply(
+                    self.marker_tensor, input, self.weight,
+                    self.embedding_size, self.dtype_tag)
             else:
-                return nve_ops.NVEmbeddingOp.apply(input, self.id)
+                return nve_ops.NVEmbeddingOp.apply(
+                    self.marker_tensor, input,
+                    self.embedding_size, self.dtype_tag)
         else:
             if per_sample_weights is not None:
                 pooling_type = int(nve.PoolingType_t.WeightedSum) if self.mode == "sum" \
@@ -400,17 +483,10 @@ class NVEmbeddingBag(NVEmbeddingBase):
                                else int(nve.PoolingType_t.Mean)
             if self.optimize_for_training:
                 return nve_ops.NVEmbeddingBagOpTraining.apply(
-                    input, self.weight, offsets, per_sample_weights, pooling_type, self.id)
+                    self.marker_tensor, input, self.weight, offsets,
+                    per_sample_weights, pooling_type,
+                    self.embedding_size, self.dtype_tag)
             else:
                 return nve_ops.NVEmbeddingBagOp.apply(
-                    input, offsets, per_sample_weights, pooling_type, self.id)
-
-    def __reduce_ex__(self, protocol):
-        if self.save_stream is not None and self.cache_type in (CacheType.LinearUVM, CacheType.NoCache):
-            nve.write_tensor_to_stream(self.emb_layer, self.save_stream, self.id)
-            return (NVEmbeddingBag._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, self.mode, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "id": self.id}), None )
-        else:
-            return (NVEmbeddingBag._custom_builder, (self.num_embeddings, self.embedding_size, self.data_type, self.cache_type, self.mode, {"gpu_cache_size": self.gpu_cache_size, "optimize_for_training": self.optimize_for_training, "device": self.device, "weight_init": self.weight, "id": self.id}), None )
-
-    def _custom_builder(num_embeddings, embedding_size, data_type, cache_type, mode, kwargs):
-            return NVEmbeddingBag(num_embeddings, embedding_size, data_type, cache_type, mode, **kwargs)
+                    self.marker_tensor, input, offsets, per_sample_weights,
+                    pooling_type, self.embedding_size, self.dtype_tag)

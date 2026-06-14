@@ -21,7 +21,7 @@
 #include <algorithm>
 #include <thread>
 #include <numeric>
-#include "../common/buffer.h"
+#include "../common/test_buffer.h"
 
 template<typename KeyT_>
 class DedupTest : public testing::Test
@@ -36,25 +36,25 @@ public:
     void AllocateDedupBuffers(size_t num_keys)
     {
         m_num_keys = num_keys;
-        m_keys = std::make_shared<Buffer<KeyT>>(num_keys*sizeof(KeyT));
-        m_unique_out = std::make_shared<Buffer<KeyT>>(num_keys*sizeof(KeyT));
-        m_counts_out = std::make_shared<Buffer<KeyT>>(num_keys*sizeof(KeyT));
-        m_num_runs_out = std::make_shared<Buffer<KeyT>>(sizeof(KeyT));
-        m_inverse_buffer = std::make_shared<Buffer<KeyT>>(num_keys*sizeof(KeyT));
-        m_offsets = std::make_shared<Buffer<KeyT>>(num_keys*sizeof(KeyT));
+        m_keys = std::make_shared<TestBuffer<KeyT>>(num_keys*sizeof(KeyT));
+        m_unique_out = std::make_shared<TestBuffer<KeyT>>(num_keys*sizeof(KeyT));
+        m_counts_out = std::make_shared<TestBuffer<KeyT>>(num_keys*sizeof(KeyT));
+        m_num_runs_out = std::make_shared<TestBuffer<KeyT>>(sizeof(KeyT));
+        m_inverse_buffer = std::make_shared<TestBuffer<KeyT>>(num_keys*sizeof(KeyT));
+        m_offsets = std::make_shared<TestBuffer<KeyT>>(num_keys*sizeof(KeyT));
         m_deduper = std::make_shared<Deduper<KeyT>>(num_keys);
     }
 
     void AllocateExpandBuffers(size_t row_size_in_bytes, size_t num_rows, size_t num_keys)
     {
-        m_dense_buffer = std::make_shared<Buffer<int8_t>>(num_rows * row_size_in_bytes);
-        m_expand_buffer = std::make_shared<Buffer<int8_t>>(num_keys * row_size_in_bytes);
+        m_dense_buffer = std::make_shared<TestBuffer<int8_t>>(num_rows * row_size_in_bytes);
+        m_expand_buffer = std::make_shared<TestBuffer<int8_t>>(num_keys * row_size_in_bytes);
     }
 
     void AllocateAccumulateBuffers(size_t row_size_in_bytes, size_t num_keys, size_t num_rows)
     {
-        m_dense_buffer = std::make_shared<Buffer<int8_t>>(num_rows * row_size_in_bytes);
-        m_accumulate_buffer = std::make_shared<Buffer<int8_t>>(num_keys * row_size_in_bytes);
+        m_dense_buffer = std::make_shared<TestBuffer<int8_t>>(num_rows * row_size_in_bytes);
+        m_accumulate_buffer = std::make_shared<TestBuffer<int8_t>>(num_keys * row_size_in_bytes);
     }
 
     void GenerateInputs(size_t batch, size_t hotness, const size_t N, const float alpha)
@@ -196,15 +196,15 @@ public:
         m_dense_buffer->HtoD(m_stream);
     }
 
-    std::shared_ptr<Buffer<KeyT>> m_keys = nullptr;
-    std::shared_ptr<Buffer<KeyT>> m_unique_out = nullptr;
-    std::shared_ptr<Buffer<KeyT>> m_counts_out = nullptr;
-    std::shared_ptr<Buffer<KeyT>> m_num_runs_out = nullptr;
-    std::shared_ptr<Buffer<KeyT>> m_inverse_buffer = nullptr;
-    std::shared_ptr<Buffer<KeyT>> m_offsets = nullptr;
-    std::shared_ptr<Buffer<int8_t>> m_expand_buffer = nullptr;
-    std::shared_ptr<Buffer<int8_t>> m_dense_buffer = nullptr;
-    std::shared_ptr<Buffer<int8_t>> m_accumulate_buffer = nullptr;
+    std::shared_ptr<TestBuffer<KeyT>> m_keys = nullptr;
+    std::shared_ptr<TestBuffer<KeyT>> m_unique_out = nullptr;
+    std::shared_ptr<TestBuffer<KeyT>> m_counts_out = nullptr;
+    std::shared_ptr<TestBuffer<KeyT>> m_num_runs_out = nullptr;
+    std::shared_ptr<TestBuffer<KeyT>> m_inverse_buffer = nullptr;
+    std::shared_ptr<TestBuffer<KeyT>> m_offsets = nullptr;
+    std::shared_ptr<TestBuffer<int8_t>> m_expand_buffer = nullptr;
+    std::shared_ptr<TestBuffer<int8_t>> m_dense_buffer = nullptr;
+    std::shared_ptr<TestBuffer<int8_t>> m_accumulate_buffer = nullptr;
 
     std::shared_ptr<Deduper<KeyT>> m_deduper = nullptr;
     cudaStream_t m_stream;

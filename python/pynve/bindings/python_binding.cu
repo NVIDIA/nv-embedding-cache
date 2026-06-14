@@ -102,6 +102,18 @@ namespace nve {
         layer->load_tensor_from_stream(sw, name);
     }
 
+    void write_tensor_to_stream(std::shared_ptr<HostEmbedding<IndexT>> layer, py::object stream, uint64_t name)
+    {
+        nve::PyStreamWrapper sw(stream);
+        layer->write_tensor_to_stream(sw, name);
+    }
+
+    void load_tensor_from_stream(std::shared_ptr<HostEmbedding<IndexT>> layer, py::object stream, uint64_t name)
+    {
+        nve::PyStreamWrapper sw(stream);
+        layer->load_tensor_from_stream(sw, name);
+    }
+
     class PyDistributedEnv : public DistributedEnv, public py::trampoline_self_life_support {
     public:
         /* Inherit the constructors */
@@ -149,12 +161,21 @@ PYBIND11_MODULE(nve, m) {
     py::class_<GPUEmbedding<IndexT>, NVEmbedBinding<IndexT>, std::shared_ptr<GPUEmbedding<IndexT>>> (m, "GPUEmbedding")
         .def(py::init<size_t, size_t, nve::DataType_t, std::shared_ptr<MemBlock>, int, EmbedLayerConfig>());
 
+    py::class_<HostEmbedding<IndexT>, NVEmbedBinding<IndexT>, std::shared_ptr<HostEmbedding<IndexT>>> (m, "HostEmbedding")
+        .def(py::init<size_t, size_t, nve::DataType_t, std::shared_ptr<MemBlock>, int, EmbedLayerConfig>())
+        .def("load_tensor_from_stream", &HostEmbedding<IndexT>::load_tensor_from_stream)
+        .def("write_tensor_to_stream", &HostEmbedding<IndexT>::write_tensor_to_stream);
+
     py::class_<EmbedLayerConfig>(m, "EmbedLayerConfig")
         .def(py::init<>())
         .def_readwrite("logging_interval", &EmbedLayerConfig::logging_interval)
         .def_readwrite("kernel_mode", &EmbedLayerConfig::kernel_mode)
         .def_readwrite("kernel_mode_value_1", &EmbedLayerConfig::kernel_mode_value_1)
-        .def_readwrite("kernel_mode_value_2", &EmbedLayerConfig::kernel_mode_value_2);
+        .def_readwrite("kernel_mode_value_2", &EmbedLayerConfig::kernel_mode_value_2)
+        .def_readwrite("max_modify_size", &EmbedLayerConfig::max_modify_size)
+        .def("to_json", [](const EmbedLayerConfig& c) {
+            return nlohmann::json(c).dump();
+        }, "Serialize the config to a JSON string.");
 
     py::class_<nve::Table, std::shared_ptr<nve::Table>>(m, "Table");
 
@@ -190,6 +211,7 @@ PYBIND11_MODULE(nve, m) {
         .value("MPI", MemBlockType::MPI)
         .value("Managed", MemBlockType::MANAGED)
         .value("User", MemBlockType::USER)
+        .value("Host", MemBlockType::HOST)
         .export_values();
 
     py::class_<MemBlock, std::shared_ptr<MemBlock>>(m, "MemBlock")
@@ -224,6 +246,17 @@ PYBIND11_MODULE(nve, m) {
 
     py::class_<ManagedMemBlock, MemBlock, std::shared_ptr<ManagedMemBlock>>(m, "ManagedMemBlock")
         .def(py::init<size_t, size_t, nve::DataType_t, std::vector<int>>());
+
+    py::class_<HostMemBlock, MemBlock, std::shared_ptr<HostMemBlock>>(m, "HostMemBlock")
+        .def(py::init<size_t, size_t, nve::DataType_t>(),
+             py::arg("row_size"), py::arg("num_embeddings"), py::arg("dtype"));
+
+    m.def("resolve_memblock_devices",
+          &nve::resolve_memblock_devices,
+          py::arg("type"), py::arg("def_index"), py::arg("override") = std::vector<int>{},
+          "Return gpu_ids for reconstructing a memblock at load time. "
+          "NVL spans [def_index, cudaGetDeviceCount()-1]; others return [def_index]. "
+          "override, if non-empty, is returned as-is.");
 
     py::enum_<ParameterServerTable::PSType_t>(m, "PSType_t")
         .value("NVHashMap", ParameterServerTable::PSType_t::NVHashMap)
@@ -301,26 +334,28 @@ PYBIND11_MODULE(nve, m) {
           static_cast<void(*)(std::shared_ptr<LinearUVMEmbedding<IndexT>>, py::object, uint64_t)>(&load_tensor_from_stream));
     m.def("load_tensor_from_stream",
           static_cast<void(*)(std::shared_ptr<GPUEmbedding<IndexT>>, py::object, uint64_t)>(&load_tensor_from_stream));
+    m.def("write_tensor_to_stream",
+          static_cast<void(*)(std::shared_ptr<HostEmbedding<IndexT>>, py::object, uint64_t)>(&write_tensor_to_stream));
+    m.def("load_tensor_from_stream",
+          static_cast<void(*)(std::shared_ptr<HostEmbedding<IndexT>>, py::object, uint64_t)>(&load_tensor_from_stream));
     m.def("insert_keys_from_numpy_file", &insert_keys_from_numpy_file);
     m.def("insert_keys_from_binary_file", &insert_keys_from_binary_file);
 
 #ifdef NVE_WITH_TORCH_BINDINGS
+    // Layers are keyed in the registry by the data_ptr() of their per-layer
+    // marker tensor (passed from Python as an int). This is globally unique
+    // across host + all CUDA devices under UVA, so multiple models / loader
+    // instances coexist in one process without layer-id collisions.
     m.def("register_for_torch",
-        [](int64_t layer_id, std::shared_ptr<NVEmbedBinding<int64_t>> sptr) {
-            NVELayerRegistry::instance().register_binding(layer_id, std::move(sptr));
-        }, py::arg("layer_id"), py::arg("binding"));
+        [](int64_t marker_ptr, std::shared_ptr<NVEmbedBinding<int64_t>> sptr) {
+            NVELayerRegistry::instance().register_binding(
+                reinterpret_cast<const void*>(marker_ptr), std::move(sptr));
+        }, py::arg("marker_ptr"), py::arg("binding"));
     m.def("unregister_from_torch",
-        [](int64_t layer_id) {
-            NVELayerRegistry::instance().unregister_binding(layer_id);
-        }, py::arg("layer_id"));
-    m.def("get_torch_binding_info",
-        [](int64_t layer_id) {
-            auto binding = NVELayerRegistry::instance().get_binding(layer_id);
-            return std::make_tuple(binding->get_embedding_dim(),
-                                   binding->get_data_type());
-        }, py::arg("layer_id"),
-        "Return (embedding_dim, DataType_t) for a torch-registered layer. "
-        "Used by Python-side register_fake kernels.");
+        [](int64_t marker_ptr) {
+            NVELayerRegistry::instance().unregister_binding(
+                reinterpret_cast<const void*>(marker_ptr));
+        }, py::arg("marker_ptr"));
 #endif
 }
 

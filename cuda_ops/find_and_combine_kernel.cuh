@@ -56,6 +56,8 @@ __global__ void FindAndCombine(const uint32_t batchSz,
         }
     }
 
+    constexpr auto vecSizeInElements = sizeof(ELEMENT_VEC_TYPE) / sizeof(ELEMENT_TYPE);
+    int32_t rowSizeInVecs = rowSizeInElements / vecSizeInElements;
     const INDEX_TYPE sampleStart = FIXED_HOTNESS ? sampleId * hotness :  offsets[sampleId];
     const INDEX_TYPE sampleEnd = sampleStart + hotness;
     const INDEX_TYPE* currIdx = indices + sampleStart;
@@ -73,7 +75,7 @@ __global__ void FindAndCombine(const uint32_t batchSz,
                 for (uint32_t k = 0; k < SZ_ACCUM; k++)
                 {
                     uint32_t offset = hotnessTid + k * SUBWARP_WIDTH;
-                    if ( offset < rowSizeInElements)
+                    if (offset < static_cast<uint32_t>(rowSizeInVecs))
                     {
                         ELEMENT_VEC_TYPE el_raw = *((ELEMENT_VEC_TYPE*)ptr + offset);
                         ACC_VEC_TYPE el_cast = Cast<ELEMENT_VEC_TYPE, ACC_VEC_TYPE>(el_raw);
@@ -105,9 +107,6 @@ __global__ void FindAndCombine(const uint32_t batchSz,
     ELEMENT_VEC_TYPE* currOut = reinterpret_cast<ELEMENT_VEC_TYPE*>(pOutput + sampleId * rowSizeInElements);
 
     // TODO: try loop on acc size
-    constexpr auto vecSizeInElements = sizeof(ELEMENT_VEC_TYPE) / sizeof(ELEMENT_TYPE);
-    int32_t rowSizeInVecs = rowSizeInElements / vecSizeInElements;
-
     for (int32_t j = hotnessTid, k = 0; j < rowSizeInVecs; j += SUBWARP_WIDTH, ++k)
     {
         if (!SUM_POOLING) {
@@ -118,139 +117,80 @@ __global__ void FindAndCombine(const uint32_t batchSz,
     }
 }
 
-template<typename ELEMENT_TYPE, typename INDEX_TYPE, typename ACC_TYPE, typename CacheDataT, 
+template<typename ELEMENT_TYPE, typename INDEX_TYPE, typename ACC_TYPE, typename CacheDataT,
          bool FIXED_HOTNESS, bool SUM_POOLING, bool IS_WEIGHTED>
 void callFindAndCombineKernel(const uint32_t batchSz,
                              const int8_t* __restrict__ table,
-                             const INDEX_TYPE* __restrict__ indices, 
+                             const INDEX_TYPE* __restrict__ indices,
                              const INDEX_TYPE* __restrict__ offsets,
                              const ELEMENT_TYPE* __restrict__ weights,
-                             int32_t num_hot,  CacheDataT cache, 
+                             int32_t num_hot,  CacheDataT cache,
                              int32_t rowSizeInElements,
                              ELEMENT_TYPE* output,
                              cudaStream_t stream)
 {
     dim3 gridSize (batchSz, 1);
     dim3 blockSize (32, 1);
+    constexpr int32_t SUBWARP_WIDTH = 32;
+
+    // Each thread holds SZ_ACCUM vector accumulators; with SUBWARP_WIDTH (=32) threads per row
+    // this covers up to SUBWARP_WIDTH * SZ_ACCUM * vecSizeInElements row elements. Raising the
+    // SZ_ACCUM cap costs register pressure / kernel-variant count, so we cap each vector-width path
+    // independently. Current caps cover up to 1024 fp32 / 2048 fp16 row elements on the Vec4 path,
+    // which is enough for common embedding dimensions.
+#define NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, ELEMENT_VEC_T, ACC_VEC_T) \
+    FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE, \
+                   ELEMENT_VEC_T, ACC_VEC_T, CacheDataT, \
+                   (SZ_ACC_RUNTIME), FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED> \
+        <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, \
+                                             num_hot, cache, rowSizeInElements, output)
+
+#define NVE_FAC_DISPATCH(SZ_ACC_RUNTIME, ELEMENT_VEC_T, ACC_VEC_T, MAX_SZ)                          \
+    do {                                                                                        \
+        switch (SZ_ACC_RUNTIME) {                                                                   \
+          case 1: NVE_FAC_LAUNCH(1, ELEMENT_VEC_T, ACC_VEC_T); break;                           \
+          case 2: NVE_FAC_LAUNCH(2, ELEMENT_VEC_T, ACC_VEC_T); break;                           \
+          case 3: if constexpr ((MAX_SZ) >= 3) { NVE_FAC_LAUNCH(3, ELEMENT_VEC_T, ACC_VEC_T); } \
+                  else { NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME); } break;     \
+          case 4: if constexpr ((MAX_SZ) >= 4) { NVE_FAC_LAUNCH(4, ELEMENT_VEC_T, ACC_VEC_T); } \
+                  else { NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME); } break;     \
+          case 5: if constexpr ((MAX_SZ) >= 5) { NVE_FAC_LAUNCH(5, ELEMENT_VEC_T, ACC_VEC_T); } \
+                  else { NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME); } break;     \
+          case 6: if constexpr ((MAX_SZ) >= 6) { NVE_FAC_LAUNCH(6, ELEMENT_VEC_T, ACC_VEC_T); } \
+                  else { NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME); } break;     \
+          case 7: if constexpr ((MAX_SZ) >= 7) { NVE_FAC_LAUNCH(7, ELEMENT_VEC_T, ACC_VEC_T); } \
+                  else { NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME); } break;     \
+          case 8: if constexpr ((MAX_SZ) >= 8) { NVE_FAC_LAUNCH(8, ELEMENT_VEC_T, ACC_VEC_T); } \
+                  else { NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME); } break;     \
+          default: NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME);                    \
+        }                                                                                       \
+    } while (0)
 
     switch (rowSizeInElements % 4) {
       case 0:
           {
-            const int32_t SUBWARP_WIDTH = 32;
-            uint32_t SZ_ACCUM = DivRoundUp(rowSizeInElements, SUBWARP_WIDTH * 4);
+            const uint32_t SZ_ACCUM = DivRoundUp(rowSizeInElements, SUBWARP_WIDTH * 4);
             using ELEMENT_VEC_TYPE = typename VecWidthHelper<ELEMENT_TYPE>::Vec4;
             using ACC_VEC_TYPE = typename VecWidthHelper<ACC_TYPE>::Vec4;
-
-            switch (SZ_ACCUM)
-            {
-              case 2:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_VEC_TYPE, ACC_VEC_TYPE, CacheDataT,
-                            2, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-              case 1:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_VEC_TYPE, ACC_VEC_TYPE, CacheDataT,
-                            1, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-              default:
-                assert(0);
-            }
+            NVE_FAC_DISPATCH(SZ_ACCUM, ELEMENT_VEC_TYPE, ACC_VEC_TYPE, 8);
             break;
           }
       case 2:
           {
-            const int32_t SUBWARP_WIDTH = 32;
-            uint32_t SZ_ACCUM = DivRoundUp(rowSizeInElements, SUBWARP_WIDTH * 2);
+            const uint32_t SZ_ACCUM = DivRoundUp(rowSizeInElements, SUBWARP_WIDTH * 2);
             using ELEMENT_VEC_TYPE = typename VecWidthHelper<ELEMENT_TYPE>::Vec2;
             using ACC_VEC_TYPE = typename VecWidthHelper<ACC_TYPE>::Vec2;
-            switch (SZ_ACCUM)
-            {
-              case 4:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_VEC_TYPE, ACC_VEC_TYPE, CacheDataT,
-                            4, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-              case 2:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_VEC_TYPE, ACC_VEC_TYPE, CacheDataT,
-                            2, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-              case 1:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_VEC_TYPE, ACC_VEC_TYPE, CacheDataT,
-                            1, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-              default:
-                assert(0);
-            }
+            NVE_FAC_DISPATCH(SZ_ACCUM, ELEMENT_VEC_TYPE, ACC_VEC_TYPE, 8);
             break;
           }
-          break;
       default:
           {
-            const int32_t SUBWARP_WIDTH = 32;
-            uint32_t SZ_ACCUM = DivRoundUp(rowSizeInElements, SUBWARP_WIDTH);
-
-            switch (SZ_ACCUM)
-            {
-            case 8:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            8, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 7:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            7, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 6:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            6, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 5:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            5, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 4:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            4, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 3:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            3, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 2:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            2, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            case 1:
-                FindAndCombine<ELEMENT_TYPE, INDEX_TYPE, ACC_TYPE,
-                            ELEMENT_TYPE, ACC_TYPE, CacheDataT,
-                            1, FIXED_HOTNESS, SUM_POOLING, IS_WEIGHTED>
-                    <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights, num_hot, cache, static_cast<int32_t>(rowSizeInElements), output);
-                break;
-            default:
-                assert(0);
-            }
+            const uint32_t SZ_ACCUM = DivRoundUp(rowSizeInElements, SUBWARP_WIDTH);
+            NVE_FAC_DISPATCH(SZ_ACCUM, ELEMENT_TYPE, ACC_TYPE, 8);
+            break;
           }
     }
+#undef NVE_FAC_DISPATCH
+#undef NVE_FAC_LAUNCH
     NVE_CHECK_(cudaGetLastError()); // Check kernel launch didn't generate an error
 }

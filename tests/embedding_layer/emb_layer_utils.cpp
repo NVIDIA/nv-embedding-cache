@@ -74,4 +74,40 @@ void store_as_dtype(void* ptr, int64_t idx, DataType_t dtype, float val) {
   }
 }
 
+float load_quant_row_element_as_float(const int8_t* row_ptr, int64_t e, int64_t value_count, DataType_t dtype) {
+  assert(row_ptr);
+  // Load base integer value (int8 for symmetric, uint8 for affine).
+  const float base_val =
+      (dtype == DataType_t::QInt8RowwiseF32 || dtype == DataType_t::QInt8RowwiseF16)
+          ? static_cast<float>(row_ptr[e])
+          : static_cast<float>(reinterpret_cast<const uint8_t*>(row_ptr)[e]);
+
+  // Scale is stored as the first metadata element after the value bytes.
+  const bool fp32_meta = (dtype == DataType_t::QInt8RowwiseF32 || dtype == DataType_t::QUint8RowwiseF32);
+  const int64_t scale_bytes = fp32_meta ? static_cast<int64_t>(sizeof(float))
+                                        : static_cast<int64_t>(sizeof(uint16_t));
+  const int8_t* scale_ptr = row_ptr + value_count;
+  float scale;
+  if (fp32_meta) {
+    std::memcpy(&scale, scale_ptr, sizeof(float));
+  } else {
+    uint16_t raw; std::memcpy(&raw, scale_ptr, sizeof(uint16_t));
+    scale = __half2float(__half_raw{raw});
+  }
+
+  // Affine uint8 types carry an additional offset element after the scale.
+  float offset = 0.f;
+  if (dtype == DataType_t::QUint8RowwiseF32 || dtype == DataType_t::QUint8RowwiseF16) {
+    const int8_t* off_ptr = scale_ptr + scale_bytes;
+    if (fp32_meta) {
+      std::memcpy(&offset, off_ptr, sizeof(float));
+    } else {
+      uint16_t raw; std::memcpy(&raw, off_ptr, sizeof(uint16_t));
+      offset = __half2float(__half_raw{raw});
+    }
+  }
+
+  return base_val * scale + offset;
+}
+
 }  // namespace nve

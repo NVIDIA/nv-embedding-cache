@@ -36,9 +36,9 @@ class SimpleModel(torch.nn.Module):
     def __init__(self, embedding_dim, num_embeddings, *, data_type : torch.dtype = torch.float32, cache_size: int = 1024**3, remote_interface = None, weight_init : torch.Tensor = None):
         super(SimpleModel, self).__init__()
         if remote_interface is None:
-            self.embedding = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=weight_init, optimize_for_training=False)
+            self.embedding = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=weight_init, optimize_for_training=False)
         else:
-            self.embedding = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=remote_interface, weight_init=weight_init, optimize_for_training=False)
+            self.embedding = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=remote_interface, weight_init=weight_init, optimize_for_training=False)
 
     def forward(self, x):
         x = self.embedding(x)

@@ -59,6 +59,12 @@ enum class DataTypeID_t : uint32_t {
   E4M3,
   E5M2,
   Float64,
+  QInt8RowwiseF32,  // int8 values with per-row symmetric quantization (fp32 scale, no offset),
+                    // dequantized as value*scale on lookup.
+  QInt8RowwiseF16,  // int8 values with per-row symmetric quantization (fp16 scale, no offset).
+  QUint8RowwiseF32, // uint8 values with per-row affine quantization (fp32 scale + offset),
+                    // dequantized as value*scale + offset on lookup.
+  QUint8RowwiseF16, // uint8 values with per-row affine quantization (fp16 scale + offset).
 };
 
 static constexpr const char* to_string(const DataTypeID_t dt_id) {
@@ -77,6 +83,14 @@ static constexpr const char* to_string(const DataTypeID_t dt_id) {
       return "e5m2";
     case DataTypeID_t::Float64:
       return "float64";
+    case DataTypeID_t::QInt8RowwiseF32:
+      return "qint8_rowwise_f32";
+    case DataTypeID_t::QInt8RowwiseF16:
+      return "qint8_rowwise_f16";
+    case DataTypeID_t::QUint8RowwiseF32:
+      return "quint8_rowwise_f32";
+    case DataTypeID_t::QUint8RowwiseF16:
+      return "quint8_rowwise_f16";
   }
   NVE_THROW_("Unknown data type ID!");
 }
@@ -106,6 +120,15 @@ enum class DataType_t : uint64_t {
       DataTypeID_t::E5M2),  // https://arxiv.org/abs/2209.05433, typically used for gradients.
   Float64 = make_dtype<double>(
       DataTypeID_t::Float64),  // IEEE-754 64 bit double precision format (E11M52).
+  // Per-row quantized int8/uint8. dtype_size() is the value element size (1 byte) for all;
+  // the per-row scale (and offset for the affine uint8 variants) lives as trailing row metadata
+  // accounted for in the row stride, not here. int8 variants are symmetric (scale only: 4 bytes
+  // for F32, 2 bytes for F16); uint8 variants are affine (scale + offset: 8 bytes for F32, 4 bytes
+  // for F16).
+  QInt8RowwiseF32 = make_dtype<int8_t>(DataTypeID_t::QInt8RowwiseF32),
+  QInt8RowwiseF16 = make_dtype<int8_t>(DataTypeID_t::QInt8RowwiseF16),
+  QUint8RowwiseF32 = make_dtype<uint8_t>(DataTypeID_t::QUint8RowwiseF32),
+  QUint8RowwiseF16 = make_dtype<uint8_t>(DataTypeID_t::QUint8RowwiseF16),
 };
 
 static constexpr DataTypeID_t dtype_id(const DataType_t dtype) noexcept {

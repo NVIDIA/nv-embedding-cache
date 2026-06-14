@@ -69,15 +69,16 @@ class HierarchicalEmbeddingLayer : public EmbeddingLayerBase {
               int64_t table_id) override;
   void update(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
               const int64_t value_stride, const int64_t value_size,
-              const void* values) override;
+              const void* values, const int64_t table_id) override;
   void accumulate(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
                   const int64_t value_stride, const int64_t value_size, const void* values,
-                  DataType_t value_type) override;
+                  DataType_t value_type, const int64_t table_id) override;
   void clear(context_ptr_t& ctx) override;
   void erase(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
              int64_t table_id) override;
   context_ptr_t create_execution_context(
     cudaStream_t lookup_stream, cudaStream_t modify_stream, thread_pool_ptr_t thread_pool, allocator_ptr_t allocator) override;
+  int64_t get_num_tables() const override;
 
   inline const Config& get_config() const { return config_; }
 

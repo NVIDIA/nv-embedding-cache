@@ -52,7 +52,7 @@ class SimpleInitializer (Iterator):
 class NVEParameterServer ():
     """Wrapper class for a parameter server (can be local or remote).
 
-    This class is meant to be used by NVEmbedding of type CacheType.Hierarchical.
+    This class is meant to be used by NVEmbedding of type LayerType.Hierarchical.
     It can be used as a secondary cache, between the GPU cache and a remote parameter server, or as a
     local key-vector storage to back the GPU cache.
 

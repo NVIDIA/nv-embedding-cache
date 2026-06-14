@@ -280,8 +280,24 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nve_torch.cmake)
 #   CMAKE_PREFIX_PATH        — extended with the torch cmake prefix (on success only)
 nve_configure_torch()
 if(NOT NVE_DISABLE_TORCH_BINDINGS)
+    if(TORCH_ARCH_STR AND NOT TORCH_CUDA_ARCH_LIST)
+        set(TORCH_CUDA_ARCH_LIST "${TORCH_ARCH_STR}")
+    endif()
+    if(TORCH_CUDA_ARCH_LIST)
+        message(STATUS "TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}")
+    endif()
+
+    # PyTorch's CMake package appends CUDA arch and diagnostic flags to
+    # CMAKE_CUDA_FLAGS and sets CMAKE_CUDA_ARCHITECTURES to OFF. Keep those
+    # changes local to nve-torch-ops so later CUDA targets use NVE's settings.
+    set(_nve_cuda_architectures_before_torch "${CMAKE_CUDA_ARCHITECTURES}")
+    set(_nve_cuda_flags_before_torch "${CMAKE_CUDA_FLAGS}")
     find_package(Torch REQUIRED)
     add_subdirectory(python/pynve/torch_bindings)
+    set(CMAKE_CUDA_ARCHITECTURES "${_nve_cuda_architectures_before_torch}")
+    set(CMAKE_CUDA_FLAGS "${_nve_cuda_flags_before_torch}")
+    unset(_nve_cuda_architectures_before_torch)
+    unset(_nve_cuda_flags_before_torch)
 endif()
 
 add_subdirectory(python/pynve/bindings)

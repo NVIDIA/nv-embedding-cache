@@ -20,6 +20,7 @@
 #include <default_allocator.hpp>
 #include <thread_pool.hpp>
 #include <resizeable_buffer.hpp>
+#include "cuda_ops/cuda_common.h"
 
 namespace nve {
 
@@ -73,8 +74,9 @@ ExecutionContext::ExecutionContext(
     cudaStream_t lookup_stream,
     cudaStream_t modify_stream,
     thread_pool_ptr_t thread_pool,
-    allocator_ptr_t allocator) : 
-    lookup_stream_(lookup_stream), modify_stream_(modify_stream), thread_pool_(std::move(thread_pool))
+    allocator_ptr_t allocator) :
+    lookup_stream_(lookup_stream), modify_stream_(modify_stream), thread_pool_(std::move(thread_pool)),
+    driver_available_(::driver_available())
 {
   if (!thread_pool_) {
     thread_pool_ = default_thread_pool();
@@ -86,9 +88,13 @@ ExecutionContext::ExecutionContext(
 
 ExecutionContext::~ExecutionContext() {
   wait();
-  for (auto& kv : aux_streams_storage_) {
-    for (auto& stream : kv.second) {
-      NVE_CHECK_(cudaStreamDestroy(stream));
+  // Without a CUDA driver there are no aux streams to destroy, and the runtime
+  // calls would fail anyway — skip them during teardown.
+  if (driver_available_) {
+    for (auto& kv : aux_streams_storage_) {
+      for (auto& stream : kv.second) {
+        NVE_CHECK_(cudaStreamDestroy(stream));
+      }
     }
   }
 }

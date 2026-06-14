@@ -340,27 +340,27 @@ class HostTableLike : public Table {
   virtual int64_t size(context_ptr_t& ctx, bool exact = true) const = 0;
 
   int32_t get_device_id() const override final { return -1; }
-
   int64_t get_max_row_size() const override final { return config().max_value_size; }
-
+  int64_t get_key_size() const override final { return config().key_size; }
   virtual int64_t get_invalid_key() const override final { return config().invalid_key; }
+  virtual DataType_t get_value_type() const override final { return config().value_dtype; }
 
-  bool lookup_counter_hits() override final { return true; }
+  bool lookup_counter_hits() const override final { return true; }
 
   void reset_lookup_counter(context_ptr_t& ctx) override {
-    auto ctx_counter = get_internal_counter(ctx);
+    auto ctx_counter = lookup_counter_storage(ctx);
     NVE_CHECK_(ctx_counter != nullptr, "Invalid key counter");
     *ctx_counter = 0;
   }
 
-  void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) override {
-    auto ctx_counter = get_internal_counter(ctx);
+  void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) const override {
+    auto ctx_counter = lookup_counter_storage(ctx);
     NVE_CHECK_(ctx_counter != nullptr, "Invalid key counter");
     *counter = *ctx_counter;
   }
 
  protected:
-  virtual int64_t* get_internal_counter(context_ptr_t& ctx) const {
+  virtual int64_t* lookup_counter_storage(context_ptr_t& ctx) const {
     static constexpr char buffer_name[]{"host_table_key_counter"};
 
     NVE_CHECK_(ctx != nullptr, "Invalid context");

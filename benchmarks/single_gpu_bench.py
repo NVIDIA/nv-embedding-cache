@@ -256,7 +256,7 @@ def get_nve_model(args, data_type, embedding_dim, num_embeddings):
     if (args.logging_interval >  0) and ('NVE_LOG_LEVEL' not in os.environ):
         os.environ['NVE_LOG_LEVEL'] = 'PERF'
     if args.mode == AlgMode.NVLinearUVM:
-        model = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.CacheType.LinearUVM, gpu_cache_size=gpu_cache_size, optimize_for_training=False, config=config)
+        model = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.LayerType.LinearUVM, gpu_cache_size=gpu_cache_size, optimize_for_training=False, config=config)
     elif args.mode == AlgMode.NVHierarchical:
         if args.host_load_factor >= 1.0:
             # Host cache is storing everything (no remote)
@@ -270,8 +270,8 @@ def get_nve_model(args, data_type, embedding_dim, num_embeddings):
                 ps_type=nve.NVHashMap,
             )
             model = nve_layers.NVEmbedding(
-                num_embeddings, embedding_dim, data_type, nve_layers.CacheType.Hierarchical,
-                gpu_cache_size=gpu_cache_size, host_cache_size=0, remote_interface=nvhm_ps, optimize_for_training=False, config=config)
+                num_embeddings, embedding_dim, data_type, nve_layers.LayerType.Hierarchical,
+                gpu_cache_size=gpu_cache_size, host_cache_size=0, storage=nvhm_ps, optimize_for_training=False, config=config)
         else:
             # Using 3 levels of storage: GPU, CPU and Remote (Redis)
 
@@ -288,11 +288,11 @@ def get_nve_model(args, data_type, embedding_dim, num_embeddings):
             )
 
             model = nve_layers.NVEmbedding(
-                num_embeddings, embedding_dim, data_type, nve_layers.CacheType.Hierarchical,
-                gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, remote_interface=redis_ps,
+                num_embeddings, embedding_dim, data_type, nve_layers.LayerType.Hierarchical,
+                gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, storage=redis_ps,
                 optimize_for_training=False, config=config)
     elif args.mode == AlgMode.NVGPU:
-        model = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.CacheType.NoCache, optimize_for_training=False, config=config)
+        model = nve_layers.NVEmbedding(num_embeddings, embedding_dim, data_type, nve_layers.LayerType.GPULayer, optimize_for_training=False, config=config)
 
     if args.clear:
         model.clear()
@@ -360,7 +360,7 @@ def main():
     if args.verbose: print("Starting to generate keys")
     key_set = []
 
-    if hasattr(model, 'cache_type') and model.cache_type == nve_layers.CacheType.Hierarchical:
+    if hasattr(model, 'layer_type') and model.layer_type == nve_layers.LayerType.Hierarchical:
         perm = torch.randint(low=0, high=2**60, size=(num_embeddings,), dtype=torch.int64, device=torch.device("cuda"))
     else:
         perm = gen_permute(args.num_table_rows, torch.device("cuda"))
@@ -380,7 +380,7 @@ def main():
             if perm != None:
                 keys = perm[keys]
             model.insert(keys, values, 0)
-            if model.cache_type == nve_layers.CacheType.Hierarchical:
+            if model.layer_type == nve_layers.LayerType.Hierarchical:
                 model.insert(keys, values, 1)
                 model.insert(keys, values, 2) # Calling insert on a nonexistent table is safe, will only yield a warning.
             start_key += batch_size

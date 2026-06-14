@@ -71,6 +71,8 @@ class STLContainerTable : public HostTable<ConfigType> {
   using mask_repr_type = typename mask_type::repr_type;
   using key_type = typename map_type::key_type;
   using meta_type = MetaType;
+  template <typename T>
+  using buffer_ptr = typename base_type::template buffer_ptr<T>;
   static constexpr PartitionerType partitioner{};
 
   NVE_PREVENT_COPY_AND_MOVE_(STLContainerTable);
@@ -83,22 +85,23 @@ class STLContainerTable : public HostTable<ConfigType> {
 
   void clear(context_ptr_t& ctx) override;
 
-  void erase(context_ptr_t& ctx, int64_t n, const void* keys) override;
-
-  void find(context_ptr_t& ctx, int64_t n, const void* keys, max_bitmask_repr_t* hit_mask,
-            int64_t value_stride, void* values, int64_t* value_sizes) const override;
-
-  void insert(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-              int64_t value_size, const void* values) override;
-
   int64_t size(context_ptr_t& ctx, bool exact) const override;
 
-  void update(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-              int64_t value_size, const void* values) override;
+  void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
 
-  void update_accumulate(context_ptr_t& ctx, int64_t n, const void* keys, int64_t update_stride,
-                         int64_t update_size, const void* updates,
-                         DataType_t update_dtype) override;
+  void find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+            buffer_ptr<max_bitmask_repr_t> hit_mask, int64_t value_stride,
+            buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override;
+
+  void insert(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
+              int64_t value_size, buffer_ptr<const void> values) override;
+
+  void update(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
+              int64_t value_size, buffer_ptr<const void> values) override;
+
+  void update_accumulate(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+                         int64_t update_stride, int64_t update_size,
+                         buffer_ptr<const void> updates, DataType_t update_dtype) override;
 
  private:
   template <bool PrefetchValues, bool WithValues, bool WithValueSizes>

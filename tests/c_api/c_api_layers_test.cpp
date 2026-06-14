@@ -179,7 +179,7 @@ TEST_F(GpuEmbeddingLayerTest, UpdateAndLookup) {
   std::vector<float> new_values(num_keys * NUM_FLOATS, 99.0f);
   CUDA_CHECK(cudaMemcpy(d_values, new_values.data(), num_keys * ROW_SIZE, cudaMemcpyHostToDevice));
 
-  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, d_keys, ROW_SIZE, ROW_SIZE, d_values));
+  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, d_keys, ROW_SIZE, ROW_SIZE, d_values, -1));
   NVE_CHECK(nve_context_wait(ctx_));
 
   // Lookup the updated keys
@@ -203,6 +203,15 @@ TEST_F(GpuEmbeddingLayerTest, Clear) {
   // so clear is a valid operation
   NVE_CHECK(nve_layer_clear(layer_, ctx_));
   NVE_CHECK(nve_context_wait(ctx_));
+}
+
+TEST_F(GpuEmbeddingLayerTest, GetNumTables) {
+  int64_t n = -1;
+  NVE_CHECK(nve_layer_get_num_tables(layer_, &n));
+  EXPECT_EQ(1, n);
+
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_layer_get_num_tables(nullptr, &n));
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_layer_get_num_tables(layer_, nullptr));
 }
 
 /* ============================================================================
@@ -666,7 +675,7 @@ TEST_F(LinearUvmLayerTest, UpdateAccumulate) {
   CUDA_CHECK(cudaMemcpy(d_grads, h_grads.data(), num_keys * ROW_SIZE, cudaMemcpyHostToDevice));
 
   NVE_CHECK(nve_layer_accumulate(layer_, ctx_, num_keys, d_keys,
-                                 ROW_SIZE, ROW_SIZE, d_grads, NVE_DTYPE_FLOAT32));
+                                 ROW_SIZE, ROW_SIZE, d_grads, NVE_DTYPE_FLOAT32, -1));
   NVE_CHECK(nve_context_wait(ctx_));
 
   // Lookup again to verify accumulation
@@ -687,6 +696,12 @@ TEST_F(LinearUvmLayerTest, UpdateAccumulate) {
   CUDA_CHECK(cudaFree(d_keys));
   CUDA_CHECK(cudaFree(d_output));
   CUDA_CHECK(cudaFree(d_grads));
+}
+
+TEST_F(LinearUvmLayerTest, GetNumTables) {
+  int64_t n = -1;
+  NVE_CHECK(nve_layer_get_num_tables(layer_, &n));
+  EXPECT_EQ(1, n);
 }
 
 /* ============================================================================
@@ -772,7 +787,7 @@ TEST_F(HierarchicalLayerTest, LookupInsertUpdateClearErase) {
   // Update
   std::vector<float> h_upd_vals(num_keys * NUM_FLOATS, 300.0f);
   CUDA_CHECK(cudaMemcpy(d_values, h_upd_vals.data(), num_keys * ROW_SIZE, cudaMemcpyHostToDevice));
-  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, d_keys, ROW_SIZE, ROW_SIZE, d_values));
+  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, d_keys, ROW_SIZE, ROW_SIZE, d_values, -1));
   NVE_CHECK(nve_context_wait(ctx_));
 
   // Verify update took effect
@@ -823,7 +838,7 @@ TEST_F(HierarchicalLayerTest, Accumulate) {
   CUDA_CHECK(cudaMemcpy(d_grads, h_grads_data.data(), num_keys * ROW_SIZE, cudaMemcpyHostToDevice));
 
   NVE_CHECK(nve_layer_accumulate(layer_, ctx_, num_keys, d_keys,
-                                 ROW_SIZE, ROW_SIZE, d_grads, NVE_DTYPE_FLOAT32));
+                                 ROW_SIZE, ROW_SIZE, d_grads, NVE_DTYPE_FLOAT32, -1));
   NVE_CHECK(nve_context_wait(ctx_));
 
   // Verify: should be 50.0 + 10.0 = 60.0
@@ -841,6 +856,12 @@ TEST_F(HierarchicalLayerTest, Accumulate) {
   CUDA_CHECK(cudaFree(d_output));
   CUDA_CHECK(cudaFree(d_grads));
   CUDA_CHECK(cudaFree(d_vals));
+}
+
+TEST_F(HierarchicalLayerTest, GetNumTables) {
+  int64_t n = -1;
+  NVE_CHECK(nve_layer_get_num_tables(layer_, &n));
+  EXPECT_EQ(1, n);
 }
 
 /* ============================================================================
@@ -1018,13 +1039,13 @@ TEST_F(HierarchicalNvhmLayerTest, UpdateAndAccumulate) {
 
   // Update to new values
   std::vector<float> h_upd(num_keys * NUM_FLOATS, 50.0f);
-  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, h_keys.data(), ROW_SIZE, ROW_SIZE, h_upd.data()));
+  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, h_keys.data(), ROW_SIZE, ROW_SIZE, h_upd.data(), -1));
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Accumulate gradient of 5.0
   std::vector<float> h_grads(num_keys * NUM_FLOATS, 5.0f);
   NVE_CHECK(nve_layer_accumulate(layer_, ctx_, num_keys, h_keys.data(),
-                                 ROW_SIZE, ROW_SIZE, h_grads.data(), NVE_DTYPE_FLOAT32));
+                                 ROW_SIZE, ROW_SIZE, h_grads.data(), NVE_DTYPE_FLOAT32, -1));
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Verify: 50.0 + 5.0 = 55.0
@@ -1166,6 +1187,87 @@ TEST(HierarchicalDefaultEmbedding, FillsMissesViaCApi) {
 }
 
 /* ============================================================================
+ * Host-only Layer
+ * ============================================================================ */
+
+TEST(HostEmbeddingLayer, LookupAndDefaultEmbeddingViaCApi) {
+  nve_status_t st = nve_load_host_table_plugin(nve_test::plugin_full_path("nvhm").c_str());
+  if (st != NVE_SUCCESS) {
+    GTEST_SKIP() << "NVHM plugin not available";
+  }
+
+  nve_host_factory_t factory = nullptr;
+  NVE_CHECK(nve_create_host_table_factory(&factory, R"({"implementation": "nvhm_map"})"));
+
+  const char* table_config = R"({
+    "mask_size": 8,
+    "key_size": 8,
+    "max_value_size": 128,
+    "value_dtype": "float32",
+    "num_partitions": 2,
+    "initial_capacity": 1024,
+    "value_alignment": 32
+  })";
+  nve_table_t host_table = nullptr;
+  NVE_CHECK(nve_host_factory_produce(factory, 0, table_config, &host_table));
+
+  const size_t num_floats = static_cast<size_t>(NUM_FLOATS);
+  std::vector<float> default_emb(num_floats, 7.5f);
+  auto layer_cfg = nve_host_embedding_layer_config_default();
+  layer_cfg.layer_name = "test_host_layer";
+  layer_cfg.default_embedding = default_emb.data();
+  layer_cfg.default_embedding_size = static_cast<int64_t>(default_emb.size() * sizeof(float));
+
+  nve_layer_t layer = nullptr;
+  NVE_CHECK(nve_host_embedding_layer_create(&layer, NVE_KEY_INT64, &layer_cfg, host_table, nullptr));
+
+  nve_context_t ctx = nullptr;
+  NVE_CHECK(nve_layer_create_execution_context(layer, &ctx, nullptr, nullptr, nullptr, nullptr));
+  NVE_CHECK(nve_layer_clear(layer, ctx));
+  NVE_CHECK(nve_context_wait(ctx));
+
+  const int64_t num_inserted = 4;
+  const size_t num_inserted_size = static_cast<size_t>(num_inserted);
+  std::vector<int64_t> insert_keys = {0, 1, 2, 3};
+  std::vector<float> insert_vals(num_inserted_size * num_floats);
+  for (size_t r = 0; r < num_inserted_size; ++r) {
+    for (size_t c = 0; c < num_floats; ++c) {
+      insert_vals[r * num_floats + c] = 100.0f + static_cast<float>(r);
+    }
+  }
+  NVE_CHECK(nve_layer_insert(layer, ctx, num_inserted, insert_keys.data(),
+                             ROW_SIZE, ROW_SIZE, insert_vals.data(), 0));
+  NVE_CHECK(nve_context_wait(ctx));
+
+  std::vector<int64_t> lookup_keys = {0, 1, 2, 3, 4, 5};
+  std::vector<float> output(lookup_keys.size() * num_floats, 0.0f);
+  uint64_t hitmask = 0;
+  NVE_CHECK(nve_layer_lookup(layer, ctx, static_cast<int64_t>(lookup_keys.size()),
+                             lookup_keys.data(), output.data(), ROW_SIZE, &hitmask, nullptr));
+  NVE_CHECK(nve_context_wait(ctx));
+
+  int64_t num_tables = 0;
+  NVE_CHECK(nve_layer_get_num_tables(layer, &num_tables));
+  EXPECT_EQ(1, num_tables);
+  EXPECT_EQ(0xFu, hitmask & 0x3Fu);
+
+  for (size_t k = 0; k < lookup_keys.size(); ++k) {
+    const float expected = k < num_inserted_size
+        ? 100.0f + static_cast<float>(k)
+        : 7.5f;
+    for (size_t c = 0; c < num_floats; ++c) {
+      EXPECT_FLOAT_EQ(expected, output[k * num_floats + c]) << "key " << lookup_keys[k] << " comp " << c;
+    }
+  }
+
+  nve_context_wait(ctx);
+  nve_context_destroy(ctx);
+  nve_layer_destroy(layer);
+  nve_table_destroy(host_table);
+  nve_host_factory_destroy(factory);
+}
+
+/* ============================================================================
  * Hierarchical Layer with GPU + Redis table
  * ============================================================================ */
 
@@ -1269,7 +1371,7 @@ TEST_F(HierarchicalRedisLayerTest, InsertLookupAndUpdate) {
 
   // Update values
   std::vector<float> h_upd(num_keys * NUM_FLOATS, 888.0f);
-  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, h_keys.data(), ROW_SIZE, ROW_SIZE, h_upd.data()));
+  NVE_CHECK(nve_layer_update(layer_, ctx_, num_keys, h_keys.data(), ROW_SIZE, ROW_SIZE, h_upd.data(), -1));
   CUDA_CHECK(cudaDeviceSynchronize());
 
   // Verify update
@@ -1281,4 +1383,10 @@ TEST_F(HierarchicalRedisLayerTest, InsertLookupAndUpdate) {
   }
 
   CUDA_CHECK(cudaFreeHost(p_output));
+}
+
+TEST_F(HierarchicalNvhmLayerTest, GetNumTables) {
+  int64_t n = -1;
+  NVE_CHECK(nve_layer_get_num_tables(layer_, &n));
+  EXPECT_EQ(2, n);
 }

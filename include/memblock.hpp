@@ -32,6 +32,7 @@ enum class MemBlockType {
     MPI,
     MANAGED,
     USER,
+    HOST,
 };
 
 class MemBlock {
@@ -126,4 +127,27 @@ public:
 private:
     void* ptr_;
 };
+
+// Owning host-resident block backed by the default allocator's host_allocate,
+// which uses pinned memory when a CUDA driver is present and falls back to a
+// plain malloc on a driverless system.
+class HostMemBlock : public MemBlock {
+public:
+    HostMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype);
+    HostMemBlock(size_t size_to_alloc);
+    ~HostMemBlock();
+    void* get_ptr() const override;
+
+private:
+    void* ptr_;
+    allocator_ptr_t allocator_;
+};
+// Helper function returns the gpu_ids to use when reconstructing a memblock of the given type
+// at load time. For NVL, spans [def_index, cudaGetDeviceCount()-1] unless
+// override is non-empty, in which case override is returned as-is.
+// For all other types returns {def_index} (single device).
+std::vector<int> resolve_memblock_devices(
+    MemBlockType type, int def_index,
+    const std::vector<int>& override = {});
+
 } // namespace nve

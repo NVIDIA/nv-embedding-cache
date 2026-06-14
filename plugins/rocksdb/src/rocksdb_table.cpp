@@ -18,6 +18,7 @@
 #include <host_table_detail.hpp>
 #include <rocksdb_table.hpp>
 #include <rocksdb_utils.hpp>
+#include <buffer_wrapper.hpp>
 
 namespace nve {
 namespace plugin {
@@ -70,9 +71,13 @@ void RocksDBTable<MaskType>::clear(context_ptr_t&) {
 }
 
 template <typename MaskType>
-void RocksDBTable<MaskType>::erase(context_ptr_t&, const int64_t n, const void* const keys_vptr) {
+void RocksDBTable<MaskType>::erase(context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw) {
   if (n <= 0) return;
 
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                       ctx->get_modify_stream())
+              : nullptr};
   const char* const __restrict keys{reinterpret_cast<const char*>(keys_vptr)};
 
   const auto& __restrict config{config_};
@@ -103,11 +108,28 @@ void RocksDBTable<MaskType>::erase(context_ptr_t&, const int64_t n, const void* 
 }
 
 template <typename MaskType>
-void RocksDBTable<MaskType>::find(context_ptr_t& ctx, int64_t n, const void* const keys_vptr,
-                                  max_bitmask_repr_t* const hit_mask, const int64_t value_stride,
-                                  void* const values_vptr, int64_t* const value_sizes) const {
+void RocksDBTable<MaskType>::find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys_bw,
+                                  buffer_ptr<max_bitmask_repr_t> hit_mask_bw,
+                                  const int64_t value_stride, buffer_ptr<void> values_bw,
+                                  buffer_ptr<int64_t> value_sizes_bw) const {
   if (n <= 0) return;
 
+  auto lookup_stream = ctx->get_lookup_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, lookup_stream)
+              : nullptr};
+  max_bitmask_repr_t* const hit_mask{
+      hit_mask_bw ? hit_mask_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                               lookup_stream)
+                  : nullptr};
+  void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, false /*copy_content*/,
+                                           lookup_stream)
+                : nullptr};
+  int64_t* const value_sizes{
+      value_sizes_bw ? value_sizes_bw->access_buffer(cudaMemoryTypeUnregistered,
+                                                     false /*copy_content*/, lookup_stream)
+                     : nullptr};
   const char* const __restrict keys{reinterpret_cast<const char*>(keys_vptr)};
   char* const __restrict hm{reinterpret_cast<char*>(hit_mask)};
   char* const __restrict values{reinterpret_cast<char*>(values_vptr)};
@@ -126,17 +148,24 @@ void RocksDBTable<MaskType>::find(context_ptr_t& ctx, int64_t n, const void* con
     }
   }
 
-  auto counter = this->get_internal_counter(ctx);
+  auto counter = this->lookup_counter_storage(ctx);
   NVE_CHECK_(counter != nullptr, "Invalid key counter");
   *counter += n;
 }
 
 template <typename MaskType>
-void RocksDBTable<MaskType>::insert(context_ptr_t&, const int64_t n, const void* const keys_vptr,
+void RocksDBTable<MaskType>::insert(context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
                                     const int64_t value_stride, const int64_t value_size,
-                                    const void* const values_vptr) {
+                                    buffer_ptr<const void> values_bw) {
   if (n <= 0) return;
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                : nullptr};
   const char* const __restrict keys{reinterpret_cast<const char*>(keys_vptr)};
   const char* const __restrict values{reinterpret_cast<const char*>(values_vptr)};
 
@@ -188,11 +217,18 @@ int64_t RocksDBTable<MaskType>::size(context_ptr_t&, const bool exact) const {
 }
 
 template <typename MaskType>
-void RocksDBTable<MaskType>::update(context_ptr_t&, const int64_t n,
-                                    const void* const keys_vptr, const int64_t value_stride,
-                                    const int64_t value_size, const void* const values_vptr) {
+void RocksDBTable<MaskType>::update(context_ptr_t& ctx, const int64_t n,
+                                    buffer_ptr<const void> keys_bw, const int64_t value_stride,
+                                    const int64_t value_size, buffer_ptr<const void> values_bw) {
   if (n <= 0) return;
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                : nullptr};
   const char* const __restrict keys{reinterpret_cast<const char*>(keys_vptr)};
   const char* const __restrict values{reinterpret_cast<const char*>(values_vptr)};
 
@@ -238,10 +274,17 @@ void RocksDBTable<MaskType>::update(context_ptr_t&, const int64_t n,
 
 template <typename MaskType>
 void RocksDBTable<MaskType>::update_accumulate(
-    context_ptr_t&, const int64_t n, const void* const keys_vptr, const int64_t update_stride,
-    const int64_t update_size, const void* const updates_vptr, const DataType_t update_dtype) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw, const int64_t update_stride,
+    const int64_t update_size, buffer_ptr<const void> updates_bw, const DataType_t update_dtype) {
   if (n <= 0) return;
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const updates_vptr{
+      updates_bw ? updates_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                 : nullptr};
   const char* const __restrict keys{reinterpret_cast<const char*>(keys_vptr)};
   const char* const __restrict updates{reinterpret_cast<const char*>(updates_vptr)};
 

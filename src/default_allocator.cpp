@@ -18,6 +18,8 @@
 #include <cuda_support.hpp>
 #include <bit_ops.hpp>
 #include "include/default_allocator.hpp"
+#include "cuda_ops/cuda_common.h"
+#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <fstream>
@@ -44,11 +46,11 @@ do {                                    \
 namespace nve {
 
 allocator_ptr_t GetDefaultAllocator() {
-    static allocator_ptr_t global_default_allocator;
-    if (!global_default_allocator) {
-        global_default_allocator = std::make_shared<DefaultAllocator>(DefaultAllocator::DEFAULT_HOST_ALLOC_THRESHOLD);
-        NVE_CHECK_(global_default_allocator != nullptr, "Failed to construct the global allocator.");
-    }
+    // Function-local static initialization is thread-safe (C++11): make_shared runs
+    // exactly once even under concurrent first calls (and throws, never returns null,
+    // on allocation failure).
+    static const allocator_ptr_t global_default_allocator =
+        std::make_shared<DefaultAllocator>(DefaultAllocator::DEFAULT_HOST_ALLOC_THRESHOLD);
     return global_default_allocator;
 }
 
@@ -181,13 +183,18 @@ cudaError_t DefaultAllocator::device_free_async(void* ptr, cudaStream_t stream, 
 }
 
 cudaError_t DefaultAllocator::host_allocate(void** ptr, size_t sz) noexcept {
+    // guard on driver availability
+    if (!driver_available()) {
+        *ptr = std::malloc(sz);
+        return (*ptr == nullptr) ? cudaErrorMemoryAllocation : cudaSuccess;
+    }
     size_t hugepage_bits = 0;
     if(sz >= host_alloc_threshold_) {
       hugepage_bits = get_largest_hugepage_bits(sz);
       if (hugepage_bits == 0) {
           NVE_LOG_WARNING_("Not enough huge pages available to allocate, performance will be impacted.");
       }
-    } 
+    }
     if(hugepage_bits == 0) {
       // Allocate using cudaMallocHost
       auto res = cudaMallocHost(ptr, sz);
@@ -209,6 +216,11 @@ cudaError_t DefaultAllocator::host_allocate(void** ptr, size_t sz) noexcept {
 }
 
 cudaError_t DefaultAllocator::host_free(void* ptr) noexcept {
+    // Mirror host_allocate: on a driverless system the buffer came from malloc.
+    if (!driver_available()) {
+        std::free(ptr);
+        return cudaSuccess;
+    }
     auto ptr_alloc_data = host_mmap_allocations_.find(ptr);
     if (ptr_alloc_data != host_mmap_allocations_.end()) {
       auto res = cudaHostUnregister(ptr);

@@ -21,11 +21,13 @@
 #include <stdio.h>
 #include "emb_layer_utils.hpp"
 #include "test_utils.hpp"
+#include <buffer_wrapper.hpp>
 #include <cuda_support.hpp>
 #include <embedding_layer.hpp>
 #include <hierarchical_embedding_layer.hpp>
 #include <gpu_table.hpp>
 #include <host_table.hpp>
+#include <linear_host_table.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +43,7 @@ enum class HostTableType : uint64_t {
   Redis,
   Abseil,
   Phmap,
+  Redis_String,
 };
 
 enum class TableType : uint64_t {
@@ -61,6 +64,7 @@ static bool is_host_table_type_available(HostTableType ht) {
       return false;
 #endif
     case HostTableType::Redis:
+    case HostTableType::Redis_String:
 #ifdef NVE_FEATURE_REDIS_PLUGIN
       return true;
 #else
@@ -90,6 +94,7 @@ static const char* host_table_type_name(HostTableType ht) {
     case HostTableType::Redis: return "Redis";
     case HostTableType::Abseil: return "Abseil";
     case HostTableType::Phmap: return "Phmap";
+    case HostTableType::Redis_String: return "Redis_String";
     default: return "Unknown";
   }
 }
@@ -162,10 +167,11 @@ class HierLayerTest {
         break;
       }
       case HostTableType::Redis: {
-        check_redis_ready();
+        check_redis_ready(7000);
         std::vector<std::string> plugin_names{nve_test::plugin_full_path("redis")};
         load_host_table_plugins(plugin_names.begin(), plugin_names.end());
         nlohmann::json redis_conf = {
+                                      {"num_partitions", 1},
                                       {"mask_size", 8},
                                       {"key_size", sizeof(IndexT)},
                                       {"max_value_size", row_size},
@@ -178,6 +184,27 @@ class HierLayerTest {
               "implementation": "redis_cluster"
             })"_json)};
         m_host_tab = redis_fac->produce(4712, redis_conf);
+        break;
+      }
+      case HostTableType::Redis_String: {
+        check_redis_ready(6379);
+        std::vector<std::string> plugin_names{nve_test::plugin_full_path("redis")};
+        load_host_table_plugins(plugin_names.begin(), plugin_names.end());
+        nlohmann::json redis_conf = {
+                                      {"num_partitions", 0},
+                                      {"mask_size", 8},
+                                      {"key_size", sizeof(IndexT)},
+                                      {"max_value_size", row_size},
+                                      {"value_dtype", to_string(data_type)},
+                                    };
+        host_table_factory_ptr_t redis_fac{
+            create_host_table_factory(R"(
+            {
+              "address": "localhost:6379",
+              "single_node": true,
+              "implementation": "redis_cluster"
+            })"_json)};
+        m_host_tab = redis_fac->produce(4715, redis_conf);
         break;
       }
       case HostTableType::Abseil: {
@@ -301,7 +328,17 @@ class HierLayerTest {
     NVE_CHECK_(cudaDeviceSynchronize());
     int64_t ref_hits;
     m_ref_tab->reset_lookup_counter(m_ctx);
-    m_ref_tab->find(m_ctx, num_keys, keys_buffer, ref_hitmask.data(), m_row_size, ref_output.data(), nullptr /*value_sizes*/);
+    {
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+      auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+          m_ctx, "hit_mask", ref_hitmask.data(), hitmask_size * sizeof(max_bitmask_repr_t));
+      auto values_bw = std::make_shared<BufferWrapper<void>>(
+          m_ctx, "values", ref_output.data(),
+          static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+      m_ref_tab->find(m_ctx, num_keys, std::move(keys_bw), std::move(hit_mask_bw), m_row_size,
+                         std::move(values_bw), nullptr /*value_sizes*/);
+    }
     m_ref_tab->get_lookup_counter(m_ctx, &ref_hits);
 
     if (hit_tol >= 0.f) {
@@ -333,7 +370,10 @@ class HierLayerTest {
     auto data_buffer = setup.data_buffer;
 
     if (db_type != TableType::Ref) {
-      m_layer->insert(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, table_id_from_type(db_type));
+      const int64_t table_id = table_id_from_type(db_type);
+      if (table_id >= 0) {
+        m_layer->insert(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, table_id);
+      }
     }
 
     bool ref_insert = (db_type == TableType::Device && m_gpu_tab) ||
@@ -342,7 +382,13 @@ class HierLayerTest {
                       (db_type == TableType::Ref);
 
     if (ref_insert) {
-      m_ref_tab->insert(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+      auto values_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "values", data_buffer,
+          static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+      m_ref_tab->insert(m_ctx, num_keys, std::move(keys_bw), m_row_size, m_row_size,
+                           std::move(values_bw));
     }
   }
   void Update(std::vector<IndexT>& keys, std::vector<uint8_t>& datavectors, uint64_t start_key = 0,
@@ -355,8 +401,14 @@ class HierLayerTest {
     auto keys_buffer = setup.keys_buffer;
     auto data_buffer = setup.data_buffer;
 
-    m_layer->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
-    m_ref_tab->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
+    m_layer->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, -1);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "values", data_buffer,
+        static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+    m_ref_tab->update(m_ctx, num_keys, std::move(keys_bw), m_row_size, m_row_size,
+                         std::move(values_bw));
   }
   void Accumulate(std::vector<IndexT>& keys, std::vector<uint8_t>& datavectors,
                   DataType_t value_type, uint64_t start_key = 0, uint64_t end_key = uint64_t(-1)) {
@@ -369,9 +421,14 @@ class HierLayerTest {
     auto data_buffer = setup.data_buffer;
 
     m_layer->accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer,
-                        value_type);
-    m_ref_tab->update_accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer,
-                                 value_type);
+                        value_type, -1);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+    auto updates_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "updates", data_buffer,
+        static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+    m_ref_tab->update_accumulate(m_ctx, num_keys, std::move(keys_bw), m_row_size, m_row_size,
+                                    std::move(updates_bw), value_type);
   }
   void Erase(std::vector<IndexT>& keys, uint64_t start_key = 0, uint64_t end_key = uint64_t(-1)) {
     if (keys.empty()) {
@@ -383,10 +440,11 @@ class HierLayerTest {
 
     // only handling erase for all layers, otherwise ref becomes more complex (i.e. lookup on all
     // layers before erase and if any of them hit, don't erase from ref)
-    m_layer->erase(m_ctx, num_keys, keys_buffer, table_id_from_type(TableType::Device));
-    m_layer->erase(m_ctx, num_keys, keys_buffer, table_id_from_type(TableType::Host));
-    m_layer->erase(m_ctx, num_keys, keys_buffer, table_id_from_type(TableType::Remote));
-    m_ref_tab->erase(m_ctx, num_keys, keys_buffer);
+    m_layer->erase(m_ctx, num_keys, keys_buffer, -1);
+
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+    m_ref_tab->erase(m_ctx, num_keys, std::move(keys_bw));
   }
   void Clear() {
     m_layer->clear(m_ctx);
@@ -423,8 +481,9 @@ class HierLayerTest {
   std::shared_ptr<layer_type> m_layer{nullptr};
   context_ptr_t m_ctx;
 
-  void check_redis_ready() {
-    FILE* pipe = popen("/usr/bin/redis-cli -p 7000 ping", "r");
+  void check_redis_ready(int port) {
+    const std::string cmd{"/usr/bin/redis-cli -p " + std::to_string(port) + " ping"};
+    FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
       throw std::runtime_error("Failed to check Redis cluster! (popen)");
     }
@@ -443,10 +502,12 @@ class HierLayerTest {
       case TableType::Device: return m_gpu_tab ? 0 : -1;
       case TableType::Host: return m_host_tab ? (m_gpu_tab ? 1 : 0) : -1;
       case TableType::Remote: return m_remote_tab ? (m_gpu_tab ? 1 : 0) + (m_host_tab ? 1 : 0) : -1;
-      case TableType::Ref: return -1;
+      case TableType::Ref: 
+        throw std::runtime_error("Unexpected type!");
+        return -2;
     }
     throw std::runtime_error("Invalid table type!");
-    return -2;
+    return -3;
   }
 };
 
@@ -647,7 +708,17 @@ INSTANTIATE_TEST_SUITE_P(
         HierTestCase({false, HostTableType::Redis, false, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
         HierTestCase({true,  HostTableType::Redis, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
         HierTestCase({false, HostTableType::Redis, false, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
-        HierTestCase({true,  HostTableType::Redis, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32})));
+        HierTestCase({true,  HostTableType::Redis, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
+
+        // Same coverage as above but against a standalone Redis in string mode (num_partitions == 0).
+        HierTestCase({false, HostTableType::Redis_String, false, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float16}),
+        HierTestCase({true,  HostTableType::Redis_String, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float16}),
+        HierTestCase({false, HostTableType::Redis_String, false, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
+        HierTestCase({true,  HostTableType::Redis_String, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
+        HierTestCase({false, HostTableType::Redis_String, false, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
+        HierTestCase({true,  HostTableType::Redis_String, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
+        HierTestCase({false, HostTableType::Redis_String, false, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
+        HierTestCase({true,  HostTableType::Redis_String, true,  int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32})));
 
 INSTANTIATE_TEST_SUITE_P(
     EmbLayer_Large,
@@ -921,6 +992,127 @@ TEST(HierachicalDefaultEmbedding, NoDefaultLeavesMissesUntouched) {
           << "key " << i << " byte " << j;
     }
   }
+}
+
+// Exercises HierarchicalEmbeddingLayer wrapping a single LinearHostTable — the
+// configuration that backs the Python HostLayer binding.
+TEST(HierachicalLinearHost, LookupReadsHostBuffer) {
+  cudaGetLastError();
+  using IndexT = int64_t;
+  using DataT = float;
+  constexpr uint64_t row_elements = 8;
+  constexpr uint64_t row_size = row_elements * sizeof(DataT);
+  constexpr uint64_t num_rows = 64;
+  constexpr uint64_t num_keys = 16;
+
+  // Pre-populate the host buffer: row i = [i*10, i*10+1, ...].
+  DataT* h_table = nullptr;
+  NVE_CHECK_(cudaMallocHost(&h_table, num_rows * row_size));
+  for (uint64_t i = 0; i < num_rows; ++i) {
+    for (uint64_t j = 0; j < row_elements; ++j) {
+      h_table[i * row_elements + j] = static_cast<DataT>(i * 10 + j);
+    }
+  }
+
+  LinearHostTableConfig table_cfg;
+  table_cfg.value_dtype = DataType_t::Float32;
+  table_cfg.key_size = sizeof(IndexT);
+  table_cfg.max_value_size = static_cast<int64_t>(row_size);
+  table_cfg.emb_table = h_table;
+  auto host_tab = std::make_shared<LinearHostTable<IndexT>>(table_cfg);
+
+  typename HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
+  layer_cfg.layer_name = "host_layer";
+  layer_cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
+  std::vector<table_ptr_t> tables{host_tab};
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
+  auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
+
+  std::vector<IndexT> keys(num_keys);
+  for (uint64_t i = 0; i < num_keys; ++i) keys[i] = static_cast<IndexT>(i * 3);
+
+  std::vector<DataT> output(num_keys * row_elements, DataT{0});
+  constexpr uint64_t mask_bits = sizeof(max_bitmask_repr_t) * 8;
+  std::vector<max_bitmask_repr_t> hitmask((num_keys + mask_bits - 1) / mask_bits, 0);
+
+  layer->lookup(ctx, static_cast<int64_t>(num_keys), keys.data(), output.data(),
+                static_cast<int64_t>(row_size), hitmask.data(),
+                nullptr /*pool_params*/, nullptr /*hitrates*/);
+  ctx->wait();
+
+  for (uint64_t i = 0; i < num_keys; ++i) {
+    const bool hit = (hitmask[i / mask_bits] >> (i % mask_bits)) & 0x1u;
+    ASSERT_TRUE(hit) << "expected hit for key " << keys[i];
+    for (uint64_t j = 0; j < row_elements; ++j) {
+      EXPECT_FLOAT_EQ(h_table[static_cast<uint64_t>(keys[i]) * row_elements + j],
+                      output[i * row_elements + j])
+          << "key=" << keys[i] << " col=" << j;
+    }
+  }
+
+  NVE_CHECK_(cudaFreeHost(h_table));
+}
+
+// Update through the layer should be visible on the next lookup.
+TEST(HierachicalLinearHost, UpdateThenLookup) {
+  cudaGetLastError();
+  using IndexT = int64_t;
+  using DataT = float;
+  constexpr uint64_t row_elements = 4;
+  constexpr uint64_t row_size = row_elements * sizeof(DataT);
+  constexpr uint64_t num_rows = 32;
+  constexpr uint64_t num_keys = 4;
+
+  DataT* h_table = nullptr;
+  NVE_CHECK_(cudaMallocHost(&h_table, num_rows * row_size));
+  std::fill(h_table, h_table + num_rows * row_elements, DataT{0});
+
+  LinearHostTableConfig table_cfg;
+  table_cfg.value_dtype = DataType_t::Float32;
+  table_cfg.key_size = sizeof(IndexT);
+  table_cfg.max_value_size = static_cast<int64_t>(row_size);
+  table_cfg.emb_table = h_table;
+  auto host_tab = std::make_shared<LinearHostTable<IndexT>>(table_cfg);
+
+  typename HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
+  layer_cfg.layer_name = "host_layer";
+  layer_cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
+  std::vector<table_ptr_t> tables{host_tab};
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
+  auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
+
+  std::vector<IndexT> keys{1, 5, 9, 13};
+  std::vector<DataT> updates(num_keys * row_elements);
+  for (uint64_t i = 0; i < num_keys; ++i) {
+    for (uint64_t j = 0; j < row_elements; ++j) {
+      updates[i * row_elements + j] = static_cast<DataT>(keys[i] * 100 + static_cast<IndexT>(j));
+    }
+  }
+
+  layer->update(ctx, static_cast<int64_t>(num_keys), keys.data(),
+                static_cast<int64_t>(row_size), static_cast<int64_t>(row_size),
+                updates.data(), /*table_id=*/-1);
+  ctx->wait();
+
+  std::vector<DataT> output(num_keys * row_elements, DataT{0});
+  constexpr uint64_t mask_bits = sizeof(max_bitmask_repr_t) * 8;
+  std::vector<max_bitmask_repr_t> hitmask((num_keys + mask_bits - 1) / mask_bits, 0);
+  layer->lookup(ctx, static_cast<int64_t>(num_keys), keys.data(), output.data(),
+                static_cast<int64_t>(row_size), hitmask.data(),
+                nullptr /*pool_params*/, nullptr /*hitrates*/);
+  ctx->wait();
+
+  for (uint64_t i = 0; i < num_keys; ++i) {
+    const bool hit = (hitmask[i / mask_bits] >> (i % mask_bits)) & 0x1u;
+    ASSERT_TRUE(hit) << "expected hit for key " << keys[i];
+    for (uint64_t j = 0; j < row_elements; ++j) {
+      EXPECT_FLOAT_EQ(updates[i * row_elements + j],
+                      output[i * row_elements + j])
+          << "key=" << keys[i] << " col=" << j;
+    }
+  }
+
+  NVE_CHECK_(cudaFreeHost(h_table));
 }
 
 // These cases must have remote PS for the test flow to work correctly

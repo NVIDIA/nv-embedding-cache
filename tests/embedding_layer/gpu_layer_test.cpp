@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <buffer_wrapper.hpp>
 #include <gpu_embedding_layer.hpp>
 #include "emb_layer_utils.hpp"
 #include <thread>
@@ -120,7 +121,9 @@ class GPULayerLookupTest {
       pp.pooling_type = tc.pooling_type;
       pp.sparse_type = tc.offsets_layout;
 
-      SetupCSROffsets<int64_t> offsets_setup(tc.offsets_layout == SparseType_t::CSR ? static_cast<int64_t>(num_keys) : 1);
+      SetupCSROffsets<int64_t> offsets_setup(
+          tc.offsets_layout == SparseType_t::CSR ? static_cast<int64_t>(num_keys) : 1,
+          std::max<int64_t>(tc.hotness, 1));
       if (tc.offsets_layout == SparseType_t::CSR) {
         pp.key_indices = offsets_setup.offsets_buffer;
         pp.num_key_indices = static_cast<int64_t>(offsets_setup.num_offsets);
@@ -149,8 +152,15 @@ class GPULayerLookupTest {
                       &pp /*pool_params*/, hitrates.data());
 
       std::vector<int8_t> find_output(static_cast<size_t>(num_keys * m_row_size));
-      m_ref_tab->find(m_ctx, num_keys, keys_buffer, nullptr /*hitmask*/, m_row_size,
-                                  find_output.data(), nullptr /*value_sizes*/);
+      {
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+            m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+        auto values_bw = std::make_shared<BufferWrapper<void>>(
+            m_ctx, "values", find_output.data(),
+            static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+        m_ref_tab->find(m_ctx, num_keys, std::move(keys_bw), nullptr /*hitmask*/, m_row_size,
+                           std::move(values_bw), nullptr /*value_sizes*/);
+      }
 
       m_ref_output.resize(static_cast<size_t>(output_bags * m_row_size));
       m_ref_tab->combine(find_output.data(), num_keys, pp.pooling_type, pp.sparse_type, pp.key_indices,
@@ -160,8 +170,13 @@ class GPULayerLookupTest {
                       nullptr, hitrates.data());
 
       m_ref_output.resize(static_cast<size_t>(num_keys * m_row_size));
-      m_ref_tab->find(m_ctx, num_keys, keys_buffer, nullptr /*hitmask*/, m_row_size,
-                      m_ref_output.data(), nullptr /*value_sizes*/);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+      auto values_bw = std::make_shared<BufferWrapper<void>>(
+          m_ctx, "values", m_ref_output.data(),
+          static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+      m_ref_tab->find(m_ctx, num_keys, std::move(keys_bw), nullptr /*hitmask*/, m_row_size,
+                         std::move(values_bw), nullptr /*value_sizes*/);
     }
     
     NVE_CHECK_(cudaDeviceSynchronize());
@@ -216,7 +231,7 @@ class GPULayerLookupTest {
     std::vector<float> hitrates(3);
 
     // 3. call accumulate 
-    m_layer->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
+    m_layer->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, -1);
 
     NVE_CHECK_(cudaDeviceSynchronize());
 
@@ -294,7 +309,7 @@ class GPULayerLookupTest {
     }
 
     // 3. call accumulate 
-    m_layer->accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, setup.data_buffer, value_type);
+    m_layer->accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, setup.data_buffer, value_type, -1);
 
     NVE_CHECK_(cudaDeviceSynchronize());
 

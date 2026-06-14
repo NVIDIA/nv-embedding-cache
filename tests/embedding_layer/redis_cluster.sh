@@ -20,11 +20,119 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 MAX_SLEEP=30
+DEFAULT_PORT=6379
+RUNTIME_ROOT=${NVE_REDIS_RUNTIME_DIR:-/dev/shm/nve-redis}
 
-if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 [start | stop]"
+usage() {
+  echo "Usage: $0 [start | start_cluster | start_single [port] | stop]"
   exit 1
+}
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  usage
 fi
+
+if [ "$#" -eq 2 ] && [ "$1" != "start_single" ]; then
+  usage
+fi
+
+if [ "$1" = "start_single" ] || [ "$1" = "start" ]; then
+  SINGLE_PORT=${2:-$DEFAULT_PORT}
+  if ! [[ "$SINGLE_PORT" =~ ^[0-9]+$ ]] || [ "$SINGLE_PORT" -lt 1 ] || [ "$SINGLE_PORT" -gt 65535 ]; then
+    printf "${RED}Invalid port '${SINGLE_PORT}'!${NC}\n"
+    exit 1
+  fi
+fi
+
+# Wait until the redis-server on the given port answers PONG.
+# Returns non-zero if it never came up within MAX_SLEEP seconds.
+wait_for_server() {
+  local port=$1
+  local waited=0
+  while [ "$(redis-cli -p $port ping 2>/dev/null)" != "PONG" ] && [ ${waited} != ${MAX_SLEEP} ]; do
+    ((waited+=1))
+    sleep 1
+  done
+  [ $waited != $MAX_SLEEP ]
+}
+
+port_is_free() {
+  local port=$1
+  ! (echo >/dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1
+}
+
+require_port_free() {
+  local port=$1
+  if ! port_is_free "$port"; then
+    printf "${RED}Port ${port} is already in use - aborting!${NC}\n"
+    exit 3
+  fi
+}
+
+server_count() {
+  pgrep -x redis-server 2>/dev/null | wc -l
+}
+
+wait_for_servers_to_stop() {
+  local waited=0
+  while [ "$(server_count)" -ne 0 ] && [ $waited -ne $MAX_SLEEP ] ; do
+    ((waited+=1))
+    sleep 1
+  done
+  [ "$(server_count)" -eq 0 ]
+}
+
+shutdown_servers() {
+  local ports
+  local dir
+  local port
+  ports="7000 7001 7002 7003 7004 7005 6379"
+  if [ -d "$RUNTIME_ROOT" ]; then
+    for dir in "$RUNTIME_ROOT"/*
+    do
+      [ -d "$dir" ] || continue
+      port=${dir##*/}
+      [[ "$port" =~ ^[0-9]+$ ]] && ports="$ports $port"
+    done
+  fi
+
+  for i in $(printf '%s\n' $ports | sort -n -u)
+  do
+    redis-cli -p "$i" shutdown nosave >/dev/null 2>&1 || true
+  done
+}
+
+prepare_runtime_root() {
+  mkdir -p "$RUNTIME_ROOT" || {
+    printf "${RED}Could not create runtime directory '$RUNTIME_ROOT'!${NC}\n"
+    exit 8
+  }
+}
+
+start_standalone_server() {
+  local port=$1
+  require_port_free "$port"
+
+  printf "${BLUE}[Starting standalone server on port ${port}]${NC}\n"
+  prepare_runtime_root
+  cd "$RUNTIME_ROOT" || exit 8
+  rm -rf "$port"
+  mkdir -p "$RUNTIME_ROOT/$port"
+  cd "$RUNTIME_ROOT/$port" || exit 8
+  redis-server \
+  --port "$port" \
+  --protected-mode no \
+  --cluster-enabled no \
+  --save "" \
+  --dbfilename "" \
+  --appendonly no >/dev/null 2>&1 &
+
+  # Wait until server is up
+  if ! wait_for_server "$port"; then
+    printf "${RED}Failed to bring up server on port ${port} - aborting!${NC}\n"
+    exit 4
+  fi
+}
 
 which redis-server >/dev/null
 if [ $? -ne 0 ]; then
@@ -33,35 +141,35 @@ if [ $? -ne 0 ]; then
 fi
 
 case $1 in
-  start)
-    # Check if a redis server is already running
-    if [ $(ps -aux|grep redis-server|wc -l) -ne 1 ]; then
-      printf "${RED}Redis server already running - aborting!${NC}\n"
-      exit 3
+  start|start_cluster)
+    for i in {7000..7005}
+    do
+      require_port_free "$i"
+    done
+    if [ "$1" = "start" ]; then
+      require_port_free "$SINGLE_PORT"
     fi
     
     printf "${BLUE}[Starting servers]${NC}\n"
-    cd /tmp
+    prepare_runtime_root
+    cd "$RUNTIME_ROOT" || exit 8
     rm -rf {7000..7005}
     for i in {7000..7005}
     do
-      mkdir -p /tmp/$i
-      cd /tmp/$i
+      mkdir -p "$RUNTIME_ROOT/$i"
+      cd "$RUNTIME_ROOT/$i"
       redis-server \
       --port $i \
       --protected-mode no \
       --cluster-enabled yes \
       --cluster-config-file nodes.conf \
       --cluster-node-timeout 5000 \
-      --save "" --appendonly no >/dev/null 2>&1 &
+      --save "" \
+      --dbfilename "" \
+      --appendonly no >/dev/null 2>&1 &
 
       # Wait until server is up
-      SLEEP=0
-      while [ "$(redis-cli -p $i ping 2>/dev/null)" != "PONG" ] && [ ${SLEEP} != ${MAX_SLEEP} ]; do
-        ((SLEEP+=1))
-        sleep 1
-      done
-      if [ $SLEEP == $MAX_SLEEP ]; then
+      if ! wait_for_server $i; then
         printf "${RED}Failed to bring up server on port $i - aborting!${NC}\n"
         exit 4
       fi
@@ -93,19 +201,36 @@ case $1 in
       exit 5
     fi
 
+    if [ "$1" = "start" ]; then
+      start_standalone_server "$SINGLE_PORT"
+    fi
+
+    printf "${GREEN}[Ready]${NC}\n"
+    ;;
+  start_single)
+    # Single standalone redis-server, useful for non-cluster client tests.
+    start_standalone_server "$SINGLE_PORT"
     printf "${GREEN}[Ready]${NC}\n"
     ;;
   stop)
-    printf "${BLUE}[Stopping cluster]${NC}\n"
-    pkill redis-server
-    SLEEP=0
-    while [ $(ps -aux|grep redis-server|wc -l) -ne 1 ] && [ $SLEEP -ne $MAX_SLEEP ] ; do
-      ((SLEEP+=1))
-      sleep 1
-    done
-    if [ $(ps -aux|grep redis-server|wc -l) -ne 1 ]; then
+    printf "${BLUE}[Stopping servers]${NC}\n"
+    shutdown_servers
+    if ! wait_for_servers_to_stop; then
+      printf "${BLUE}[Graceful shutdown timed out; killing servers]${NC}\n"
+      pkill -x redis-server
+    fi
+
+    if ! wait_for_servers_to_stop; then
       printf "${RED}Failed to kill all servers!${NC}\n"
       exit 6
+    fi
+    if [ -d "$RUNTIME_ROOT" ]; then
+      for dir in "$RUNTIME_ROOT"/*
+      do
+        [ -d "$dir" ] || continue
+        port=${dir##*/}
+        [[ "$port" =~ ^[0-9]+$ ]] && rm -rf "$dir"
+      done
     fi
     ;;
   *)

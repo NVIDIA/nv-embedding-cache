@@ -4,6 +4,26 @@ Releases will be listed below, latest at the top.
 
 Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means release of February 2026 with patch 3.
 
+## NV Embedding Cache 26.06
+### New Features
+- Host CPU inference layer for C, C++, and Python (`nve_host_embedding_layer_create`, `HostEmbeddingLayer`, `LayerType.HostLayer`)
+- Redis standalone single-node string mode for the Redis backend
+- Shared-storage export/load metadata schema for models with shared memblocks or parameter servers
+- CPU pooling and dequantization support, including rowwise int8/uint8 quantized data types
+### Improvements
+- Per-instance marker tensors for torch custom-op/AOTInductor model loading
+- Layer update and accumulate operations can target a specific table with `table_id`
+- Added layer table-count query API (`nve_layer_get_num_tables`)
+- Python layer config exposes `max_modify_size`
+- Benchmark CSV output includes run metadata columns
+- Thread-safety improvements for binding execution-context maps and GPU-table UVM access
+- C++ Table API refactored: GPU table and host table interfaces updated; custom plugin/table implementations will need to be updated accordingly
+### Bug Fixes
+- Fixed serialization overflow issue found by static analysis
+- Fixed AOT export/load marker handling for multiple model instances and shared resources
+- Fixed performance regression in Python inference (redundant buffer copy)
+- Removed stale torch-save serialization path
+
 ## NV Embedding Cache 26.05
 ### New Features
 - New PyTorch bindings for C++ deployments (see: [advanced.md](docs/advanced.md#c-deployment-with-pytorch-aotinductor))

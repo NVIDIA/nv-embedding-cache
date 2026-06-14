@@ -128,7 +128,7 @@ void CallUpdatKernelVecType(const int8_t* __restrict__ src,
         CallUpdateKernelVecTypeSubwarp<1, KeyType, DataType>(src, indices, embedding_table, embed_width_in_bytes, embed_src_stride_in_bytes, embed_dst_stride_in_bytes, num_indices, stream);
         break;
     default:
-        assert(0);
+        NVE_THROW_("Unsupported kernel dimensions ", subgroupWidth);
     }
 }
 
@@ -224,7 +224,7 @@ void UpdateAccumulateTable(const DataType* src,
               embed_width, embed_src_stride, embed_dst_stride, num_indices, stream);
           break;
       default:
-          assert(0);
+          NVE_THROW_("Unsupported kernel dimensions ", subgroupWidth);
     }
 }
 

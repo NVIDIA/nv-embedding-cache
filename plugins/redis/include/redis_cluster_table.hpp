@@ -27,6 +27,7 @@
 
 #include <bit_ops.hpp>
 #include <host_table.hpp>
+#include <redis_conn.hpp>
 #include <string>
 #include <string_view>
 #include <thread_pool.hpp>
@@ -41,15 +42,26 @@ struct RedisClusterTableConfig final : public HostTableConfig {
                                    // Must be a multiple of `mask_size`.
 
   int64_t num_partitions{
-      1};  // Either 0 or a power of 2. To denote the number of parallel partitions. If this is
-           // zero, then we will not create partitions, and use key/value assignment. If >=1,
-           // determines the maximum degree of parallelization. For achieving the best performance,
-           // this should be significantly higher than the number of cluster nodes! We use modulo-N
-           // to assign partitions. Hence, you must not change this value after writing the first
-           // data to a table.
+      1};  // Either 0 or a power of 2.
+           //
+           // In cluster (hash) mode it is the number of Redis hashes the keys are sharded across;
+           // for best performance this should be significantly higher than the number of cluster
+           // nodes. Keys are assigned via modulo-N, so it must not change after the first write.
+           //
+           // In standalone string mode it is purely the client-side parallelism degree: the work of
+           // building/parsing the MSET/MGET/DEL commands is split across this many thread-pool tasks
+           // (0 or 1 = single-threaded). Storage is unaffected (plain Redis strings), so this value
+           // may be changed freely between runs. For full parallelism set the factory's
+           // `connections_per_node` >= `num_partitions`.
   Partitioner_t partitioner{default_partitioner};  // Partitioner to use.
   std::vector<int64_t> workgroups{0};  // Workgroup to use per partition (thread pool feature). Will wrap around.
   std::string hash_key;
+
+  int64_t string_namespace_id{
+      -1};  // Only used in single-node string mode (a standalone connection with an empty
+            // `hash_key`, for any `num_partitions`). When `>= 0`, every Redis key is prefixed with
+            // the raw bytes of this value, which namespaces the table so several tables can share one
+            // Redis DB. When `-1` (default), raw key bytes are used as Redis keys (no namespacing).
 
   OverflowPolicyConfig overflow_policy;  // Overflow detection / handling parameters.
 
@@ -61,6 +73,8 @@ void from_json(const nlohmann::json& json, RedisClusterTableConfig& conf);
 void to_json(nlohmann::json& json, const RedisClusterTableConfig& conf);
 
 using redis_cluster_ptr_t = std::shared_ptr<sw::redis::RedisCluster>;
+using redis_ptr_t = std::shared_ptr<sw::redis::Redis>;
+using redis_conn_ptr_t = std::shared_ptr<RedisConn>;
 
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 class RedisClusterTable final : public HostTable<RedisClusterTableConfig> {
@@ -76,28 +90,29 @@ class RedisClusterTable final : public HostTable<RedisClusterTableConfig> {
 
   RedisClusterTable() = delete;
 
-  RedisClusterTable(table_id_t table_id, const config_type& config, redis_cluster_ptr_t& cluster);
+  RedisClusterTable(table_id_t table_id, const config_type& config, redis_conn_ptr_t& conn);
 
   ~RedisClusterTable() override = default;
 
   void clear(context_ptr_t& ctx) override;
 
-  void erase(context_ptr_t& ctx, int64_t n, const void* keys) override;
-
-  void find(context_ptr_t& ctx, int64_t n, const void* keys, max_bitmask_repr_t* hit_mask,
-            int64_t value_stride, void* values, int64_t* value_sizes) const override;
-
-  void insert(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-              int64_t value_size, const void* values) override;
-
   int64_t size(context_ptr_t& ctx, bool exact) const override;
 
-  void update(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-              int64_t value_size, const void* values) override;
+  void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
 
-  void update_accumulate(context_ptr_t& ctx, int64_t n, const void* keys, int64_t update_stride,
-                         int64_t update_size, const void* updates,
-                         DataType_t update_dtype) override;
+  void find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+            buffer_ptr<max_bitmask_repr_t> hit_mask, int64_t value_stride,
+            buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override;
+
+  void insert(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
+              int64_t value_size, buffer_ptr<const void> values) override;
+
+  void update(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
+              int64_t value_size, buffer_ptr<const void> values) override;
+
+  void update_accumulate(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+                         int64_t update_stride, int64_t update_size,
+                         buffer_ptr<const void> updates, DataType_t update_dtype) override;
 
  private:
   template <bool WithValues, bool WithValueSizes>
@@ -105,15 +120,21 @@ class RedisClusterTable final : public HostTable<RedisClusterTableConfig> {
                 int64_t value_stride, char* values, int64_t* value_sizes) const;
 
  private:
-  redis_cluster_ptr_t cluster_;
+  redis_conn_ptr_t conn_;
 };
 
 struct RedisClusterTableFactoryConfig final : public HostTableFactoryConfig {
   using base_type = HostTableFactoryConfig;
 
-  std::string address{"localhost:6379"};  // The destination address any Redis node in the clsuter.
+  std::string address{"localhost:6379"};  // The destination address any Redis node in the cluster.
   std::string user_name{"default"};       // Redis username.
   std::string password{};                 // Plaintext password of the user.
+
+  bool single_node{
+      false};  // If true, connect to a standalone (single-node) Redis server instead of a cluster.
+               // With an empty `hash_key` this selects string mode (Redis strings, MSET/MGET), where
+               // `num_partitions` controls client-side parallelism only (any power of two, or 0).
+               // With a `hash_key` set it uses a single Redis hash (`num_partitions` 0 or 1).
 
   bool keep_alive{true};  // Send keep alive messages to prevent TCP channel from collapsing.
   int64_t connections_per_node{
@@ -150,7 +171,8 @@ class RedisClusterTableFactory final
   host_table_ptr_t produce(table_id_t id, const table_config_type& config) override;
 
  private:
-  redis_cluster_ptr_t cluster_;
+  redis_conn_ptr_t conn_;
+  bool single_node_;
 };
 
 }  // namespace plugin

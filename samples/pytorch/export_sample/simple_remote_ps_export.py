@@ -40,9 +40,9 @@ class HierarchicalModel(torch.nn.Module):
         super().__init__()
         self.emb = nve_layers.NVEmbedding(
             num_embeddings, embedding_size, data_type,
-            nve_layers.CacheType.Hierarchical,
+            nve_layers.LayerType.Hierarchical,
             gpu_cache_size=gpu_cache_size,
-            remote_interface=remote_ps,
+            storage=remote_ps,
             optimize_for_training=False,
         )
 
@@ -96,12 +96,13 @@ def main():
         import json
         with open(os.path.join(save_dir, "metadata.json")) as f:
             metadata = json.load(f)
-        assert len(metadata) == 1
-        assert metadata[0]["cache_type"] == "Hierarchical"
-        assert "remote_ps_config" in metadata[0]
-        assert metadata[0]["remote_ps_config"]["remote_ps_type"] == "plugin"
-        assert metadata[0]["remote_ps_config"]["plugin_name"] == "libnve-plugin-nvhm.so"
-        print(f"Metadata saved with remote_ps_config: {metadata[0]['remote_ps_config']}")
+        assert len(metadata["layers"]) == 1
+        layer = metadata["layers"][0]
+        assert layer["layer_type"] == "Hierarchical"
+        ps_cfg = metadata["resources"]["remote_ps"][layer["storage_ref"]]
+        assert ps_cfg["remote_ps_type"] == "plugin"
+        assert ps_cfg["plugin_name"] == "libnve-plugin-nvhm.so"
+        print(f"Metadata saved with remote_ps_config: {ps_cfg}")
 
         # --- Load (recreate PS directly via the plugin ctor, reload data from files) ---
         del model, ps  # Simulate a fresh process

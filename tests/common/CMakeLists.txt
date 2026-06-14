@@ -36,6 +36,9 @@ target_link_libraries(insert_heuristic_test PUBLIC gtest_main nve-common)
 add_executable(allocator_test allocator_test.cpp)
 target_link_libraries(allocator_test PUBLIC gtest_main nve-common)
 
+add_executable(buffer_wrapper_test buffer_wrapper_test.cpp)
+target_link_libraries(buffer_wrapper_test PUBLIC gtest_main nve-common)
+
 find_package(MPI REQUIRED)
 add_executable(mpi_buffer_test
   mpi_buffer_test.cpp

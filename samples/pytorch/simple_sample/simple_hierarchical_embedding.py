@@ -46,7 +46,7 @@ def main():
 
     nvhm_ps.load_from_file(keys_path, values_path)
 
-    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=nvhm_ps, device=device)
 
     out = nv_nvhm_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
     assert torch.equal(out, torch.tensor([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=torch.float32, device=device))

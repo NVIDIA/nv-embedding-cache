@@ -32,10 +32,13 @@ class ResizeableBuffer {
     NVE_ASSERT_(allocator);
   }
   ~ResizeableBuffer() {
-    if (host_alloc_) {
-      NVE_CHECK_(allocator_->host_free(buffer_));
-    } else {
-      NVE_CHECK_(allocator_->device_free(buffer_));
+    // Skip the free entirely when nothing was ever allocated: Safer for driverless deployments.
+    if (buffer_) {
+      if (host_alloc_) {
+        NVE_CHECK_(allocator_->host_free(buffer_));
+      } else {
+        NVE_CHECK_(allocator_->device_free(buffer_));
+      }
     }
     size_ = 0;
   }

@@ -170,10 +170,10 @@ def get_nve_model(args, mp : MultiProc):
         args.num_table_rows,
         args.embedding_dim,
         data_type,
-        nve_layers.CacheType.LinearUVM,
+        nve_layers.LayerType.LinearUVM,
         gpu_cache_size=int(cache_size),
         optimize_for_training=False,
-        memblock=NVL,
+        storage=NVL,
         device=device,
         config=config)
     return emb_layer

@@ -24,7 +24,7 @@
 #include "embedding_cache_combined.h"
 #include "embedding_cache_combined.cuh"
 #include "cuda_ops/cuda_utils.cuh"
-#include "../common/buffer.h"
+#include "../common/test_buffer.h"
 #include <default_allocator.hpp>
 
 using namespace nve;
@@ -48,12 +48,12 @@ class SortAndInsertTest : public ::testing::Test {
         bool hit;
     };
 
-    uint32_t SetupAndRunTest(std::shared_ptr<Buffer<TagType>>& tags,
-                             std::shared_ptr<Buffer<CounterType>>& counters,
-                             std::shared_ptr<Buffer<KeyType>>& unique_keys,
-                             std::shared_ptr<Buffer<CounterType>>& priorities,
-                             std::shared_ptr<Buffer<uint64_t>>& data_ptrs,
-                             std::shared_ptr<Buffer<ModifyList>>& replace_list,
+    uint32_t SetupAndRunTest(std::shared_ptr<TestBuffer<TagType>>& tags,
+                             std::shared_ptr<TestBuffer<CounterType>>& counters,
+                             std::shared_ptr<TestBuffer<KeyType>>& unique_keys,
+                             std::shared_ptr<TestBuffer<CounterType>>& priorities,
+                             std::shared_ptr<TestBuffer<uint64_t>>& data_ptrs,
+                             std::shared_ptr<TestBuffer<ModifyList>>& replace_list,
                              size_t extra_mem_size, int8_t* extra_mem_buf,
                              uint32_t num_sets, size_t embedding_size, float decay_rate,
                              uint32_t tags_per_set, uint32_t tags_offset,
@@ -121,9 +121,9 @@ class SortAndInsertTest : public ::testing::Test {
     }
 
     void InitRandomTestInputs(uint32_t num_keys,
-                             std::shared_ptr<Buffer<KeyType>>& unique_keys,
-                             std::shared_ptr<Buffer<CounterType>>& priorities,
-                             std::shared_ptr<Buffer<uint64_t>>& data_ptrs,
+                             std::shared_ptr<TestBuffer<KeyType>>& unique_keys,
+                             std::shared_ptr<TestBuffer<CounterType>>& priorities,
+                             std::shared_ptr<TestBuffer<uint64_t>>& data_ptrs,
                              std::mt19937& genr) {
         std::uniform_real_distribution<float> dist_float(0.1f, 17.0f);
         std::uniform_int_distribution<uint32_t> dist_keys(1, num_keys * 20);
@@ -149,8 +149,8 @@ class SortAndInsertTest : public ::testing::Test {
     }
 
     void InitRandomTestCountersAndTags(uint32_t num_sets,
-                                std::shared_ptr<Buffer<CounterType>>& counters,
-                                std::shared_ptr<Buffer<TagType>>& tags,
+                                std::shared_ptr<TestBuffer<CounterType>>& counters,
+                                std::shared_ptr<TestBuffer<TagType>>& tags,
                                 std::vector<uint32_t>& num_hits,
                                 std::mt19937& genr) {
         std::uniform_real_distribution<float> dist_float(0.1f, 17.0f);
@@ -177,9 +177,9 @@ class SortAndInsertTest : public ::testing::Test {
     }
 
     void LaunchSortTest(uint32_t num_sets) {
-        auto counters = std::make_shared<Buffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
-        auto sorted_sets = std::make_shared<Buffer<KeyType>>(num_sets * NUM_WAYS * sizeof(KeyType));
-        auto sorted_sets_ref = std::make_shared<Buffer<KeyType>>(num_sets * NUM_WAYS * sizeof(KeyType));
+        auto counters = std::make_shared<TestBuffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
+        auto sorted_sets = std::make_shared<TestBuffer<KeyType>>(num_sets * NUM_WAYS * sizeof(KeyType));
+        auto sorted_sets_ref = std::make_shared<TestBuffer<KeyType>>(num_sets * NUM_WAYS * sizeof(KeyType));
 
         std::vector<CounterType> counters_tmp(num_sets * NUM_WAYS);
         // this test is called twice for each KeyType, with dofferent TagType
@@ -217,17 +217,17 @@ class SortAndInsertTest : public ::testing::Test {
     }
 
     void LaunchSyntheticInsertTests(uint32_t num_sets, size_t embedding_size, float decay_rate) {
-        auto tags = std::make_shared<Buffer<TagType>>(num_sets * NUM_WAYS * sizeof(TagType));
-        auto counters = std::make_shared<Buffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
+        auto tags = std::make_shared<TestBuffer<TagType>>(num_sets * NUM_WAYS * sizeof(TagType));
+        auto counters = std::make_shared<TestBuffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
 
-        auto priorities = std::make_shared<Buffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
-        auto unique_keys = std::make_shared<Buffer<KeyType>>(num_sets * NUM_WAYS * sizeof(KeyType));
+        auto priorities = std::make_shared<TestBuffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
+        auto unique_keys = std::make_shared<TestBuffer<KeyType>>(num_sets * NUM_WAYS * sizeof(KeyType));
 
         // the type of data_ptrs doesn't really matter, generating as uint64_t
-        auto data_ptrs = std::make_shared<Buffer<uint64_t>>(num_sets * NUM_WAYS * sizeof(uint64_t));
+        auto data_ptrs = std::make_shared<TestBuffer<uint64_t>>(num_sets * NUM_WAYS * sizeof(uint64_t));
 
-        auto replace_entries = std::make_shared<Buffer<ModifyEntry>>(num_sets * NUM_WAYS * sizeof(ModifyEntry));
-        auto replace_list = std::make_shared<Buffer<ModifyList>>(sizeof(ModifyList));
+        auto replace_entries = std::make_shared<TestBuffer<ModifyEntry>>(num_sets * NUM_WAYS * sizeof(ModifyEntry));
+        auto replace_list = std::make_shared<TestBuffer<ModifyList>>(sizeof(ModifyList));
 
         // allocate extra mem according to max of NUM_WAYS * num_sets keys
         size_t extra_mem_size;
@@ -301,17 +301,17 @@ class SortAndInsertTest : public ::testing::Test {
     void LaunchRandomInsertTest(uint32_t num_sets, size_t embedding_size, float decay_rate) {
         const uint32_t num_keys = num_sets * (NUM_WAYS - 1);
 
-        auto tags = std::make_shared<Buffer<TagType>>(num_sets * NUM_WAYS * sizeof(TagType));
-        auto counters = std::make_shared<Buffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
+        auto tags = std::make_shared<TestBuffer<TagType>>(num_sets * NUM_WAYS * sizeof(TagType));
+        auto counters = std::make_shared<TestBuffer<CounterType>>(num_sets * NUM_WAYS * sizeof(CounterType));
 
-        auto priorities = std::make_shared<Buffer<CounterType>>(num_keys * sizeof(CounterType));
-        auto unique_keys = std::make_shared<Buffer<KeyType>>(num_keys * sizeof(KeyType));
+        auto priorities = std::make_shared<TestBuffer<CounterType>>(num_keys * sizeof(CounterType));
+        auto unique_keys = std::make_shared<TestBuffer<KeyType>>(num_keys * sizeof(KeyType));
 
         // the type of data_ptrs doesn't really matter, generating as uint64_t
-        auto data_ptrs = std::make_shared<Buffer<uint64_t>>(num_sets * NUM_WAYS * sizeof(uint64_t));
+        auto data_ptrs = std::make_shared<TestBuffer<uint64_t>>(num_sets * NUM_WAYS * sizeof(uint64_t));
 
-        auto replace_entries = std::make_shared<Buffer<ModifyEntry>>(num_sets * NUM_WAYS * sizeof(ModifyEntry));
-        auto replace_list = std::make_shared<Buffer<ModifyList>>(sizeof(ModifyList));
+        auto replace_entries = std::make_shared<TestBuffer<ModifyEntry>>(num_sets * NUM_WAYS * sizeof(ModifyEntry));
+        auto replace_list = std::make_shared<TestBuffer<ModifyList>>(sizeof(ModifyList));
 
         std::mt19937 genr(0X753812);
         InitRandomTestInputs(num_keys, unique_keys, priorities, data_ptrs, genr);

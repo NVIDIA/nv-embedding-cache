@@ -210,10 +210,15 @@ void GpuTable<KeyType>::clear(context_ptr_t& ctx) {
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::erase(context_ptr_t& ctx, int64_t num_keys, const void* keys) {
+void GpuTable<KeyType>::erase(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys) {
   NVE_NVTX_SCOPED_FUNCTION_COL6_();
   ScopedDevice scope_device(config_.device_id);
-  NVE_CHECK_(keys != nullptr, "Invalid cache erase params");
+  auto modify_stream = ctx->get_modify_stream();
+  NVE_CHECK_(keys != nullptr, "Invalid Keys buffer");
+  const void* keys_buf = config_.modify_on_gpu ?
+                         keys->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream) :
+                         keys->access_buffer(cudaMemoryTypeHost, true /*copy_content*/, modify_stream);
+  NVE_CHECK_(keys_buf != nullptr, "Invalid cache erase params");
 
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
   NVE_CHECK_(gpu_table_ctx != nullptr, "Invalid GPU table context");
@@ -221,9 +226,9 @@ void GpuTable<KeyType>::erase(context_ptr_t& ctx, int64_t num_keys, const void* 
   auto mod_ctx{gpu_table_ctx->modify_context()};
 
   auto ec_event = create_sync_event();
-  StreamCoordinator sc(gpu_table_ctx->get_modify_stream(), config_.private_stream);
+  StreamCoordinator sc(modify_stream, config_.private_stream);
 
-  NVE_CHECK_(cache_->invalidate(mod_ctx, static_cast<const key_type*>(keys),
+  NVE_CHECK_(cache_->invalidate(mod_ctx, static_cast<const key_type*>(keys_buf),
                                 num_keys, 0, ec_event.get(), sc.queue_stream),
              "Failed to call cache invalidate");
 }
@@ -331,31 +336,36 @@ static void run_find_uvm(const GPUTableConfig& config, std::shared_ptr<CacheType
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::find(context_ptr_t& ctx, int64_t num_keys, const void* keys,
-                             max_bitmask_repr_t* hit_mask, int64_t value_stride,
-                             void* values, int64_t* value_sizes) const {
+void GpuTable<KeyType>::find(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys,
+                             buffer_ptr<max_bitmask_repr_t> hit_mask, int64_t value_stride,
+                             buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const {
   NVE_NVTX_SCOPED_FUNCTION_COL1_();
   ScopedDevice scope_device(config_.device_id);
   NVE_CHECK_(value_sizes == nullptr, "value_sizes must be nullptr for GPU table");
+  auto lookup_stream = ctx->get_lookup_stream();
+  const void* keys_buf = keys->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream);
+  max_bitmask_repr_t* hit_mask_buf =
+      hit_mask ? hit_mask->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream) : nullptr;
+  void* values_buf = values ? values->access_buffer(cudaMemoryTypeDevice, false /*copy_content*/, lookup_stream) : nullptr;
 
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
   NVE_CHECK_(gpu_table_ctx != nullptr, "Invalid GPU table context");
 
   auto lookup_ctx{gpu_table_ctx->lookup_context()};
-  StreamCoordinator sc(gpu_table_ctx->get_lookup_stream(), config_.private_stream);
+  StreamCoordinator sc(lookup_stream, config_.private_stream);
   if (config_.uvm_table) {
-    std::unique_lock uvm_lock(uvm_table_mutex_, std::defer_lock); // don't lock yet, only lock when not using private stream
+    std::shared_lock uvm_lock(uvm_table_mutex_, std::defer_lock); // don't lock yet, only lock when not using private stream
     if (!config_.private_stream) {
       uvm_lock.lock();
     }
-    run_find_uvm<KeyType, CacheType >(config_, cache_, ctx, num_keys, keys, values, value_stride, sc.queue_stream);
+    run_find_uvm<KeyType, CacheType >(config_, cache_, ctx, num_keys, keys_buf, values_buf, value_stride, sc.queue_stream);
   } else {
     NVE_CHECK_(cache_->lookup(
       lookup_ctx,
-      reinterpret_cast<const KeyType*>(keys),
+      reinterpret_cast<const KeyType*>(keys_buf),
       static_cast<size_t>(num_keys),
-      reinterpret_cast<int8_t*>(values),
-      hit_mask,
+      reinterpret_cast<int8_t*>(values_buf),
+      hit_mask_buf,
       0, /*currTable*/
       value_stride,
       sc.queue_stream));
@@ -363,11 +373,16 @@ void GpuTable<KeyType>::find(context_ptr_t& ctx, int64_t num_keys, const void* k
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void* keys,
-                               int64_t value_stride, int64_t value_size, const void* values) {
+void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys,
+                               int64_t value_stride, int64_t value_size, buffer_ptr<const void> values) {
   NVE_NVTX_SCOPED_FUNCTION_COL2_();
   ScopedDevice scope_device(config_.device_id);  
-  NVE_CHECK_(keys && values, "Invalid cache insert params");
+  auto modify_stream = ctx->get_modify_stream();
+  const void* keys_buf =
+      keys->access_buffer(config_.modify_on_gpu ? cudaMemoryTypeDevice : cudaMemoryTypeHost,
+                          true /*copy_content*/, modify_stream);
+  const void* values_buf = values->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
+  NVE_CHECK_(keys_buf && values_buf, "Invalid cache insert params");
   NVE_CHECK_(value_size == config_.row_size_in_bytes, "Unsupported value_size");
 
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
@@ -384,10 +399,10 @@ void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void*
     nve::DefaultGPUHistogram<KeyType> histogram(num_keys);
     size_t histAllocSize = histogram.get_alloc_size();
     void* d_hist_storage = ctx->get_buffer("d_hist_storage", histAllocSize, false);
-    cudaStream_t mod_stream = gpu_table_ctx->get_modify_stream();
+    cudaStream_t mod_stream = modify_stream;
 
-    histogram.compute_histogram(reinterpret_cast<const KeyType*>(keys), num_keys,
-                               reinterpret_cast<const int8_t*>(values),
+    histogram.compute_histogram(reinterpret_cast<const KeyType*>(keys_buf), num_keys,
+                               reinterpret_cast<const int8_t*>(values_buf),
                                value_stride, d_hist_storage, mod_stream);
 
     auto ec_event = create_sync_event();
@@ -408,9 +423,9 @@ void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void*
   } else {
 
     nve::DefaultHistogram histogram(
-    static_cast<const key_type*>(keys),
+    static_cast<const key_type*>(keys_buf),
     static_cast<size_t>(num_keys),
-    static_cast<const int8_t*>(values),
+    static_cast<const int8_t*>(values_buf),
     static_cast<size_t>(value_stride),
     false);
 
@@ -431,18 +446,22 @@ void GpuTable<KeyType>::insert(context_ptr_t& ctx, int64_t num_keys, const void*
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void* keys,
-                               int64_t value_stride, int64_t value_size, const void* values) {
+void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys,
+                               int64_t update_stride, int64_t update_size, buffer_ptr<const void> updates) {
   NVE_NVTX_SCOPED_FUNCTION_COL3_();
   ScopedDevice scope_device(config_.device_id);
-  NVE_CHECK_(keys && values, "Invalid cache update params");
-  NVE_CHECK_(value_size == config_.row_size_in_bytes, "Unsupported value_size");
+  auto modify_stream = ctx->get_modify_stream();
+  const void* keys_buf =
+      keys->access_buffer(config_.modify_on_gpu ? cudaMemoryTypeDevice : cudaMemoryTypeHost,
+                          true /*copy_content*/, modify_stream);
+  const void* updates_buf = updates->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
+  NVE_CHECK_(keys_buf && updates_buf, "Invalid cache update params");
+  NVE_CHECK_(update_size == config_.row_size_in_bytes, "Unsupported update_size");
 
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
   NVE_CHECK_(gpu_table_ctx != nullptr, "Invalid GPU table context");
 
   auto mod_ctx{gpu_table_ctx->modify_context()};
-  const auto modify_stream = gpu_table_ctx->get_modify_stream();
 
   const auto max_modify_size = gpu_table_ctx->max_modify_size_;
   if (num_keys > max_modify_size) {
@@ -457,9 +476,9 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
 
     NVE_CHECK_(cache_->update(
       mod_ctx,
-      static_cast<const key_type*>(keys) + k_start,
-      static_cast<const int8_t*>(values) + (k_start * value_stride),
-      value_stride,
+      static_cast<const key_type*>(keys_buf) + k_start,
+      static_cast<const int8_t*>(updates_buf) + (k_start * update_stride),
+      update_stride,
       k_end - k_start,
       0, // tableIndex
       ec_event.get(),
@@ -476,7 +495,7 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
   // Update the UVM table
   if (config_.uvm_table && !config_.disable_uvm_update) {
     const auto keys_buffer_size = sizeof(KeyType) * num_keys;
-    auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, keys_buffer_size);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys_buf, keys_buffer_size);
     const void* d_keys = keys_bw->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
 
     std::unique_lock uvm_lock(uvm_table_mutex_, std::defer_lock); // don't lock yet, only lock when not using private stream
@@ -499,10 +518,10 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
     StreamCoordinator::create_stream_dependency(modify_stream, update_stream);
 
     // Launch the update kernel
-    UpdateTable<KeyType>(values, reinterpret_cast<const KeyType*>(d_keys),
+    UpdateTable<KeyType>(updates_buf, reinterpret_cast<const KeyType*>(d_keys),
                         config_.uvm_table,
                         static_cast<uint32_t>(config_.row_size_in_bytes),
-                        static_cast<uint32_t>(value_stride),
+                        static_cast<uint32_t>(update_stride),
                         static_cast<uint32_t>(config_.row_size_in_bytes),
                         static_cast<int32_t>(num_keys),
                         update_stream);
@@ -527,15 +546,20 @@ void GpuTable<KeyType>::update(context_ptr_t& ctx, int64_t num_keys, const void*
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, const void* keys,
+void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys,
                                           int64_t update_stride, int64_t update_size,
-                                          const void* updates, DataType_t update_dtype) {
+                                          buffer_ptr<const void> updates, DataType_t update_dtype) {
   NVE_NVTX_SCOPED_FUNCTION_COL4_();
   ScopedDevice scope_device(config_.device_id);
   if (num_keys <= 0) {
     return;
   }
-  NVE_CHECK_(keys && updates, "Invalid cache accumulate params");
+  auto modify_stream = ctx->get_modify_stream();
+  const void* keys_buf =
+      keys->access_buffer(config_.modify_on_gpu ? cudaMemoryTypeDevice : cudaMemoryTypeHost,
+                          true /*copy_content*/, modify_stream);
+  const void* updates_buf = updates->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
+  NVE_CHECK_(keys_buf && updates_buf, "Invalid cache accumulate params");
   NVE_CHECK_(update_size == config_.row_size_in_bytes, "Row/update size mismatch");
 
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
@@ -544,7 +568,6 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
   auto update_ec_type = TRSDataToEC(update_dtype);
   auto table_ec_type = TRSDataToEC(config_.value_dtype);
   auto mod_ctx{gpu_table_ctx->modify_context()};
-  const auto modify_stream = gpu_table_ctx->get_modify_stream();
   StreamCoordinator sc(modify_stream, config_.private_stream);
 
   // First update the cache
@@ -554,9 +577,9 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
     NVE_CHECK_(cache_->update_accumulate_no_sync(
       lookup_ctx,
       mod_ctx,
-      static_cast<const key_type*>(keys),
+      static_cast<const key_type*>(keys_buf),
       static_cast<size_t>(num_keys),
-      static_cast<const int8_t*>(updates),
+      static_cast<const int8_t*>(updates_buf),
       0 /* currTable */,
       static_cast<size_t>(update_stride),
       update_ec_type,
@@ -575,8 +598,8 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
 
       NVE_CHECK_(cache_->update_accumulate(
         mod_ctx,
-        static_cast<const key_type*>(keys) + k_start,
-        static_cast<const int8_t*>(updates) + (k_start * update_stride),
+        static_cast<const key_type*>(keys_buf) + k_start,
+        static_cast<const int8_t*>(updates_buf) + (k_start * update_stride),
         update_stride,
         k_end - k_start,
         0, // tableIndex
@@ -597,7 +620,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
   // Update the UVM table
   if (config_.uvm_table && !config_.disable_uvm_update) {
     const auto keys_buffer_size = sizeof(KeyType) * num_keys;
-    auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, keys_buffer_size);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys_buf, keys_buffer_size);
 
     std::unique_lock uvm_lock(uvm_table_mutex_, std::defer_lock); // don't lock yet, only lock when not using private stream
     cudaStream_t update_stream = sc.queue_stream;
@@ -637,7 +660,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
         // Launch copies
         for (int64_t i=0 ; i<num_copies ; i++) {
           int8_t* h_copy_start = static_cast<int8_t*>(h_updates) + (i * keys_per_copy * update_stride);
-          const int8_t* d_copy_start = static_cast<const int8_t*>(updates) + (i * keys_per_copy * update_stride);
+          const int8_t* d_copy_start = static_cast<const int8_t*>(updates_buf) + (i * keys_per_copy * update_stride);
           const int64_t used_keys = std::min<int64_t>((i+1) * keys_per_copy, num_keys) - (i * keys_per_copy);
           const auto copy_size = used_keys * update_stride;
           NVE_CHECK_(cudaMemcpyAsync(h_copy_start, d_copy_start, copy_size, cudaMemcpyDefault, update_stream));
@@ -729,7 +752,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
         }
       } else {
         // Use a single cudaMemcpy
-        NVE_CHECK_(cudaMemcpyAsync(h_updates, updates, update_buffer_size, cudaMemcpyDefault, update_stream));
+        NVE_CHECK_(cudaMemcpyAsync(h_updates, updates_buf, update_buffer_size, cudaMemcpyDefault, update_stream));
         NVE_CHECK_(cudaStreamSynchronize(update_stream));
 
         // launch update jobs on threadpool
@@ -809,7 +832,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
               uint32_t embedding_width = static_cast<uint32_t>(config_.row_size_in_bytes / sizeof(float));
               uint32_t value_stride_elements = static_cast<uint32_t>(update_stride / sizeof(float));
               UpdateAccumulateTable<KeyType, float>(
-                  reinterpret_cast<const float*>(updates),
+                  reinterpret_cast<const float*>(updates_buf),
                   reinterpret_cast<const KeyType*>(d_keys),
                   reinterpret_cast<float*>(config_.uvm_table),
                   embedding_width,
@@ -825,7 +848,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
               uint32_t embedding_width = static_cast<uint32_t>(config_.row_size_in_bytes / sizeof(__half));
               uint32_t value_stride_elements = static_cast<uint32_t>(update_stride / sizeof(__half));
               UpdateAccumulateTable<KeyType, __half>(
-                  reinterpret_cast<const __half*>(updates),
+                  reinterpret_cast<const __half*>(updates_buf),
                   reinterpret_cast<const KeyType*>(d_keys),
                   reinterpret_cast<__half*>(config_.uvm_table),
                   embedding_width,
@@ -862,21 +885,32 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
 
 template <typename KeyType>
 template <typename OffsetType, typename ValueType, typename OutputType, typename WeightType>
-void GpuTable<KeyType>::find_and_combine(context_ptr_t& ctx, int64_t num_keys, const void* keys,
-                                         SparseType_t hot_type, int64_t num_offsets,
-                                         const OffsetType* offsets, int64_t fixed_hotness,
-                                         PoolingType_t pooling_type, const WeightType* weights,
-                                         int64_t value_stride, OutputType* values) {
+void GpuTable<KeyType>::find_and_combine(
+    context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys_bw,
+    SparseType_t hot_type, int64_t num_offsets, buffer_ptr<const OffsetType> offsets_bw,
+    int64_t fixed_hotness, PoolingType_t pooling_type, buffer_ptr<const WeightType> weights_bw,
+    int64_t value_stride, buffer_ptr<void> values_bw) {
   NVE_NVTX_SCOPED_FUNCTION_COL1_();
   ScopedDevice scope_device(config_.device_id);
   NVE_CHECK_(value_stride == config_.row_size_in_bytes,
              "Output stride must be the same as cache row size");
+  NVE_CHECK_(config_.uvm_table != nullptr,
+             "find_and_combine requires a UVM table");
+  auto lookup_stream = ctx->get_lookup_stream();
+  const void* keys = keys_bw->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream);
+  const OffsetType* offsets =
+      offsets_bw ? offsets_bw->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream)
+                 : nullptr;
+  const WeightType* weights =
+      weights_bw ? weights_bw->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream)
+                 : nullptr;
+  void* values = values_bw->access_buffer(cudaMemoryTypeDevice, false /*copy_content*/, lookup_stream);
 
   auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
   NVE_CHECK_(gpu_table_ctx != nullptr, "Invalid GPU table context");
-  StreamCoordinator sc(gpu_table_ctx->get_lookup_stream(), config_.private_stream);
+  StreamCoordinator sc(lookup_stream, config_.private_stream);
 
-  std::unique_lock uvm_lock(uvm_table_mutex_, std::defer_lock); // don't lock yet, only lock when not using private stream
+  std::shared_lock uvm_lock(uvm_table_mutex_, std::defer_lock); // don't lock yet, only lock when not using private stream
   if (config_.uvm_table && !config_.private_stream) {
     uvm_lock.lock();
   }
@@ -1026,7 +1060,7 @@ void GpuTable<KeyType>::reset_lookup_counter(context_ptr_t& ctx) {
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::get_lookup_counter(context_ptr_t& ctx, int64_t* counter) {
+void GpuTable<KeyType>::get_lookup_counter(context_ptr_t& ctx, int64_t* counter) const {
   if (!config_.count_misses) {
     NVE_LOG_WARNING_("GPUTable was configured without a key counter");
     *counter = 0;
@@ -1043,7 +1077,7 @@ void GpuTable<KeyType>::get_lookup_counter(context_ptr_t& ctx, int64_t* counter)
 }
 
 template <typename KeyType>
-bool GpuTable<KeyType>::lookup_counter_hits() {
+bool GpuTable<KeyType>::lookup_counter_hits() const {
   return false;
 }
 
@@ -1053,8 +1087,13 @@ int32_t GpuTable<KeyType>::get_device_id() const {
 }
 
 template <typename KeyType>
-int64_t GpuTable<KeyType>::get_max_row_size() const { 
+int64_t GpuTable<KeyType>::get_max_row_size() const {
   return config_.row_size_in_bytes;
+}
+
+template <typename KeyType>
+int64_t GpuTable<KeyType>::get_key_size() const {
+  return sizeof(KeyType);
 }
 
 template <typename KeyType>
@@ -1063,75 +1102,8 @@ int64_t GpuTable<KeyType>::get_invalid_key() const {
 }
 
 template <typename KeyType>
-void GpuTable<KeyType>::erase_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) {
-  ScopedDevice scope_device(config_.device_id);
-  auto modify_stream = ctx->get_modify_stream();
-  auto keys_buf = config_.modify_on_gpu ? 
-                  keys->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream) :
-                  keys->access_buffer(cudaMemoryTypeHost, true /*copy_content*/, modify_stream);
-  erase(ctx, n, keys_buf);
-}
-
-template <typename KeyType>
-void GpuTable<KeyType>::find_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, buffer_ptr<max_bitmask_repr_t> hit_mask,
-                                int64_t value_stride, buffer_ptr<void> values, buffer_ptr<int64_t> /*value_sizes*/) const {
-  ScopedDevice scope_device(config_.device_id);
-  auto lookup_stream = ctx->get_lookup_stream();
-  auto keys_buf = keys->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream);
-  max_bitmask_repr_t* hit_mask_buf = hit_mask ? hit_mask->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream) : nullptr;
-  auto values_buf = values->access_buffer(cudaMemoryTypeDevice, false /*copy_content*/, lookup_stream);
-  find(ctx, n, keys_buf, hit_mask_buf, value_stride, values_buf, nullptr);
-}
-
-template <typename KeyType>
-void GpuTable<KeyType>::insert_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
-                                  int64_t value_size, buffer_ptr<const void> values) {
-  ScopedDevice scope_device(config_.device_id);
-  auto modify_stream = ctx->get_modify_stream();
-  auto keys_buf = keys->access_buffer(config_.modify_on_gpu ? cudaMemoryTypeDevice : cudaMemoryTypeHost, true /*copy_content*/, modify_stream);
-  auto values_buf = values->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
-  insert(ctx, n, keys_buf, value_stride, value_size, values_buf);
-}
-
-template <typename KeyType>
-void GpuTable<KeyType>::update_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys, int64_t value_stride,
-                                  int64_t value_size, buffer_ptr<const void> values) {
-  ScopedDevice scope_device(config_.device_id);
-  auto modify_stream = ctx->get_modify_stream();
-  auto keys_buf = keys->access_buffer(config_.modify_on_gpu ? cudaMemoryTypeDevice : cudaMemoryTypeHost, true /*copy_content*/, modify_stream);
-  auto values_buf = values->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
-  update(ctx, n, keys_buf, value_stride, value_size, values_buf);
-}
-
-template <typename KeyType>
-void GpuTable<KeyType>::update_accumulate_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
-                                int64_t update_stride, int64_t update_size, buffer_ptr<const void> updates,
-                                DataType_t update_dtype) {
-  ScopedDevice scope_device(config_.device_id);
-  auto modify_stream = ctx->get_modify_stream();
-  auto keys_buf = keys->access_buffer(config_.modify_on_gpu ? cudaMemoryTypeDevice : cudaMemoryTypeHost, true /*copy_content*/, modify_stream);
-  auto updates_buf = updates->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, modify_stream);
-  update_accumulate(ctx, n, keys_buf, update_stride, update_size, updates_buf, update_dtype);
-}
-
-template <typename KeyType>
-template <typename OffsetType, typename ValueType, typename OutputType, typename WeightType>
-void GpuTable<KeyType>::find_and_combine_bw(
-  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type, int64_t num_offsets,
-  buffer_ptr<const OffsetType> offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-  buffer_ptr<const WeightType> weights, int64_t value_stride, buffer_ptr<void> values) {
-  ScopedDevice scope_device(config_.device_id);
-  auto lookup_stream = ctx->get_lookup_stream();
-  auto keys_buf = keys->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream);
-  auto offsets_buf = offsets->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream);
-  const WeightType* weights_buf =
-    (weights != nullptr) ?
-    weights->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream) :
-    nullptr;
-  auto values_buf = values->access_buffer(cudaMemoryTypeDevice, false /*copy_content*/, lookup_stream);
-  find_and_combine<OffsetType, ValueType, OutputType, WeightType>(
-    ctx, num_keys, keys_buf, sparse_type, num_offsets, offsets_buf,
-    fixed_hotness, pooling_type, weights_buf, value_stride, reinterpret_cast<OutputType*>(values_buf));
+DataType_t GpuTable<KeyType>::get_value_type() const {
+  return config_.value_dtype;
 }
 
 // TODO: add more type combinations
@@ -1139,35 +1111,21 @@ template class GpuTable<int32_t>;
 template class GpuTable<int64_t>;
 
 template void GpuTable<int64_t>::find_and_combine<int64_t, float, float, float>(
-    context_ptr_t& ctx, int64_t num_keys, const void* keys, SparseType_t sparse_type,
-    int64_t num_offsets, const int64_t* offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-    const float* weights, int64_t value_stride, float* values);
+  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type,
+  int64_t num_offsets, buffer_ptr<const int64_t> offsets, int64_t fixed_hotness,
+  PoolingType_t pooling_type, buffer_ptr<const float> weights, int64_t value_stride,
+  buffer_ptr<void> values);
 template void GpuTable<int32_t>::find_and_combine<int32_t, float, float, float>(
-    context_ptr_t& ctx, int64_t num_keys, const void* keys, SparseType_t sparse_type,
-    int64_t num_offsets, const int32_t* offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-    const float* weights, int64_t value_stride, float* values);
+  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type,
+  int64_t num_offsets, buffer_ptr<const int32_t> offsets, int64_t fixed_hotness,
+  PoolingType_t pooling_type, buffer_ptr<const float> weights, int64_t value_stride,
+  buffer_ptr<void> values);
 template void GpuTable<int64_t>::find_and_combine<int64_t, __half, __half, __half>(
-    context_ptr_t& ctx, int64_t num_keys, const void* keys, SparseType_t sparse_type,
-    int64_t num_offsets, const int64_t* offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-    const __half* weights, int64_t value_stride, __half* values);
+  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type,
+  int64_t num_offsets, buffer_ptr<const int64_t> offsets, int64_t fixed_hotness,
+  PoolingType_t pooling_type, buffer_ptr<const __half> weights, int64_t value_stride,
+  buffer_ptr<void> values);
 template void GpuTable<int32_t>::find_and_combine<int32_t, __half, __half, __half>(
-    context_ptr_t& ctx, int64_t num_keys, const void* keys, SparseType_t sparse_type,
-    int64_t num_offsets, const int32_t* offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-    const __half* weights, int64_t value_stride, __half* values);
-
-template void GpuTable<int64_t>::find_and_combine_bw<int64_t, float, float, float>(
-  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type, int64_t num_offsets,
-  buffer_ptr<const int64_t> offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-  buffer_ptr<const float> weights, int64_t value_stride, buffer_ptr<void> values);
-template void GpuTable<int32_t>::find_and_combine_bw<int32_t, float, float, float>(
-  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type, int64_t num_offsets,
-  buffer_ptr<const int32_t> offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-  buffer_ptr<const float> weights, int64_t value_stride, buffer_ptr<void> values);
-template void GpuTable<int64_t>::find_and_combine_bw<int64_t, __half, __half, __half>(
-  context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type, int64_t num_offsets,
-  buffer_ptr<const int64_t> offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
-  buffer_ptr<const __half> weights, int64_t value_stride, buffer_ptr<void> values);
-template void GpuTable<int32_t>::find_and_combine_bw<int32_t, __half, __half, __half>(
   context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys, SparseType_t sparse_type, int64_t num_offsets,
   buffer_ptr<const int32_t> offsets, int64_t fixed_hotness, PoolingType_t pooling_type,
   buffer_ptr<const __half> weights, int64_t value_stride, buffer_ptr<void> values);

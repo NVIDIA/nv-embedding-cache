@@ -44,12 +44,22 @@ class CachedTable(torch.nn.parameter.Parameter):
         instance.emb_layer = cache
         return instance
 
+    def __getstate__(self):
+        # `emb_layer` is a C++ cache handle (nve.LinearUVMEmbedding / GPUEmbedding)
+        # that cannot be pickled. torch.export.save() serializes the module's
+        # state_dict (this Parameter included) via torch.save, so the handle must
+        # be excluded from the pickled state. torch's tensor reduction calls
+        # __getstate__ (via torch._utils._get_obj_state), so we return a copy of
+        # __dict__ with the handle dropped — leaving the live `self.emb_layer`
+        # intact so the layer stays usable after export (mutating self here would
+        # break it). The exported graph dispatches on the per-layer marker tensor
+        # + C++ registry and reloads weights from the .nve file, so the cache
+        # handle is not needed in the artifact.
+        state = dict(self.__dict__)
+        state["emb_layer"] = None
+        return state
 
-    def __reduce_ex__(self, protocol):
-        self.emb_layer = None
-        return super().__reduce_ex__(protocol)
-
-    # sgd optimizer will call this function to modify the storage 
+    # sgd optimizer will call this function to modify the storage
     # we will overload it here so we can tell the caches to update
     def add_(self, other : torch.Tensor, *, alpha : float = 1):
         """In-place addition of a tensor to the current tensor.

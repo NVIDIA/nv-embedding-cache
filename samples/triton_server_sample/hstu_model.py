@@ -138,8 +138,8 @@ class NVEEmbeddingCollection(EmbeddingCollectionInterface):
                 embedding_config.num_embeddings, 
                 embedding_config.embedding_dim, 
                 torch.float32, 
-                nve_layers.CacheType.LinearUVM, 
-                memblock=self.memblocks[embedding_config.name], 
+                nve_layers.LayerType.LinearUVM, 
+                storage=self.memblocks[embedding_config.name], 
                 gpu_cache_size=gpu_cache_size, 
                 device=device, 
                 optimize_for_training=False

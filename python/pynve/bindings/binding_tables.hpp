@@ -39,37 +39,10 @@ public:
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         table_->clear(ctx);
     }
-    void erase(context_ptr_t& ctx, int64_t n, const void* keys) override {
-        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->erase(ctx, n, keys);
-    }
-    void find(context_ptr_t& ctx, int64_t n, const void* keys,
-              max_bitmask_repr_t* hit_mask, int64_t value_stride,
-              void* values, int64_t* value_sizes) const override {
-        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->find(ctx, n, keys, hit_mask, value_stride, values, value_sizes);
-    }
-    void insert(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-                int64_t value_size, const void* values) override {
-        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->insert(ctx, n, keys, value_stride, value_size, values);
-    }
-    void update(context_ptr_t& ctx, int64_t n, const void* keys, int64_t value_stride,
-                int64_t value_size, const void* values) override {
-        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->update(ctx, n, keys, value_stride, value_size, values);
-    }
-    void update_accumulate(context_ptr_t& ctx, int64_t n, const void* keys,
-                           int64_t update_stride, int64_t update_size,
-                           const void* updates, DataType_t update_dtype) override {
-        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->update_accumulate(ctx, n, keys, update_stride, update_size, updates, update_dtype);
-    }
     virtual void set_table(table_ptr_t table) {
         NVE_CHECK_(table_ == nullptr, "Table is already initialized");
         table_ = std::move(table);
     }
-
     int32_t get_device_id() const override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         return table_->get_device_id();
@@ -78,51 +51,58 @@ public:
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         return table_->get_max_row_size();
     }
+    int64_t get_key_size() const override {
+        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
+        return table_->get_key_size();
+    }
     int64_t get_invalid_key() const override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         return table_->get_invalid_key();
+    }
+    DataType_t get_value_type() const override {
+        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
+        return table_->get_value_type();
     }
     void reset_lookup_counter(context_ptr_t& ctx) override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         table_->reset_lookup_counter(ctx);
     }
-    void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) override {
+    void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) const override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         table_->get_lookup_counter(ctx, counter);
     }
-    bool lookup_counter_hits() override {
+    bool lookup_counter_hits() const override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         return table_->lookup_counter_hits();
     }
-
-    void erase_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override {
+    void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->erase_bw(ctx, n, std::move(keys));
+        table_->erase(ctx, n, std::move(keys));
     }
-    void find_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+    void find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
                  buffer_ptr<max_bitmask_repr_t> hit_mask, int64_t value_stride,
                  buffer_ptr<void> values, buffer_ptr<int64_t> value_sizes) const override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->find_bw(ctx, n, std::move(keys), std::move(hit_mask), value_stride, std::move(values), std::move(value_sizes));
+        table_->find(ctx, n, std::move(keys), std::move(hit_mask), value_stride, std::move(values), std::move(value_sizes));
     }
-    void insert_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+    void insert(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
                    int64_t value_stride, int64_t value_size,
                    buffer_ptr<const void> values) override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->insert_bw(ctx, n, std::move(keys), value_stride, value_size, std::move(values));
+        table_->insert(ctx, n, std::move(keys), value_stride, value_size, std::move(values));
     }
-    void update_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+    void update(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
                    int64_t value_stride, int64_t value_size,
                    buffer_ptr<const void> values) override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->update_bw(ctx, n, std::move(keys), value_stride, value_size, std::move(values));
+        table_->update(ctx, n, std::move(keys), value_stride, value_size, std::move(values));
     }
-    void update_accumulate_bw(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
+    void update_accumulate(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
                               int64_t update_stride, int64_t update_size,
                               buffer_ptr<const void> updates,
                               DataType_t update_dtype) override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
-        table_->update_accumulate_bw(ctx, n, std::move(keys), update_stride, update_size, std::move(updates), update_dtype);
+        table_->update_accumulate(ctx, n, std::move(keys), update_stride, update_size, std::move(updates), update_dtype);
     }
 
 protected:

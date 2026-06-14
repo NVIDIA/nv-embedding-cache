@@ -19,11 +19,13 @@
 
 #include "include/embedding_layer.hpp"
 #include "include/hierarchical_embedding_layer.hpp"
+#include "include/host_embedding_layer.hpp"
 #include "include/linear_embedding_layer.hpp"
 #include "include/gpu_embedding_layer.hpp"
 #include "include/execution_context.hpp"
 #include "include/gpu_table.hpp"
 #include "include/host_table.hpp"
+#include "include/linear_host_table.hpp"
 #include "include/insert_heuristic.hpp"
 #include <iostream>
 #include <fstream>
@@ -40,6 +42,7 @@
 #include "cuda_ops/pipeline_gather.cuh"
 
 #include <sys/mman.h>
+#include <mutex>
 
 namespace nve {
 
@@ -48,7 +51,12 @@ struct EmbedLayerConfig {
     int64_t kernel_mode = 0;
     int64_t kernel_mode_value_1 = 0;
     int64_t kernel_mode_value_2 = 0;
+    int64_t max_modify_size = 0; // means tables default
 };
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+    EmbedLayerConfig,
+    logging_interval, kernel_mode, kernel_mode_value_1, kernel_mode_value_2, max_modify_size)
 
 template<typename IndexT>
 class NVEmbedBinding
@@ -96,7 +104,7 @@ public:
         EmbeddingLayerBase::PoolingParams pool_params;
         pool_params.pooling_type = PoolingType_t(pooling_type);
         pool_params.sparse_type = SparseType_t::CSR;
-        pool_params.key_indices = reinterpret_cast<const int64_t*>(offsets);
+        pool_params.key_indices = reinterpret_cast<const void*>(offsets);
         pool_params.num_key_indices = num_offsets;
         pool_params.sparse_weights = reinterpret_cast<const void*>(weights);
         pool_params.weight_type = DataType_t(weight_data_type);
@@ -115,7 +123,10 @@ public:
 
     size_t concat_backprop(size_t num_keys, uintptr_t keys, uintptr_t grads,
                            uint64_t unique_keys, uintptr_t output_grads, uint64_t stream_)
-    { 
+    {
+        NVE_CHECK_(device_id_ >= 0,
+                   "concat_backprop is not supported on a host-only layer (device_id < 0). "
+                   "Gradient computation requires a CUDA device; HostLayer is inference-only.");
         auto stream = reinterpret_cast<cudaStream_t>(stream_);
 
         if (!backprop_runner_) {
@@ -175,6 +186,9 @@ public:
                             uint32_t pooling_type, uint32_t num_offsets, uintptr_t offsets,
                             uint64_t /*data_type*/, uintptr_t weights, uint64_t stream_)
     {
+        NVE_CHECK_(device_id_ >= 0,
+                   "pooling_backprop is not supported on a host-only layer (device_id < 0). "
+                   "Gradient computation requires a CUDA device; HostLayer is inference-only.");
         auto stream = reinterpret_cast<cudaStream_t>(stream_);
 
         if (!backprop_runner_) {
@@ -237,7 +251,8 @@ public:
                             row_size_in_bytes_,
                             row_size_in_bytes_,
                             reinterpret_cast<const void*>(updates),
-                            data_type_);
+                            data_type_,
+                            -1 /* affect all tables */);
     }
 
     void update(size_t num_keys, uintptr_t keys, uintptr_t updates, uint64_t stream_)
@@ -247,7 +262,8 @@ public:
                             reinterpret_cast<const void*>(keys),
                             row_size_in_bytes_,
                             row_size_in_bytes_,
-                            reinterpret_cast<const void*>(updates));
+                            reinterpret_cast<const void*>(updates),
+                            -1 /* affect all tables */);
     }
 
     void insert(size_t num_keys, uintptr_t keys, uintptr_t values, int64_t table_id, uint64_t stream_)
@@ -287,39 +303,47 @@ public:
         row_size_in_bytes_ = (row_size * element_size);
         
         ScopedDevice scope_device(device_id_);
-        allocator_->host_allocate((void**)&h_num_runs_out_, sizeof(IndexT) * 2);
-        NVE_CHECK_(cudaStreamCreate(&modify_stream_)); 
+        if (device_id_ >= 0) {
+            // Backprop machinery and CUDA streams only make sense when a real GPU is in play.
+            allocator_->host_allocate((void**)&h_num_runs_out_, sizeof(IndexT) * 2);
+            NVE_CHECK_(cudaStreamCreate(&modify_stream_));
+        }
 
         logging_interval_ = config.logging_interval;
     }
 
-    virtual ~NVEmbedBinding() 
+    virtual ~NVEmbedBinding()
     {
         ScopedDevice scope_device(device_id_);
         // children responsible for releasing contexts
-        allocator_->host_free(h_num_runs_out_);
+        if (h_num_runs_out_ != nullptr) {
+            allocator_->host_free(h_num_runs_out_);
+        }
         if (modify_stream_)
         {
             ScopedDevice scope_device(device_id_);
             NVE_CHECK_(cudaStreamDestroy(modify_stream_));
         }
-    }    
+    }
 
 protected:
     void release_contexts()
     {
         // Wait for all pending work on the contexts to finish before destroying
+        std::lock_guard lock(stream_ctx_map_mutex_);
         for (auto& stream_ctx_pair : stream_ctx_map_)
         {
-            stream_ctx_pair.second->wait();
+            stream_ctx_pair.second->wait();    
             stream_ctx_pair.second.reset();
         }
+        stream_ctx_map_.clear();
     }
 
     std::shared_ptr<nve::ExecutionContext> get_exec_context(cudaStream_t stream)
     {
         // we will be using one modify stream across the layer ctx, I assume for inference this is enough.
         // for training we probably want to use private stream to optimize accumulates
+        std::lock_guard lock(stream_ctx_map_mutex_);
         if (stream_ctx_map_.count(stream) != 1)
         {
             cudaStream_t lookup_stream = stream;
@@ -368,6 +392,7 @@ protected:
     int device_id_ = -1;
     int64_t logging_counter_ = 0;
     int64_t logging_interval_ = -1;
+    mutable std::mutex stream_ctx_map_mutex_; // mutex to protect the stream_ctx_map_
 };
 
 template<typename IndexT>
@@ -395,10 +420,12 @@ public:
         nve::GPUTableConfig cfg;
         cfg.device_id = this->device_id_;
         cfg.cache_size = static_cast<int64_t>(gpu_cache_size);
-        cfg.max_modify_size = (1l << 20);
         cfg.row_size_in_bytes = this->row_size_in_bytes_;
         cfg.uvm_table = nullptr;
         cfg.value_dtype = dtype;
+        if (config.max_modify_size > 0) {
+            cfg.max_modify_size = config.max_modify_size;
+        }
         if (use_private_stream)
         {
             NVE_CHECK_(cudaStreamCreate(&private_stream_));
@@ -510,10 +537,12 @@ private:
         nve::GPUTableConfig cfg;
         cfg.device_id = this->device_id_;
         cfg.cache_size = static_cast<int64_t>(gpu_cache_size);
-        cfg.max_modify_size = (16l << 20);
         cfg.row_size_in_bytes = this->row_size_in_bytes_;
         cfg.value_dtype = dtype;
         cfg.count_misses = true;
+        if (config.max_modify_size > 0) {
+            cfg.max_modify_size = config.max_modify_size;
+        }
 
         if (use_private_stream)
         {
@@ -678,6 +707,66 @@ private:
 
 private:
     TensorWrapper gpu_table_;
+    uint64_t num_embeddings_{0};
+    std::shared_ptr<MemBlock> mem_block_;
+};
+
+template<typename IndexT>
+class HostEmbedding : public NVEmbedBinding<IndexT>
+{
+private:
+    using layer_type = nve::HostEmbeddingLayer<IndexT>;
+public:
+    HostEmbedding(size_t row_size,
+                  size_t num_embeddings,
+                  nve::DataType_t dtype,
+                  std::shared_ptr<MemBlock> mem_block,
+                  int device_id,
+                  EmbedLayerConfig config) :
+                  NVEmbedBinding<IndexT>(device_id, row_size, dtype, config),
+                  num_embeddings_(num_embeddings),
+                  mem_block_(std::move(mem_block))
+    {
+        ScopedDevice scope_device(this->device_id_);
+
+        host_table_.data = mem_block_->get_ptr();
+        host_table_.row = num_embeddings;
+        host_table_.col = row_size;
+        host_table_.element_size_in_bytes = static_cast<uint64_t>(dtype_size(dtype));
+
+        LinearHostTableConfig cfg;
+        cfg.value_dtype = dtype;
+        cfg.max_value_size = static_cast<int64_t>(this->row_size_in_bytes_);
+        cfg.key_size = sizeof(IndexT);
+        cfg.emb_table = host_table_.data;
+        auto linear_host_tab = std::make_shared<nve::LinearHostTable<IndexT>>(cfg);
+
+        typename layer_type::Config layer_cfg;
+        layer_cfg.layer_name = "host_layer";
+        this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, linear_host_tab,
+                                                            /*allocator=*/nullptr);
+    }
+
+    void write_tensor_to_stream(nve::StreamWrapperBase& stream, uint64_t name)
+    {
+        nve::TensorFileFormat writer;
+        writer.write_tensor_to_stream(stream, name, host_table_);
+    }
+
+    void load_tensor_from_stream(nve::StreamWrapperBase& stream, uint64_t name)
+    {
+        nve::TensorFileFormat reader;
+        reader.load_tensor_from_stream(stream, name, host_table_);
+    }
+
+    ~HostEmbedding()
+    {
+        ScopedDevice scope_device(this->device_id_);
+        this->release_contexts();
+    }
+
+private:
+    TensorWrapper host_table_;
     uint64_t num_embeddings_{0};
     std::shared_ptr<MemBlock> mem_block_;
 };

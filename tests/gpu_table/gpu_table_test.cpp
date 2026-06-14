@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <buffer_wrapper.hpp>
 #include <common.hpp>
 #include <cstring>
 #include <cuda_support.hpp>
@@ -212,6 +213,9 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
   }
   void test_combine() {
     const auto& params = GetParam();
+    if (!params.allocate_uvm_table) {
+      GTEST_SKIP() << "find_and_combine requires a UVM table";
+    }
     const size_t row_elements = static_cast<size_t>(params.row_size_bytes) / sizeof(float);
     insert(0, h_table_, params.row_size_bytes);
     KeyType h_keys[] = {0, 1, 2, 3};
@@ -279,12 +283,18 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     // copy key and data vector to gpu buffer
     NVE_CHECK_(cudaMemcpy(d_data_, h_data, static_cast<size_t>(row_size), cudaMemcpyDefault));
 
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx_, "values", d_data_, static_cast<size_t>(row_size));
     // launch insert
     if (modify_on_gpu_) {
       NVE_CHECK_(cudaMemcpy(d_keys_, &h_key, sizeof(KeyType), cudaMemcpyDefault));
-      tb_->insert(ctx_, 1, d_keys_, row_size, row_size, d_data_);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx_, "keys", d_keys_, sizeof(KeyType));
+      tb_->insert(ctx_, 1, std::move(keys_bw), row_size, row_size, std::move(values_bw));
     } else {
-      tb_->insert(ctx_, 1, &h_key, row_size, row_size, d_data_);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx_, "keys", &h_key, sizeof(KeyType));
+      tb_->insert(ctx_, 1, std::move(keys_bw), row_size, row_size, std::move(values_bw));
     }
     NVE_CHECK_(cudaDeviceSynchronize());
   }
@@ -293,12 +303,18 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     // copy key and data vector to gpu buffer
     NVE_CHECK_(cudaMemcpy(d_data_, h_data, static_cast<size_t>(row_size), cudaMemcpyDefault));
 
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx_, "values", d_data_, static_cast<size_t>(row_size));
     // launch update
     if (modify_on_gpu_) {
       NVE_CHECK_(cudaMemcpy(d_keys_, &h_key, sizeof(KeyType), cudaMemcpyDefault));
-      tb_->update(ctx_, 1, d_keys_, row_size, row_size, d_data_);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx_, "keys", d_keys_, sizeof(KeyType));
+      tb_->update(ctx_, 1, std::move(keys_bw), row_size, row_size, std::move(values_bw));
     } else {
-      tb_->update(ctx_, 1, &h_key, row_size, row_size, d_data_);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx_, "keys", &h_key, sizeof(KeyType));
+      tb_->update(ctx_, 1, std::move(keys_bw), row_size, row_size, std::move(values_bw));
     }
     NVE_CHECK_(cudaDeviceSynchronize());
   }
@@ -315,9 +331,14 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     NVE_CHECK_(cudaDeviceSynchronize());
 
     // find the inserted key-data
-    tb_->find(ctx_, num_keys, static_cast<const KeyType*>(d_keys_),
-              static_cast<max_bitmask_repr_t*>(d_hitmask_), row_size,
-              static_cast<OutputType*>(d_data_), nullptr);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx_, "keys", d_keys_, sizeof(KeyType) * static_cast<size_t>(num_keys));
+    auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+      ctx_, "hit_mask", static_cast<max_bitmask_repr_t*>(d_hitmask_), hit_mask_size_in_bytes_);
+    auto values_bw = std::make_shared<BufferWrapper<void>>(
+      ctx_, "values", d_data_, static_cast<size_t>(row_size) * static_cast<size_t>(num_keys));
+    tb_->find(ctx_, num_keys, std::move(keys_bw), std::move(hit_mask_bw), row_size,
+                 std::move(values_bw), nullptr);
     NVE_CHECK_(cudaDeviceSynchronize());
 
     std::vector<uint64_t> h_hitmask(hit_mask_size_in_bytes_/8 , 0);
@@ -349,11 +370,14 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     NVE_CHECK_(cudaMemset(d_data_, 0, static_cast<size_t>(row_size)));
     NVE_CHECK_(cudaDeviceSynchronize());
 
-    tb_->find_and_combine(ctx_, num_keys, d_keys_, SparseType_t::Fixed, 0 /*num_offsets*/,
-                          static_cast<OffsetType*>(nullptr) /*offsets*/,
-                          num_keys /* fixed_hotness*/, PoolingType_t::Sum,
-                          static_cast<WeightType*>(nullptr), row_size,
-                          static_cast<OutputType*>(d_data_));
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx_, "keys", d_keys_, sizeof(KeyType) * static_cast<size_t>(num_keys));
+    auto values_bw = std::make_shared<BufferWrapper<void>>(
+        ctx_, "values", d_data_, static_cast<size_t>(row_size));
+    tb_->template find_and_combine<OffsetType, ValueType, OutputType, WeightType>(
+        ctx_, num_keys, std::move(keys_bw), SparseType_t::Fixed, 0 /*num_offsets*/,
+        nullptr /*offsets*/, num_keys /* fixed_hotness*/, PoolingType_t::Sum,
+        nullptr /*weights*/, row_size, std::move(values_bw));
     NVE_CHECK_(cudaDeviceSynchronize());
 
     // copy outputs to host
@@ -365,9 +389,13 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     if (modify_on_gpu_) {
         NVE_CHECK_(cudaMemcpy(d_keys_, &h_key, sizeof(KeyType), cudaMemcpyDefault));
         NVE_CHECK_(cudaDeviceSynchronize());
-        tb_->erase(ctx_, 1, d_keys_);
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          ctx_, "keys", d_keys_, sizeof(KeyType));
+        tb_->erase(ctx_, 1, std::move(keys_bw));
     } else {
-        tb_->erase(ctx_, 1, &h_key);
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          ctx_, "keys", &h_key, sizeof(KeyType));
+        tb_->erase(ctx_, 1, std::move(keys_bw));
     }
   }
 
@@ -407,7 +435,7 @@ TEST_FORMAT(negative_key, test_negative_key);
 TEST_FORMAT(negative_key_hits, test_negative_key_hits);
 TEST_FORMAT(erase, test_erase);
 TEST_FORMAT(find, test_find_uvm);
-TEST_FORMAT(DISABLED_combine, test_combine); // Disabled - pooling path not implemented yet
+TEST_FORMAT(combine, test_combine);
 #undef TEST_FORMAT
 
 // Instantiate the tests with both type and value parameters
@@ -477,7 +505,13 @@ TEST(GpuTableInvalidKey, ValidKeysSurviveBatchWithSentinel) {
                         static_cast<size_t>(row_size) * batch_size, cudaMemcpyDefault));
   NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
 
-  tab.insert(ctx, batch_size, d_keys, row_size, row_size, d_values);
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", d_keys, sizeof(KeyType) * batch_size);
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "values", d_values, static_cast<size_t>(row_size) * batch_size);
+    tab.insert(ctx, batch_size, std::move(keys_bw), row_size, row_size, std::move(values_bw));
+  }
   NVE_CHECK_(cudaDeviceSynchronize());
   NVE_CHECK_(cudaPeekAtLastError());
 
@@ -485,8 +519,16 @@ TEST(GpuTableInvalidKey, ValidKeysSurviveBatchWithSentinel) {
   NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
   NVE_CHECK_(cudaMemset(d_values, 0, static_cast<size_t>(row_size) * batch_size));
   NVE_CHECK_(cudaMemset(d_hitmask, 0, hit_mask_bytes));
-  tab.find(ctx, batch_size, d_keys, static_cast<max_bitmask_repr_t*>(d_hitmask),
-           row_size, d_values, nullptr);
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", d_keys, sizeof(KeyType) * batch_size);
+    auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+      ctx, "hit_mask", static_cast<max_bitmask_repr_t*>(d_hitmask), hit_mask_bytes);
+    auto values_bw = std::make_shared<BufferWrapper<void>>(
+      ctx, "values", d_values, static_cast<size_t>(row_size) * batch_size);
+    tab.find(ctx, batch_size, std::move(keys_bw), std::move(hit_mask_bw), row_size,
+                std::move(values_bw), nullptr);
+  }
   NVE_CHECK_(cudaDeviceSynchronize());
   NVE_CHECK_(cudaPeekAtLastError());
 
@@ -553,15 +595,29 @@ TEST(GpuTableInvalidKey, MinusOneRoundTripsWhenSentinelIsCustom) {
                         static_cast<size_t>(row_size) * batch_size, cudaMemcpyDefault));
   NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
 
-  tab.insert(ctx, batch_size, d_keys, row_size, row_size, d_values);
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", d_keys, sizeof(KeyType) * batch_size);
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "values", d_values, static_cast<size_t>(row_size) * batch_size);
+    tab.insert(ctx, batch_size, std::move(keys_bw), row_size, row_size, std::move(values_bw));
+  }
   NVE_CHECK_(cudaDeviceSynchronize());
   NVE_CHECK_(cudaPeekAtLastError());
 
   NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * batch_size, cudaMemcpyDefault));
   NVE_CHECK_(cudaMemset(d_values, 0, static_cast<size_t>(row_size) * batch_size));
   NVE_CHECK_(cudaMemset(d_hitmask, 0, hit_mask_bytes));
-  tab.find(ctx, batch_size, d_keys, static_cast<max_bitmask_repr_t*>(d_hitmask),
-           row_size, d_values, nullptr);
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", d_keys, sizeof(KeyType) * batch_size);
+    auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+      ctx, "hit_mask", static_cast<max_bitmask_repr_t*>(d_hitmask), hit_mask_bytes);
+    auto values_bw = std::make_shared<BufferWrapper<void>>(
+      ctx, "values", d_values, static_cast<size_t>(row_size) * batch_size);
+    tab.find(ctx, batch_size, std::move(keys_bw), std::move(hit_mask_bw), row_size,
+                std::move(values_bw), nullptr);
+  }
   NVE_CHECK_(cudaDeviceSynchronize());
   NVE_CHECK_(cudaPeekAtLastError());
 

@@ -16,64 +16,67 @@
  */
 
 #pragma once
-#include <embedding_layer.hpp>
-#include "layer_utils.hpp"
+#include "include/embedding_layer.hpp"
+#include <vector>
+#include <string>
 
 namespace nve {
 
-template <typename KeyType> class GpuTable;
-class InsertHeuristic;
-
 /**
- * An embedding layer with a gpu cache that is backed by a linear table in UVM.
- * This allows the GPU kernel to resolve all indices without returning to the host during lookup.
+ * Host-only embedding layer wrapping a single host-resident table (e.g. LinearHostTable).
+ * Performs lookup / update entirely on the CPU — never enters the CUDA runtime, never creates
+ * an execution context that holds CUDA streams. Intended for inference on systems without a
+ * GPU or CUDA driver. The associated execution context is built directly by this layer; the
+ * underlying table's create_execution_context is not invoked.
  */
 template <typename KeyType>
-class LinearUVMEmbeddingLayer : public EmbeddingLayerBase {
+class HostEmbeddingLayer : public EmbeddingLayerBase {
  public:
   struct Config {
     std::string layer_name;
-    std::shared_ptr<InsertHeuristic> insert_heuristic = nullptr; // nullptr will result in using the default InsertHeuristic
-                                                                 // auto inserts can be disabled by using the NeverInsertHeuristic class
-    int64_t min_insert_freq_gpu = 0; // Minimal amount of lookups between inserts on GPU. increase this to throttle down auto inserts
-    int64_t min_insert_size_gpu = 1 << 16; // Minimal amount of keys to trigger an insert on GPU (smaller amounts will be collected)
+    std::vector<uint8_t> default_embedding = {}; // optional default vector for keys missing from the table
   };
 
-  NVE_PREVENT_COPY_AND_MOVE_(LinearUVMEmbeddingLayer);
-  using gpu_table_ptr_t = std::shared_ptr<GpuTable<KeyType>>;
+  NVE_PREVENT_COPY_AND_MOVE_(HostEmbeddingLayer);
   using key_type = KeyType;
 
-  LinearUVMEmbeddingLayer(const Config& cfg, gpu_table_ptr_t gpu_table,
-                          allocator_ptr_t allocator = {});
+  /**
+   * Create a host-only embedding layer.
+   * @param cfg Layer configuration parameters.
+   * @param table A host-resident table (must report get_device_id() < 0).
+   * @param allocator Allocator for internal resources not bound to a specific context.
+   *                  nullptr implies using GetDefaultAllocator().
+   */
+  HostEmbeddingLayer(const Config& cfg, table_ptr_t table, allocator_ptr_t allocator = {});
 
-  ~LinearUVMEmbeddingLayer() override;
+  ~HostEmbeddingLayer() override;
 
   void lookup(context_ptr_t& ctx, const int64_t num_keys, const void* keys, void* output,
               const int64_t output_stride, max_bitmask_repr_t* hitmask,
               const PoolingParams* pool_params, float* hitrates) override;
   void insert(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
               const int64_t value_stride, const int64_t value_size, const void* values,
-              const int64_t table_id) override;
+              int64_t table_id) override;
   void update(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
               const int64_t value_stride, const int64_t value_size,
-              const void* values, const int64_t table_id) override;
+              const void* values, int64_t table_id) override;
   void accumulate(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
                   const int64_t value_stride, const int64_t value_size, const void* values,
-                  DataType_t value_type, const int64_t table_id) override;
+                  DataType_t value_type, int64_t table_id) override;
   void clear(context_ptr_t& ctx) override;
-  void erase(context_ptr_t& ctx, const int64_t num_keys, const void* keys, const int64_t table_id) override;
-  context_ptr_t create_execution_context(
-    cudaStream_t lookup_stream, cudaStream_t modify_stream, thread_pool_ptr_t thread_pool, allocator_ptr_t allocator) override;
+  void erase(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
+             int64_t table_id) override;
   int64_t get_num_tables() const override { return 1; }
+  context_ptr_t create_execution_context(
+    cudaStream_t lookup_stream, cudaStream_t modify_stream,
+    thread_pool_ptr_t thread_pool, allocator_ptr_t allocator) override;
 
   inline const Config& get_config() const { return config_; }
 
  private:
   const Config config_;
   allocator_ptr_t allocator_;
-  gpu_table_ptr_t gpu_table_;
-
-  std::shared_ptr<AutoInsertHandler> auto_insert_handler_;
+  table_ptr_t table_;
 };
 
 }  // namespace nve

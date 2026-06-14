@@ -25,6 +25,11 @@
 
 namespace nve {
 
+/**
+ * The BufferWrapper class is used to share tables handling of buffer copies across different locations.
+ * The wrapper will allocate additional buffers on the context and copy contents as needed.
+ * This abstracts preferred/supported buffer locations for embedding layers.
+ */
 template<typename T>
 class BufferWrapper {
  public:
@@ -39,20 +44,6 @@ class BufferWrapper {
   }
 
   ~BufferWrapper() = default; // No buffer deallocation here, allocated buffers are owned by the context
-
-  template<typename CLONE_T = T>
-  std::shared_ptr<BufferWrapper<CLONE_T>> clone(const std::string name, cudaStream_t stream) {
-    NVE_CHECK_(name != name_, "Clone buffer wrapper name must be different than source");
-    auto last_buffer = buffers_.at(last_access_);
-    const bool clone_host_buffer = (last_access_ != cudaMemoryTypeDevice);
-    auto clone_buffer = ctx_->get_buffer(name_, size_, clone_host_buffer);
-    if (clone_host_buffer) {
-        std::memcpy(clone_buffer, last_buffer, size_);
-    } else {
-        NVE_CHECK_(cudaMemcpyAsync(clone_buffer, last_buffer, size_, cudaMemcpyDefault, stream));
-    }
-    return std::make_shared<BufferWrapper<CLONE_T>>(ctx_, name, clone_buffer, size_);
-  }
 
   T* access_buffer(cudaMemoryType mem_type, bool copy_content, cudaStream_t stream) {
     // if buffer doesn't exist - allocate

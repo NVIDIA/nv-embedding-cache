@@ -40,8 +40,12 @@ class ScopedDevice
 public:
     ScopedDevice(int device_id) : device_id_(device_id), curr_device_(0), swap_device_(false)
     {
+        // device_id < 0 is the host-only sentinel — do not touch the CUDA runtime.
+        if (device_id_ < 0) {
+            return;
+        }
         NVE_CHECK_(cudaGetDevice(&curr_device_));
-        swap_device_ = (device_id_ >= 0) && curr_device_ != device_id_;
+        swap_device_ = curr_device_ != device_id_;
         if (swap_device_) {
             NVE_CHECK_(cudaSetDevice(device_id_));
         }
@@ -58,3 +62,15 @@ private:
     int curr_device_;
     bool swap_device_;
 };
+
+// True iff a usable CUDA driver is present in this process.
+// cuInit returns CUDA_SUCCESS when the driver is available and an error (e.g.
+// CUDA_ERROR_NO_DEVICE) on a driverless system. The result is cached in a
+// function-local static: the probe runs exactly once (thread-safe) and driver
+// availability does not change over the process lifetime. Code paths that may run
+// without a GPU/driver (e.g. host-only inference) use this to gate CUDA calls.
+inline bool driver_available()
+{
+    static const bool available = (cuInit(0) == CUDA_SUCCESS);
+    return available;
+}

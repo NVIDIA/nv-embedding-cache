@@ -40,30 +40,43 @@ int cpu_kernel_gather(thread_pool_ptr_t thread_pool,
     const auto gather_task = [=] (const size_t idx) {
         const auto base_key = (idx) * keys_per_task;
         const auto base_mask_idx = base_key / num_bits_in_hit_mask;
-        
+
         for (uint64_t i = 0; i < keys_per_task; i++) {
             if (base_key + i >= n) {
                 break;
             }
-            auto mask_idx = i / num_bits_in_hit_mask;
-            auto bit_idx = i % num_bits_in_hit_mask;
-            if ((hit_mask[base_mask_idx + mask_idx] & (1ULL << bit_idx)) == 0) {
-                IndexT key = reinterpret_cast<const IndexT*>(keys)[base_key + i];
-                int8_t* src_ptr = uvm_table_ptr + (static_cast<size_t>(key) * row_size_in_bytes);
-                int8_t* dst_ptr = reinterpret_cast<int8_t*>(values) + (base_key + i) * value_stride;
-                memcpy(dst_ptr, src_ptr, row_size_in_bytes);
+            // When hit_mask is null the caller doesn't track per-key hit info,
+            // so we gather every key unconditionally.
+            if (hit_mask != nullptr) {
+                auto mask_idx = i / num_bits_in_hit_mask;
+                auto bit_idx = i % num_bits_in_hit_mask;
+                if ((hit_mask[base_mask_idx + mask_idx] & (1ULL << bit_idx)) != 0) {
+                    continue;
+                }
             }
+            IndexT key = reinterpret_cast<const IndexT*>(keys)[base_key + i];
+            int8_t* src_ptr = uvm_table_ptr + (static_cast<size_t>(key) * row_size_in_bytes);
+            int8_t* dst_ptr = reinterpret_cast<int8_t*>(values) + (base_key + i) * value_stride;
+            memcpy(dst_ptr, src_ptr, row_size_in_bytes);
         }
     };
 
     thread_pool->execute_n(0, static_cast<int64_t>(num_threads), gather_task);
-    // we resolve all misses so set everything to 1
-    // first set all up to the last qword to 1
-    memset(hit_mask, 0xff, static_cast<size_t>(n / num_bits_in_hit_mask) * sizeof(max_bitmask_repr_t));
-    // then set the remaining bits to 1
-    uint64_t rem = n - ((n / num_bits_in_hit_mask) * num_bits_in_hit_mask); 
-    hit_mask[n / num_bits_in_hit_mask] = ((1ULL << (rem)) - 1);
-    
+    // we resolve all misses so set everything to 1 (skip when caller didn't supply a buffer)
+    if (hit_mask != nullptr) {
+        // first set all full qwords to 1
+        const uint64_t full_words = n / num_bits_in_hit_mask;
+        memset(hit_mask, 0xff, static_cast<size_t>(full_words) * sizeof(max_bitmask_repr_t));
+        // then set the remaining bits in the trailing partial qword (if any).
+        // when n is an exact multiple of num_bits_in_hit_mask there is no partial
+        // word: the buffer is exactly `full_words` elements, so writing
+        // hit_mask[full_words] would be out of bounds.
+        const uint64_t rem = n - (full_words * num_bits_in_hit_mask);
+        if (rem != 0) {
+            hit_mask[full_words] = ((1ULL << rem) - 1);
+        }
+    }
+
     return 0;
 }
 

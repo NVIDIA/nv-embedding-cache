@@ -42,20 +42,25 @@ class EmbeddingLayerBase {
    * This struct defines the parameters needed to perform pooling during a lookup call.
    */
   struct PoolingParams {
-    PoolingType_t
-        pooling_type;  // Pooling type. Concatenate means no pooling (i.e. rest will be ignored).
-
+    // Pooling type. Concatenate means no pooling.
+    // In Concatenate mode, the other params are ignored - except output_type, which is useful for dequantize without pooling.
+    PoolingType_t pooling_type {PoolingType_t::Concatenate};
     // SparseType     | key_indices
     // Fixed Hotness  | 1 value for the hotness (or batch size)
     // CSR            | 1 value per batch (bag) + 1 for the last offset
-    // COO            | 2 values perf key (bag_id, id_in_bag) - assumed to be sorted row_wise
-    SparseType_t sparse_type;
-    const int64_t* key_indices;
-    int64_t num_key_indices;
+    // COO            | 2 values perf key (bag_id, id_in_bag) - assumed to be sorted row_wise (bag_id)
+    SparseType_t sparse_type {SparseType_t::Fixed};
+    const void* key_indices {nullptr}; // key_indices must be of the same type as the layer's Key type
+    int64_t num_key_indices {0};
 
-    const void* sparse_weights;  // Weights for weighted_sum pooling
-    DataType_t weight_type;  // Datatype for the provided weights (doesn't have to be the same as
-                             // Value type, not all combinations supported)
+    // Weights for weighted_sum pooling
+    const void* sparse_weights {nullptr};
+    // Datatype for the provided weights (doesn't have to be the same as Value type, not all combinations supported)
+    DataType_t weight_type {DataType_t::Unknown};
+
+    // Datatype to use for the output. Unknown means to keep the same as input.
+    // Not all combinations supported
+    DataType_t output_type {DataType_t::Unknown};
   };
 
   /**
@@ -75,7 +80,7 @@ class EmbeddingLayerBase {
    * for GPU tables.
    */
   virtual void lookup(
-      context_ptr_t& ctx,                // execution context
+      context_ptr_t& ctx,               // execution context
       const int64_t num_keys,           // number of queried keys per table
       const void* keys,                 // input keys
       void* output,                     // embedding vector output buffer per table
@@ -100,7 +105,7 @@ class EmbeddingLayerBase {
    * @param value_stride Number of bytes between each datavector in output
    * @param value_size Size of each datavector in values
    * @param values Array of datavectors
-   * @param table_id Index of the table to perfrom insert on
+   * @param table_id Index of the table to perfrom insert on, negative index implies all.
    */
   virtual void insert(context_ptr_t& ctx,
                       const int64_t num_keys,      // number of keys
@@ -108,7 +113,7 @@ class EmbeddingLayerBase {
                       const int64_t value_stride,  // stride in the values buffer
                       const int64_t value_size,    // size of each value
                       const void* values,          // data vector array to insert
-                      const int64_t table_id       // index fo table to insert to
+                      const int64_t table_id       // index of table to insert to
                       ) = 0;
 
   /**
@@ -122,13 +127,15 @@ class EmbeddingLayerBase {
    * @param value_stride Number of bytes between each datavector in output
    * @param value_size Size of each datavector in values
    * @param values Array of datavectors
+   * @param table_id Index of the table to update, negative index implies all.
    */
   virtual void update(context_ptr_t& ctx,
                       const int64_t num_keys,       // number of keys per table
                       const void* keys,             // input keys
                       const int64_t vector_stride,  // stride in the values buffer
                       const int64_t value_size,     // size of each value
-                      const void* values            // data vector array to update
+                      const void* values,           // data vector array to update
+                      const int64_t table_id        // index of table to update
                       ) = 0;
 
   /**
@@ -144,6 +151,7 @@ class EmbeddingLayerBase {
    * @param values Array of datavectors (gradients)
    * @param value_type Datatype of the gradients given in vales (can be different from the datatype
    * used in the tables).
+   * @param table_id Index of the table to accumulate into, negative index implies all.
    */
   virtual void accumulate(
       context_ptr_t& ctx,
@@ -152,8 +160,9 @@ class EmbeddingLayerBase {
       const int64_t vector_stride,  // stride in the values buffer
       const int64_t value_size,     // size of each value
       const void* values,           // data vector array to accumulate (gradients)
-      DataType_t value_type  // data type for values (can be different from the vaules in the layer
-                             // - e.g. int8 update for fp16 table)
+      DataType_t value_type,        // data type for values (can be different from the vaules in the layer
+                                    // - e.g. int8 update for fp16 table)
+      const int64_t table_id        // index of table to accumulate into
       ) = 0;
 
   /**
@@ -171,12 +180,12 @@ class EmbeddingLayerBase {
    * @param ctx An execution context to use.
    * @param num_keys Number of keys to erase
    * @param keys Array of keys
-   * @param table_id Index of the table to erase from
+   * @param table_id Index of the table to erase from, negative index implies all.
    */
   virtual void erase(context_ptr_t& ctx,
                      const int64_t num_keys,  // number of keys per table
                      const void* keys,        // input keys
-                     const int64_t table_id   // index fo table to erase from
+                     const int64_t table_id   // index of table to erase from
                      ) = 0;
 
   /**
@@ -195,6 +204,12 @@ class EmbeddingLayerBase {
     cudaStream_t modify_stream,
     thread_pool_ptr_t thread_pool,
     allocator_ptr_t allocator) = 0;
+
+  /**
+   * Get the number of tables used by the layer.
+   * 
+   */
+  virtual int64_t get_num_tables() const = 0;
 };
 
 }  // namespace nve

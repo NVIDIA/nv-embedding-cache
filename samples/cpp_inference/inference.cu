@@ -60,15 +60,21 @@ int main(int argc, char* argv[]) {
         std::string save_dir = args.get<std::string>("save_dir");
         int device_index = args.get<int>("--device");
 
-        // ---- Step 1: Load NVE layers (RAII — unregisters on destruction) ----
-        std::cout << "Loading NVE layers from " << save_dir << std::endl;
-        nve::LayerDirectory dir(save_dir, device_index);
-        std::cout << "  Loaded " << dir.size() << " layer(s)" << std::endl;
-
-        // ---- Step 2: Load AOT-compiled model ----
+        // ---- Step 1: Load AOT-compiled model ----
+        // The container holds non-owning handles to dir's marker tensors, so it
+        // must be torn down before `dir`. Manage it with a unique_ptr and reset
+        // it explicitly before dir leaves scope.
         std::string model_path = save_dir + "/model.pt2";
         std::cout << "Loading AOT model: " << model_path << std::endl;
-        torch::inductor::AOTIModelPackageLoader loader(model_path);
+        auto loader = std::make_unique<torch::inductor::AOTIModelPackageLoader>(model_path);
+
+        // ---- Step 2: Load NVE layers (RAII — unregisters on destruction). ----
+        // Points each layer's marker constant in `loader` at the live binding,
+        // so the custom op dispatches correctly.
+        std::cout << "Loading NVE layers from " << save_dir << std::endl;
+        auto rd = std::make_shared<nve::ResourceDirectory>();
+        nve::LayerDirectory dir(save_dir, *loader, device_index, rd);
+        std::cout << "  Loaded " << dir.size() << " layer(s)" << std::endl;
 
         // ---- Step 3: Run inference ----
         auto keys = torch::tensor({0L, 1L, 5L, 10L},
@@ -76,7 +82,7 @@ int main(int argc, char* argv[]) {
 
         std::cout << "Running inference..." << std::endl;
         c10::InferenceMode mode;
-        auto outputs = loader.run({keys});
+        auto outputs = loader->run({keys});
 
         std::cout << "Output shape: [" << outputs[0].size(0)
                   << ", " << outputs[0].size(1) << "]" << std::endl;
@@ -89,6 +95,9 @@ int main(int argc, char* argv[]) {
                 std::cout << ", " << out_cpu[i][j].item<float>();
             std::cout << ", ...]" << std::endl;
         }
+
+        // Destroy the container before `dir` frees its marker tensors.
+        loader.reset();
 
         std::cout << "Done!" << std::endl;
         return 0;

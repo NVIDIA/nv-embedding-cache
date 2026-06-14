@@ -16,6 +16,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <buffer_wrapper.hpp>
 #include <common.hpp>
 #include <cstring>
 #include <linear_host_table.hpp>
@@ -127,15 +128,31 @@ private:
 
     void find(KeyType* h_keys, int64_t num_keys, DataType* h_data, int64_t row_size) {
         std::vector<max_bitmask_repr_t> hit_mask(((static_cast<size_t>(num_keys) + 63) / 64), 0);
-        tb_->find(ctx_, num_keys, h_keys, hit_mask.data(), row_size, h_data, nullptr);
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+            ctx_, "keys", h_keys, static_cast<size_t>(num_keys) * sizeof(KeyType));
+        auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+            ctx_, "hit_mask", hit_mask.data(), hit_mask.size() * sizeof(max_bitmask_repr_t));
+        auto values_bw = std::make_shared<BufferWrapper<void>>(
+            ctx_, "values", h_data, static_cast<size_t>(num_keys) * static_cast<size_t>(row_size));
+        tb_->find(ctx_, num_keys, std::move(keys_bw), std::move(hit_mask_bw), row_size,
+                     std::move(values_bw), nullptr);
     }
 
     void update(KeyType h_key, const DataType* h_data, int64_t row_size) {
-        tb_->update(ctx_, 1, &h_key, row_size, row_size, h_data);
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+            ctx_, "keys", &h_key, sizeof(KeyType));
+        auto values_bw = std::make_shared<BufferWrapper<const void>>(
+            ctx_, "values", h_data, static_cast<size_t>(row_size));
+        tb_->update(ctx_, 1, std::move(keys_bw), row_size, row_size, std::move(values_bw));
     }
 
     void update_accumulate(KeyType h_key, const DataType* h_data, int64_t row_size, DataType_t dtype) {
-        tb_->update_accumulate(ctx_, 1, &h_key, row_size, row_size, h_data, dtype);
+        auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+            ctx_, "keys", &h_key, sizeof(KeyType));
+        auto updates_bw = std::make_shared<BufferWrapper<const void>>(
+            ctx_, "updates", h_data, static_cast<size_t>(row_size));
+        tb_->update_accumulate(ctx_, 1, std::move(keys_bw), row_size, row_size,
+                                  std::move(updates_bw), dtype);
     }
 };
 

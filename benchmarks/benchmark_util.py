@@ -17,9 +17,16 @@
 
 import csv
 import os
+import platform
+import subprocess
+import sys
+from collections import Counter
+from datetime import datetime
 import numpy as np
 from scipy.optimize import brentq
 from argparse import Namespace, ArgumentParser, Action
+
+_STATIC_BENCHMARK_METADATA = None
 
 class _MutuallyExclusiveAlphaPareto(Action):
     """Raises an error if both --alpha and --pareto are explicitly provided."""
@@ -53,11 +60,140 @@ def benchmark_arg_parser():
     parser.add_argument("--verbose", "-v", help="Increase output verbosity", action="store_true")
     return parser
 
+def _get_cpu_model():
+    cpuinfo_path = "/proc/cpuinfo"
+    preferred_cpuinfo_keys = ("model name", "hardware")
+    fallback_cpuinfo_value = None
+
+    try:
+        with open(cpuinfo_path, "r") as cpuinfo:
+            for line in cpuinfo:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if not value:
+                    continue
+                if key in preferred_cpuinfo_keys:
+                    return value
+                if key == "processor" and not value.isdigit() and fallback_cpuinfo_value is None:
+                    fallback_cpuinfo_value = value
+    except OSError:
+        pass
+
+    if fallback_cpuinfo_value:
+        return fallback_cpuinfo_value
+
+    return platform.processor() or platform.machine() or "unknown"
+
+def _get_memory_total_gb():
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        return f"{page_size * page_count / 2**30:.2f}"
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    try:
+        with open("/proc/meminfo", "r") as meminfo:
+            for line in meminfo:
+                if line.startswith("MemTotal:"):
+                    mem_kb = int(line.split()[1])
+                    return f"{mem_kb / 1024**2:.2f}"
+    except (OSError, ValueError, IndexError):
+        pass
+
+    return "unknown"
+
+def _get_gpu_model():
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+    if result.returncode != 0:
+        return "unknown"
+
+    gpu_names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not gpu_names:
+        return "unknown"
+
+    gpu_counts = Counter(gpu_names)
+    return "; ".join(
+        f"{name} x{count}" if count > 1 else name
+        for name, count in sorted(gpu_counts.items())
+    )
+
+def _get_script_filename():
+    if not sys.argv or not sys.argv[0]:
+        return "unknown"
+    return os.path.basename(sys.argv[0])
+
+def _get_static_benchmark_metadata():
+    global _STATIC_BENCHMARK_METADATA
+
+    if _STATIC_BENCHMARK_METADATA is None:
+        _STATIC_BENCHMARK_METADATA = {
+            "_metadata_script_filename": _get_script_filename(),
+            "_metadata_hostname": platform.node() or "unknown",
+            "_metadata_cpu_model": _get_cpu_model(),
+            "_metadata_memory_total_gb": _get_memory_total_gb(),
+            "_metadata_gpu_model": _get_gpu_model(),
+        }
+
+    return dict(_STATIC_BENCHMARK_METADATA)
+
+def _get_benchmark_metadata():
+    static_metadata = _get_static_benchmark_metadata()
+    return {
+        "_metadata_script_filename": static_metadata["_metadata_script_filename"],
+        "_metadata_run_datetime": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "_metadata_hostname": static_metadata["_metadata_hostname"],
+        "_metadata_cpu_model": static_metadata["_metadata_cpu_model"],
+        "_metadata_memory_total_gb": static_metadata["_metadata_memory_total_gb"],
+        "_metadata_gpu_model": static_metadata["_metadata_gpu_model"],
+    }
+
+def _read_csv_header(filename):
+    try:
+        with open(filename, "r", newline="") as csvfile:
+            reader = csv.reader(csvfile)
+            return next(reader, [])
+    except (OSError, StopIteration):
+        return []
+
+def _extend_csv_header(filename, new_columns):
+    with open(filename, "r", newline="") as csvfile:
+        reader = csv.DictReader(csvfile)
+        existing_columns = reader.fieldnames or []
+        rows = list(reader)
+
+    fieldnames = existing_columns + [
+        column for column in new_columns if column not in existing_columns
+    ]
+
+    with open(filename, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: value for key, value in row.items() if key is not None})
+
+    return fieldnames
+
 def write_benchmark_csv(filename: str, args: Namespace, **metrics):
     """Write benchmark results to CSV with automatic arg extraction and flexible metrics.
 
     This function automatically extracts all arguments from the argparse Namespace,
     prefixes them with '_', and combines them with any metrics you provide as kwargs.
+    It also adds '_metadata_' columns for the benchmark script, run timestamp, host,
+    CPU model, system memory, and GPU model.
 
     Args:
         filename: Path to the CSV file to write/append to
@@ -68,15 +204,17 @@ def write_benchmark_csv(filename: str, args: Namespace, **metrics):
     Example:
         write_benchmark_csv('results.csv', args, 
                           mkps=10.5, gbps=42.3, inference_time_s=1.5)
-        # CSV: _batch,_mode,mkps,gbps,inference_time_s
+        # CSV: _batch,_mode,...,_metadata_script_filename,...,mkps,gbps,inference_time_s
     """
     # Extract all args, skipping internal fields prefixed with '_'
     arg_fields = [k for k in vars(args).keys() if not k.startswith('_')]
+    metadata = _get_benchmark_metadata()
 
-    # Build column names: args with '_' prefix, then metrics without prefix
+    # Build column names: args and metadata with '_' prefix, then metrics without prefix
     arg_columns = [f'_{field}' for field in arg_fields]
+    metadata_columns = list(metadata.keys())
     metric_columns = list(metrics.keys())
-    all_columns = arg_columns + metric_columns
+    all_columns = arg_columns + metadata_columns + metric_columns
 
     # Create directory if needed
     csv_dir = os.path.dirname(filename)
@@ -94,8 +232,19 @@ def write_benchmark_csv(filename: str, args: Namespace, **metrics):
         arg_value = getattr(args, field, '')
         row_data[f'_{field}'] = arg_value
 
+    # Add benchmark metadata
+    row_data.update(metadata)
+
     # Add metrics without prefix
     row_data.update(metrics)
+
+    if file_exists:
+        existing_header = _read_csv_header(filename)
+        missing_columns = [column for column in all_columns if column not in existing_header]
+        if missing_columns:
+            all_columns = _extend_csv_header(filename, missing_columns)
+        elif existing_header:
+            all_columns = existing_header
 
     # Write to CSV
     with open(filename, 'a', newline='') as csvfile:

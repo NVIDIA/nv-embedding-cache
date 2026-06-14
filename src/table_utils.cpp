@@ -92,7 +92,7 @@ void insert_keys_from_tensor_file(table_ptr_t table,
             ctx, "keys", static_cast<const void*>(keys.data()), keys_buffer_size);
         auto values_bw = std::make_shared<BufferWrapper<const void>>(
             ctx, "values", static_cast<const void*>(value_buffer.data()), values_buffer_size);
-        table->insert_bw(ctx,
+        table->insert(ctx,
                          static_cast<int64_t>(n),
                          std::move(keys_bw),
                          static_cast<int64_t>(row_bytes),

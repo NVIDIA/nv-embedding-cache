@@ -18,7 +18,10 @@
 #include <execution_context.hpp>
 #include <host_table_detail.hpp>
 #include <redis_cluster_table.hpp>
+#include <buffer_wrapper.hpp>
 #include <redis_utils.hpp>
+#include <cstring>
+#include <string>
 #include <string_view>
 
 namespace nve {
@@ -45,6 +48,7 @@ void from_json(const nlohmann::json& json, RedisClusterTableConfig& conf) {
   NVE_READ_JSON_FIELD_(partitioner);
   NVE_READ_JSON_FIELD_(workgroups);
   NVE_READ_JSON_FIELD_(hash_key);
+  NVE_READ_JSON_FIELD_(string_namespace_id);
 
   NVE_READ_JSON_FIELD_(overflow_policy);
 }
@@ -59,6 +63,7 @@ void to_json(nlohmann::json& json, const RedisClusterTableConfig& conf) {
   NVE_WRITE_JSON_FIELD_(partitioner);
   NVE_WRITE_JSON_FIELD_(workgroups);
   NVE_WRITE_JSON_FIELD_(hash_key);
+  NVE_WRITE_JSON_FIELD_(string_namespace_id);
 
   NVE_WRITE_JSON_FIELD_(overflow_policy);
 }
@@ -94,21 +99,131 @@ class HKey final {
   int64_t size_;
 };
 
+// True when the table stores each entry as a plain Redis string (`MSET`/`MGET`/`DEL`): a standalone
+// server with no shared hash key set. The other modes (single shared hash, or multi-hash sharding)
+// store entries as fields of Redis hashes.
+inline static bool is_string_mode(const redis_conn_ptr_t& conn,
+                                  const RedisClusterTableConfig& config) {
+  return conn->is_single_node() && config.hash_key.empty();
+}
+
+// In single-node string mode a key may optionally be namespaced by prepending the raw bytes of
+// `config.string_namespace_id` (an `int64_t`) ahead of the key bytes.
+static constexpr int64_t kKeyPrefixSize{sizeof(int64_t)};
+
+// Size in bytes of a single Redis key in string mode: the (optional) prefix followed by the key.
+inline static int64_t string_key_size(int64_t string_namespace_id, int64_t key_size) {
+  return (string_namespace_id >= 0 ? kKeyPrefixSize : 0) + key_size;
+}
+
+// Returns the Redis key view for `key` in string mode. When `string_namespace_id < 0` the raw key bytes are
+// the Redis key, so the view points straight at `key` (zero-copy, like the cluster path). When a
+// prefix is set, the prefixed key is materialized into slot `slot` of the scratch buffer `buf`
+// (capacity must cover `(slot + 1) * entry_size` bytes) and a view onto that is returned.
+// `entry_size` must equal `string_key_size(string_namespace_id, sizeof(KeyType))`.
+template <typename KeyType>
+inline static sw::redis::StringView write_string_key(char* const buf, const int64_t slot,
+                                                     const int64_t entry_size,
+                                                     const int64_t string_namespace_id, const KeyType& key) {
+  if (string_namespace_id < 0) {
+    return {reinterpret_cast<const char*>(&key), sizeof(KeyType)};
+  }
+  char* const dst{buf + slot * entry_size};
+  std::memcpy(dst, &string_namespace_id, sizeof(int64_t));
+  std::memcpy(dst + sizeof(int64_t), &key, sizeof(KeyType));
+  return {dst, static_cast<uint64_t>(entry_size)};
+}
+
+// Builds the `SCAN MATCH` glob pattern selecting all keys carrying `string_namespace_id`: the prefix bytes
+// (with glob meta-characters escaped) followed by '*'.
+inline static std::string make_prefix_scan_pattern(int64_t string_namespace_id) {
+  const char* const p{reinterpret_cast<const char*>(&string_namespace_id)};
+  std::string pattern;
+  pattern.reserve(static_cast<uint64_t>(kKeyPrefixSize) * 2 + 1);
+  for (int64_t i{}; i != kKeyPrefixSize; ++i) {
+    const char c{p[i]};
+    if (c == '*' || c == '?' || c == '[' || c == ']' || c == '\\') pattern.push_back('\\');
+    pattern.push_back(c);
+  }
+  pattern.push_back('*');
+  return pattern;
+}
+
+// Word-aligned [lo, hi) sub-range for task `t` of `parts` over [0, n). Aligning boundaries to `Align`
+// keys ensures no two tasks touch the same hit-mask word, so hit-mask updates stay non-atomic.
+template <int64_t Align>
+inline static void task_range(const int64_t n, const int64_t parts, const int64_t t, int64_t& lo,
+                              int64_t& hi) {
+  const int64_t chunk{next_aligned<Align>((n + parts - 1) / parts)};
+  lo = std::min(t * chunk, n);
+  hi = std::min(lo + chunk, n);
+}
+
+// Runs `task(lo, hi)` over the [0, n) index space: inline when there is a single partition, otherwise
+// split into `num_parts` word-aligned sub-ranges executed on the thread pool. Used by standalone
+// string mode to parallelize the client-side work of building/parsing Redis commands.
+template <int64_t Align, typename TaskFn>
+inline static void run_partitioned(context_ptr_t& ctx, const int64_t n, const int64_t num_parts,
+                                   const std::vector<int64_t>& workgroups, TaskFn&& task) {
+  const int64_t parts{num_parts > 1 ? num_parts : 1};
+  if (parts <= 1) {
+    task(int64_t{0}, n);
+    return;
+  }
+  ctx->get_thread_pool()->execute_n(
+      0, parts,
+      [n, parts, &task](const int64_t t) {
+        int64_t lo, hi;
+        task_range<Align>(n, parts, t, lo, hi);
+        task(lo, hi);
+      },
+      workgroups, 1);
+}
+
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::RedisClusterTable(
-    table_id_t table_id, const config_type& config, redis_cluster_ptr_t& cluster)
-    : base_type(table_id, config), cluster_{cluster} {}
+    table_id_t table_id, const config_type& config, redis_conn_ptr_t& conn)
+    : base_type(table_id, config), conn_{conn} {}
 
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::clear(context_ptr_t& ctx) {
   const auto& __restrict config{config_};
-  redis_cluster_ptr_t& cluster{cluster_};
+  redis_conn_ptr_t& cluster{conn_};
 
   const int64_t num_parts{config.num_partitions};
+
+  // String mode (any `num_partitions`): the keys are plain Redis strings regardless of the parallel
+  // work split, so clearing is a single keyspace operation.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    if (string_namespace_id < 0) {
+      NVE_LOG_WARNING_(
+          "Redis table ", this->id,
+          ": clearing in raw single-node mode issues FLUSHDB, which wipes the ENTIRE Redis server "
+          "(every key, across all tables). Set `string_namespace_id` to namespace this table and clear only "
+          "its keys.");
+      cluster->flushdb();
+      return;
+    }
+
+    // Prefixed string mode: SCAN for this table's keys and DEL them in batches.
+    const std::string pattern{make_prefix_scan_pattern(string_namespace_id)};
+    const int64_t max_batch_size{config.max_batch_size};
+    sw::redis::Cursor cursor{0};
+    std::vector<std::string> batch;
+    do {
+      batch.clear();
+      cursor = cluster->scan(cursor, pattern, max_batch_size, std::back_inserter(batch));
+      if (!batch.empty()) {
+        cluster->del(batch.begin(), batch.end());
+      }
+    } while (cursor != 0);
+    return;
+  }
+
   if (num_parts == 0) {
-    const sw::redis::StringView v_key{config.hash_key};
-    NVE_CHECK_(!v_key.empty(), "`FLUSHDB` operations are not supported!");
-    cluster->del(v_key);
+    // Single-hash mode: drop the shared hash.
+    cluster->del(sw::redis::StringView{config.hash_key});
     return;
   }
 
@@ -116,7 +231,8 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::clear(cont
   const auto f{[table_id, &cluster](const int64_t task_idx) {
     const HKey v_key(table_id, task_idx, 'v');
     const HKey m_key(table_id, task_idx, 'm');
-    cluster->del({v_key, m_key});
+    const std::array<sw::redis::StringView, 2> hkeys{v_key, m_key};
+    cluster->del(hkeys.begin(), hkeys.end());
   }};
 
   ctx->get_thread_pool()->execute_n(0, num_parts, f, config.workgroups, 1);
@@ -125,29 +241,60 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::clear(cont
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::erase(context_ptr_t& ctx,
                                                                             int64_t n,
-                                                                            const void* keys_vptr) {
+                                                                            buffer_ptr<const void> keys_bw) {
   if (n <= 0) return;
   const auto& __restrict config{config_};
-  redis_cluster_ptr_t& cluster{cluster_};
+  redis_conn_ptr_t& cluster{conn_};
 
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                       ctx->get_modify_stream())
+              : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const int64_t max_batch_size{std::min(n, config.max_batch_size)};
 
   const int64_t num_parts{config.num_partitions};
+  // Standalone string mode: DEL (optionally prefixed) per-key strings, split across `num_parts`
+  // thread-pool tasks for client-side parallelism.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    const int64_t entry_size{string_key_size(string_namespace_id, sizeof(key_type))};
+    const auto task{[&cluster, keys, string_namespace_id, entry_size, max_batch_size](const int64_t lo,
+                                                                             const int64_t hi) {
+      std::vector<sw::redis::StringView> k_views;
+      k_views.reserve(static_cast<uint64_t>(max_batch_size));
+      // Only needed to materialize prefixed keys; raw keys are referenced in place (zero-copy).
+      std::vector<char> key_buf(
+          static_cast<uint64_t>(string_namespace_id >= 0 ? max_batch_size * entry_size : 0));
+
+      const auto process_batch{
+          [&cluster, &k_views]() { cluster->del(k_views.begin(), k_views.end()); }};
+
+      for (int64_t i{lo}; i != hi; ++i) {
+        k_views.emplace_back(write_string_key(key_buf.data(),
+                                              static_cast<int64_t>(k_views.size()), entry_size,
+                                              string_namespace_id, keys[i]));
+        if NVE_LIKELY_(static_cast<int64_t>(k_views.size()) < max_batch_size) continue;
+
+        process_batch();
+        k_views.clear();
+      }
+      if (!k_views.empty()) {
+        process_batch();
+      }
+    }};
+    run_partitioned<mask_type::num_bits>(ctx, n, num_parts, config.workgroups, task);
+    return;
+  }
+
   if (num_parts == 0) {
-    // TODO: Prone to memory fragmentation. Use scratch buffer instead?
+    // Single-hash mode: HDEL fields from the shared hash.
+    const sw::redis::StringView v_key{config.hash_key};
     std::vector<sw::redis::StringView> k_views;
     k_views.reserve(static_cast<uint64_t>(max_batch_size));
-
-    const sw::redis::StringView v_key{config.hash_key};
-    std::function<void()> process_batch;
-    if (v_key.empty()) {
-      process_batch = [&cluster, &k_views]() { cluster->del(k_views.begin(), k_views.end()); };
-    } else {
-      process_batch = [&cluster, &k_views, &v_key]() {
-        cluster->hdel(v_key, k_views.begin(), k_views.end());
-      };
-    }
+    const auto process_batch{[&cluster, &k_views, &v_key]() {
+      cluster->hdel(v_key, k_views.begin(), k_views.end());
+    }};
 
     for (int64_t i{}; i != n; ++i) {
       k_views.emplace_back(reinterpret_cast<const char*>(&keys[i]), sizeof(key_type));
@@ -175,7 +322,7 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::erase(cont
         k_views.reserve(static_cast<uint64_t>(max_batch_size));
 
         const auto process_batch{[&cluster, &v_key, &m_key, &k_views]() {
-          sw::redis::Pipeline pipe{cluster->pipeline(v_key, false)};
+          sw::redis::Pipeline pipe{cluster->pipeline(v_key)};
           pipe.hdel(v_key, k_views.begin(), k_views.end());
           pipe.hdel(m_key, k_views.begin(), k_views.end());
           pipe.exec();
@@ -201,11 +348,27 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::erase(cont
 
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::find(
-    context_ptr_t& ctx, int64_t n, const void* const keys_vptr,
-    max_bitmask_repr_t* const hit_mask, const int64_t value_stride, void* const values_vptr,
-    int64_t* const value_sizes) const {
+    context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys_bw,
+    buffer_ptr<max_bitmask_repr_t> hit_mask_bw, const int64_t value_stride,
+    buffer_ptr<void> values_bw, buffer_ptr<int64_t> value_sizes_bw) const {
   if (n <= 0) return;
 
+  auto lookup_stream = ctx->get_lookup_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, lookup_stream)
+              : nullptr};
+  max_bitmask_repr_t* const hit_mask{
+      hit_mask_bw ? hit_mask_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                               lookup_stream)
+                  : nullptr};
+  void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, false /*copy_content*/,
+                                           lookup_stream)
+                : nullptr};
+  int64_t* const value_sizes{
+      value_sizes_bw ? value_sizes_bw->access_buffer(cudaMemoryTypeUnregistered,
+                                                     false /*copy_content*/, lookup_stream)
+                     : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   char* const __restrict hm{reinterpret_cast<char*>(hit_mask)};
   char* const __restrict values{reinterpret_cast<char*>(values_vptr)};
@@ -223,19 +386,26 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::find(
       n = find_<false, false>(ctx, n, keys, hm, value_stride, values, value_sizes);
     }
   }
-  auto counter = this->get_internal_counter(ctx);
+  auto counter = this->lookup_counter_storage(ctx);
   NVE_CHECK_(counter != nullptr, "Invalid key counter");
   *counter += n;
 }
 
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::insert(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr, const int64_t value_stride,
-    const int64_t value_size, const void* const values_vptr) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
+    const int64_t value_stride, const int64_t value_size, buffer_ptr<const void> values_bw) {
   if (n <= 0) return;
   const auto& __restrict config{config_};
-  redis_cluster_ptr_t& cluster{cluster_};
+  redis_conn_ptr_t& cluster{conn_};
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                : nullptr};
   const key_type* __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const char* const __restrict values{reinterpret_cast<const char*>(values_vptr)};
 
@@ -261,7 +431,7 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::insert(
                        ": Attempting to evict ", k_views.size(),
                        " (mode = ", overflow_handler<meta_type>(), ").");
 
-      sw::redis::Pipeline pipe{cluster->pipeline(v_key, false)};
+      sw::redis::Pipeline pipe{cluster->pipeline(v_key)};
       if constexpr (std::is_same_v<meta_type, no_meta_type>) {
         (void)m_key;
       } else if constexpr (std::is_same_v<meta_type, lru_meta_type>) {
@@ -382,7 +552,7 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::insert(
         }
 
         for (; i < part_size; i += max_batch_size) {
-          sw::redis::Pipeline pipe{cluster->pipeline(m_key, false)};
+          sw::redis::Pipeline pipe{cluster->pipeline(m_key)};
 
           const int64_t batch_size{std::min(part_size - i, max_batch_size)};
           for (int64_t j{}; j != batch_size; ++j) {
@@ -405,32 +575,63 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::insert(
   }};
 
   const int64_t num_parts{config.num_partitions};
+
+  // Standalone string mode: MSET (optionally prefixed) per-key strings, split across `num_parts`
+  // thread-pool tasks. No metadata/overflow handling.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    const int64_t entry_size{string_key_size(string_namespace_id, sizeof(key_type))};
+    const auto task{[&cluster, keys, values, value_stride, value_size, string_namespace_id, entry_size,
+                     max_batch_size](const int64_t lo, const int64_t hi) {
+      std::vector<std::pair<sw::redis::StringView, sw::redis::StringView>> kv_views;
+      kv_views.reserve(static_cast<uint64_t>(max_batch_size));
+      // Only needed to materialize prefixed keys; raw keys are referenced in place (zero-copy).
+      std::vector<char> key_buf(
+          static_cast<uint64_t>(string_namespace_id >= 0 ? max_batch_size * entry_size : 0));
+
+      const auto process_batch{
+          [&cluster, &kv_views]() { cluster->mset(kv_views.begin(), kv_views.end()); }};
+
+      for (int64_t i{lo}; i != hi; ++i) {
+        kv_views.emplace_back(
+            std::piecewise_construct,
+            std::forward_as_tuple(write_string_key(key_buf.data(),
+                                                   static_cast<int64_t>(kv_views.size()), entry_size,
+                                                   string_namespace_id, keys[i])),
+            std::forward_as_tuple(values + i * value_stride, value_size));
+        if NVE_LIKELY_(static_cast<int64_t>(kv_views.size()) < max_batch_size) continue;
+
+        process_batch();
+        kv_views.clear();
+      }
+      if (!kv_views.empty()) {
+        process_batch();
+      }
+    }};
+    run_partitioned<mask_type::num_bits>(ctx, n, num_parts, config.workgroups, task);
+    return;
+  }
+
   if (num_parts == 0) {
-    // TODO: Prone to memory fragmentation. Use scratch buffer instead?
+    // Single-hash mode: HSET fields into the shared hash, with overflow handling.
+    const sw::redis::StringView v_key{config.hash_key};
     std::vector<std::pair<sw::redis::StringView, sw::redis::StringView>> kv_views;
     kv_views.reserve(static_cast<uint64_t>(max_batch_size));
+    const auto process_batch{[overflow_margin, &cluster, &resolve_overflow, &kv_views, &v_key]() {
+      int64_t part_size;
+      {
+        sw::redis::Pipeline pipe{cluster->pipeline(v_key)};
+        pipe.hset(v_key, kv_views.begin(), kv_views.end());
+        pipe.hlen(v_key);
 
-    const sw::redis::StringView v_key{config.hash_key};
-    std::function<void()> process_batch;
-    if (v_key.empty()) {
-      process_batch = [cluster, &kv_views]() { cluster->mset(kv_views.begin(), kv_views.end()); };
-    } else {
-      process_batch = [overflow_margin, &cluster, &resolve_overflow, &kv_views, &v_key]() {
-        int64_t part_size;
-        {
-          sw::redis::Pipeline pipe{cluster->pipeline(v_key, false)};
-          pipe.hset(v_key, kv_views.begin(), kv_views.end());
-          pipe.hlen(v_key);
-
-          sw::redis::QueuedReplies replies{pipe.exec()};
-          part_size = replies.get<long long>(replies.size() - 1);
-        }
-        if (part_size > overflow_margin) {
-          // Handle overflows situations.
-          resolve_overflow(0, v_key, v_key, part_size);
-        }
-      };
-    }
+        sw::redis::QueuedReplies replies{pipe.exec()};
+        part_size = replies.get<long long>(replies.size() - 1);
+      }
+      if (part_size > overflow_margin) {
+        // Handle overflows situations.
+        resolve_overflow(0, v_key, v_key, part_size);
+      }
+    }};
 
     for (int64_t i{}; i != n; ++i) {
       kv_views.emplace_back(
@@ -464,7 +665,7 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::insert(
         [overflow_margin, &cluster, &resolve_overflow, task_idx, &v_key, &m_key, &kv_views]() {
           int64_t part_size;
           {
-            sw::redis::Pipeline pipe{cluster->pipeline(v_key, false)};
+            sw::redis::Pipeline pipe{cluster->pipeline(v_key)};
             pipe.hset(v_key, kv_views.begin(), kv_views.end());
 
             lru_meta_type lru_value;
@@ -516,13 +717,35 @@ template <typename MaskType, typename KeyType, typename MetaType, typename Parti
 int64_t RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::size(context_ptr_t& ctx,
                                                                               const bool) const {
   const auto& __restrict config{config_};
-  const redis_cluster_ptr_t& cluster{cluster_};
+  const redis_conn_ptr_t& cluster{conn_};
 
   const int64_t num_parts{config.num_partitions};
+
+  // String mode (any `num_partitions`): keys are plain Redis strings, so size is a keyspace query.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    if (string_namespace_id < 0) {
+      // Raw mode owns the whole DB, so its size is the DB size.
+      return static_cast<int64_t>(cluster->dbsize());
+    }
+
+    // Prefixed string mode: count this table's keys via SCAN.
+    const std::string pattern{make_prefix_scan_pattern(string_namespace_id)};
+    const int64_t max_batch_size{config.max_batch_size};
+    int64_t total{0};
+    sw::redis::Cursor cursor{0};
+    std::vector<std::string> batch;
+    do {
+      batch.clear();
+      cursor = cluster->scan(cursor, pattern, max_batch_size, std::back_inserter(batch));
+      total += static_cast<int64_t>(batch.size());
+    } while (cursor != 0);
+    return total;
+  }
+
   if (num_parts == 0) {
-    const sw::redis::StringView v_key{config.hash_key};
-    NVE_CHECK_(!v_key.empty(), "`DBSIZE` operations are not supported!");
-    return cluster->hlen(v_key);
+    // Single-hash mode: number of fields in the shared hash.
+    return static_cast<int64_t>(cluster->hlen(sw::redis::StringView{config.hash_key}));
   }
 
   const table_id_t table_id{this->id};
@@ -539,12 +762,19 @@ int64_t RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::size(co
 
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr, const int64_t value_stride,
-    const int64_t value_size, const void* const values_vptr) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
+    const int64_t value_stride, const int64_t value_size, buffer_ptr<const void> values_bw) {
   if (n <= 0) return;
   const auto& __restrict config{config_};
-  redis_cluster_ptr_t& cluster{cluster_};
+  redis_conn_ptr_t& cluster{conn_};
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const char* const __restrict values{reinterpret_cast<const char*>(values_vptr)};
 
@@ -558,22 +788,56 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update(
   NVE_CHECK_(value_size >= 0 && value_size <= config.max_value_size);
 
   const int64_t num_parts{config.num_partitions};
+
+  // Standalone string mode: MSET the found keys' new values, split across `num_parts` thread-pool
+  // tasks. Each task reads its own word-aligned slice of the hit mask (read-only) and writes plain
+  // string keys.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    const int64_t entry_size{string_key_size(string_namespace_id, sizeof(key_type))};
+    const auto task{[&cluster, keys, hm, values, value_stride, value_size, string_namespace_id, entry_size,
+                     max_batch_size](const int64_t lo, const int64_t hi) {
+      std::vector<std::pair<sw::redis::StringView, sw::redis::StringView>> kv_views;
+      kv_views.reserve(static_cast<uint64_t>(max_batch_size));
+      std::vector<char> key_buf(
+          static_cast<uint64_t>(string_namespace_id >= 0 ? max_batch_size * entry_size : 0));
+
+      const auto process_batch{
+          [&cluster, &kv_views]() { cluster->mset(kv_views.begin(), kv_views.end()); }};
+
+      for (int64_t i{lo}; i < hi; i += mask_type::num_bits) {
+        for (mask_repr_type it{mask_type::load(hm, i)}; mask_type::has_next(it);
+             it = mask_type::skip(it)) {
+          const int64_t ij{i + mask_type::next(it)};
+          kv_views.emplace_back(
+              std::piecewise_construct,
+              std::forward_as_tuple(write_string_key(key_buf.data(),
+                                                     static_cast<int64_t>(kv_views.size()),
+                                                     entry_size, string_namespace_id, keys[ij])),
+              std::forward_as_tuple(values + ij * value_stride, value_size));
+          if NVE_LIKELY_(static_cast<int64_t>(kv_views.size()) < max_batch_size) continue;
+
+          process_batch();
+          kv_views.clear();
+        }
+      }
+      if (!kv_views.empty()) {
+        process_batch();
+      }
+    }};
+    run_partitioned<mask_type::num_bits>(ctx, n, num_parts, config.workgroups, task);
+    return;
+  }
+
   if (num_parts == 0) {
-    // TODO: Prone to memory fragmentation. Use scratch buffer instead?
+    // Single-hash mode: HSET the found keys into the shared hash.
+    const sw::redis::StringView v_key{config.hash_key};
     std::vector<std::pair<sw::redis::StringView, sw::redis::StringView>> kv_views;
     kv_views.reserve(static_cast<uint64_t>(max_batch_size));
+    const auto process_batch{[&cluster, &kv_views, &v_key]() {
+      cluster->hset(v_key, kv_views.begin(), kv_views.end());
+    }};
 
-    const sw::redis::StringView v_key{config.hash_key};
-    std::function<void()> process_batch;
-    if (v_key.empty()) {
-      process_batch = [&cluster, &kv_views]() { cluster->mset(kv_views.begin(), kv_views.end()); };
-    } else {
-      process_batch = [&cluster, &kv_views, &v_key]() {
-        cluster->hset(v_key, kv_views.begin(), kv_views.end());
-      };
-    }
-
-    // Fill up batch and lodge queries as we go.
     for (int64_t i{}; i < n; i += mask_type::num_bits) {
       for (mask_repr_type it{mask_type::load(hm, i)}; mask_type::has_next(it);
            it = mask_type::skip(it)) {
@@ -589,8 +853,10 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update(
       }
     }
     if (!kv_views.empty()) {
-      kv_views.clear();
+      process_batch();
     }
+
+    return;
   }
 
   const int64_t num_parts_mask{num_parts - 1};
@@ -630,12 +896,20 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update(
 
 template <typename MaskType, typename KeyType, typename MetaType, typename PartitionerType>
 void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update_accumulate(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr, const int64_t update_stride,
-    const int64_t update_size, const void* const updates_vptr, const DataType_t update_dtype) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
+    const int64_t update_stride, const int64_t update_size, buffer_ptr<const void> updates_bw,
+    const DataType_t update_dtype) {
   if (n <= 0) return;
   const auto& __restrict config{config_};
-  redis_cluster_ptr_t& cluster{cluster_};
+  redis_conn_ptr_t& cluster{conn_};
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const updates_vptr{
+      updates_bw ? updates_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                 : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const char* const __restrict updates{reinterpret_cast<const char*>(updates_vptr)};
 
@@ -657,22 +931,59 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update_acc
   const int64_t* const __restrict value_sizes{value_sizes_vec.data()};
 
   const int64_t num_parts{config.num_partitions};
+
+  // Standalone string mode: accumulate into the found keys and MSET them back, split across
+  // `num_parts` thread-pool tasks (each owns a disjoint, word-aligned slice of the indices).
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    const int64_t entry_size{string_key_size(string_namespace_id, sizeof(key_type))};
+    const auto task{[&cluster, &update_kernel, keys, hm, values, value_sizes, updates, update_stride,
+                     update_size, max_value_size, string_namespace_id, entry_size,
+                     max_batch_size](const int64_t lo, const int64_t hi) {
+      std::vector<std::pair<sw::redis::StringView, sw::redis::StringView>> kv_views;
+      kv_views.reserve(static_cast<uint64_t>(max_batch_size));
+      std::vector<char> key_buf(
+          static_cast<uint64_t>(string_namespace_id >= 0 ? max_batch_size * entry_size : 0));
+
+      const auto process_batch{
+          [&cluster, &kv_views]() { cluster->mset(kv_views.begin(), kv_views.end()); }};
+
+      for (int64_t i{lo}; i < hi; i += mask_type::num_bits) {
+        for (mask_repr_type it{mask_type::load(hm, i)}; mask_type::has_next(it);
+             it = mask_type::skip(it)) {
+          const int64_t ij{i + mask_type::next(it)};
+
+          update_kernel(&values[ij * max_value_size], &updates[ij * update_stride], update_size);
+          kv_views.emplace_back(
+              std::piecewise_construct,
+              std::forward_as_tuple(write_string_key(key_buf.data(),
+                                                     static_cast<int64_t>(kv_views.size()),
+                                                     entry_size, string_namespace_id, keys[ij])),
+              std::forward_as_tuple(values + ij * max_value_size,
+                                    std::max(value_sizes[ij], update_size)));
+          if NVE_LIKELY_(static_cast<int64_t>(kv_views.size()) < max_batch_size) continue;
+
+          process_batch();
+          kv_views.clear();
+        }
+      }
+      if (!kv_views.empty()) {
+        process_batch();
+      }
+    }};
+    run_partitioned<mask_type::num_bits>(ctx, n, num_parts, config.workgroups, task);
+    return;
+  }
+
   if (num_parts == 0) {
-    // TODO: Prone to memory fragmentation. Use scratch buffer instead?
+    // Single-hash mode: accumulate into the found keys and HSET them back into the shared hash.
+    const sw::redis::StringView v_key{config.hash_key};
     std::vector<std::pair<sw::redis::StringView, sw::redis::StringView>> kv_views;
     kv_views.reserve(static_cast<uint64_t>(max_batch_size));
+    const auto process_batch{[&cluster, &kv_views, &v_key]() {
+      cluster->hset(v_key, kv_views.begin(), kv_views.end());
+    }};
 
-    const sw::redis::StringView v_key{config.hash_key};
-    std::function<void()> process_batch;
-    if (v_key.empty()) {
-      process_batch = [&cluster, &kv_views]() { cluster->mset(kv_views.begin(), kv_views.end()); };
-    } else {
-      process_batch = [&cluster, &v_key, &kv_views]() {
-        cluster->hset(v_key, kv_views.begin(), kv_views.end());
-      };
-    }
-
-    // Fill up batch and lodge queries as we go.
     for (int64_t i{}; i < n; i += mask_type::num_bits) {
       for (mask_repr_type it{mask_type::load(hm, i)}; mask_type::has_next(it);
            it = mask_type::skip(it)) {
@@ -691,7 +1002,7 @@ void RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::update_acc
       }
     }
     if (!kv_views.empty()) {
-      kv_views.clear();
+      process_batch();
     }
 
     return;
@@ -743,56 +1054,136 @@ int64_t RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::find_(
     char* const __restrict hm, const int64_t value_stride, char* const __restrict values,
     int64_t* const __restrict value_sizes) const {
   const auto& __restrict config{config_};
-  const redis_cluster_ptr_t& cluster{cluster_};
+  const redis_conn_ptr_t& cluster{conn_};
 
   using parser_t = ReplyParser<sw::redis::Optional<sw::redis::StringView>>;
 
   const int64_t max_batch_size{std::min(n, config.max_batch_size)};
 
   const int64_t num_parts{config.num_partitions};
+
+  // Standalone string mode: MGET (optionally prefixed) per-key strings, split across `num_parts`
+  // thread-pool tasks. Ranges are word-aligned so each task owns its hit-mask words and writes stay
+  // non-atomic.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    const int64_t entry_size{string_key_size(string_namespace_id, sizeof(key_type))};
+    const bool prefixed{string_namespace_id >= 0};
+    std::atomic_int64_t total_num_hits{0};
+
+    const auto task{[&cluster, &total_num_hits, keys, hm, value_stride, values, value_sizes,
+                     string_namespace_id, entry_size, prefixed, max_batch_size](const int64_t lo,
+                                                                       const int64_t hi) {
+      // Only needed to materialize prefixed keys; raw keys are referenced in place (zero-copy).
+      std::vector<char> key_buf(static_cast<uint64_t>(prefixed ? max_batch_size * entry_size : 0));
+
+      std::vector<sw::redis::StringView> k_views;
+      k_views.reserve(static_cast<uint64_t>(max_batch_size));
+      // Prefixed keys live in `key_buf`, so their source index `ij` needs this parallel map;
+      // un-prefixed keys are referenced in place and recovered by pointer arithmetic into `keys`.
+      std::vector<int64_t> view_to_ij;
+      if (prefixed) view_to_ij.reserve(static_cast<uint64_t>(max_batch_size));
+
+      int64_t num_hits{};
+      const auto callback{
+          [keys, hm, value_stride, values, value_sizes, &k_views, &view_to_ij, prefixed, &num_hits](
+              const int64_t view_idx, const sw::redis::Optional<sw::redis::StringView>& v_view_opt) {
+            if (!v_view_opt) return;
+
+            const sw::redis::StringView& __restrict k_view{
+                k_views[static_cast<uint64_t>(view_idx)]};
+            const int64_t ij{prefixed ? view_to_ij[static_cast<uint64_t>(view_idx)]
+                                       : reinterpret_cast<const key_type*>(k_view.data()) - keys};
+
+            const sw::redis::StringView& v_view(*v_view_opt);
+            const int64_t value_size{static_cast<int64_t>(v_view.size())};
+            NVE_CHECK_(value_size <= value_stride, "The value stored in Redis (=", value_size,
+                       ") exceeds the avaiable value stride (=", value_stride, ").");
+            if (value_sizes) {
+              value_sizes[ij] = value_size;
+            }
+            if (values) {
+              std::copy_n(v_view.data(), value_size, &values[ij * value_stride]);
+            }
+
+            ++num_hits;
+            mask_repr_type mask{mask_type::load(hm, ij)};
+            mask = mask_type::insert(mask, ij & mask_type::num_bits_mask);
+            mask_type::store(hm, ij, mask);
+          }};
+
+      const auto process_batch{[&cluster, &k_views, &callback]() {
+        cluster->mget(k_views.begin(), k_views.end(), parser_t(callback));
+      }};
+
+      for (int64_t i{lo}; i < hi; i += mask_type::num_bits) {
+        auto it{mask_type::clip(mask_type::invert(mask_type::load(hm, i)), hi - i)};
+
+        // Run query if the batch is about to overflow.
+        if NVE_UNLIKELY_(static_cast<int64_t>(k_views.size()) + mask_type::count(it) >
+                         max_batch_size) {
+          process_batch();
+          k_views.clear();
+          view_to_ij.clear();
+        }
+
+        for (; mask_type::has_next(it); it = mask_type::skip(it)) {
+          const int64_t ij{i + mask_type::next(it)};
+          const sw::redis::StringView k_view{
+              prefixed ? write_string_key(key_buf.data(), static_cast<int64_t>(k_views.size()),
+                                          entry_size, string_namespace_id, keys[ij])
+                       : sw::redis::StringView{reinterpret_cast<const char*>(&keys[ij]),
+                                               sizeof(key_type)}};
+          k_views.emplace_back(k_view);
+          if (prefixed) view_to_ij.emplace_back(ij);
+        }
+      }
+      if (!k_views.empty()) {
+        process_batch();
+      }
+
+      total_num_hits.fetch_add(num_hits, std::memory_order_relaxed);
+    }};
+
+    run_partitioned<mask_type::num_bits>(ctx, n, num_parts, config.workgroups, task);
+    return total_num_hits.load(std::memory_order_relaxed);
+  }
+
   if (num_parts == 0) {
-    // TODO: Prone to memory fragmentation. Use scratch buffer instead?
+    // Single-hash mode: HMGET fields from the shared hash (hash_key). Single-threaded.
+    const sw::redis::StringView v_key{config.hash_key};
     std::vector<sw::redis::StringView> k_views;
     k_views.reserve(static_cast<uint64_t>(max_batch_size));
 
     int64_t num_hits{};
-    const auto callback{
-        [keys, hm, value_stride, values, value_sizes, &k_views, &num_hits](
-            const int64_t view_idx, const sw::redis::Optional<sw::redis::StringView>& v_view_opt) {
-          if (!v_view_opt) return;
+    const auto callback{[keys, hm, value_stride, values, value_sizes, &k_views, &num_hits](
+                            const int64_t view_idx,
+                            const sw::redis::Optional<sw::redis::StringView>& v_view_opt) {
+      if (!v_view_opt) return;
 
-          // Reconstruct ij from the key view.
-          const sw::redis::StringView& __restrict k_view{k_views[static_cast<uint64_t>(view_idx)]};
-          const int64_t ij{reinterpret_cast<const key_type*>(k_view.data()) - keys};
+      const sw::redis::StringView& __restrict k_view{k_views[static_cast<uint64_t>(view_idx)]};
+      const int64_t ij{reinterpret_cast<const key_type*>(k_view.data()) - keys};
 
-          const sw::redis::StringView& v_view(*v_view_opt);
-          const int64_t value_size{static_cast<int64_t>(v_view.size())};
-          NVE_CHECK_(value_size <= value_stride, "The value stored in Redis (=", value_size,
-                     ") exceeds the avaiable value stride (=", value_stride, ").");
-          if (value_sizes) {
-            value_sizes[ij] = value_size;
-          }
-          if (values) {
-            std::copy_n(v_view.data(), value_size, &values[ij * value_stride]);
-          }
+      const sw::redis::StringView& v_view(*v_view_opt);
+      const int64_t value_size{static_cast<int64_t>(v_view.size())};
+      NVE_CHECK_(value_size <= value_stride, "The value stored in Redis (=", value_size,
+                 ") exceeds the avaiable value stride (=", value_stride, ").");
+      if (value_sizes) {
+        value_sizes[ij] = value_size;
+      }
+      if (values) {
+        std::copy_n(v_view.data(), value_size, &values[ij * value_stride]);
+      }
 
-          ++num_hits;
-          mask_repr_type mask{mask_type::load(hm, ij)};
-          mask = mask_type::insert(mask, ij & mask_type::num_bits_mask);
-          mask_type::store(hm, ij, mask);
-        }};
+      ++num_hits;
+      mask_repr_type mask{mask_type::load(hm, ij)};
+      mask = mask_type::insert(mask, ij & mask_type::num_bits_mask);
+      mask_type::store(hm, ij, mask);
+    }};
 
-    const sw::redis::StringView v_key{config.hash_key};
-    std::function<void()> process_batch;
-    if (v_key.empty()) {
-      process_batch = [&cluster, &k_views, &callback]() {
-        cluster->mget(k_views.begin(), k_views.end(), parser_t(callback));
-      };
-    } else {
-      process_batch = [&cluster, &k_views, &callback, &v_key]() {
-        cluster->hmget(v_key, k_views.begin(), k_views.end(), parser_t(callback));
-      };
-    }
+    const auto process_batch{[&cluster, &k_views, &callback, &v_key]() {
+      cluster->hmget(v_key, k_views.begin(), k_views.end(), parser_t(callback));
+    }};
 
     for (int64_t i{}; i < n; i += mask_type::num_bits) {
       auto it{mask_type::clip(mask_type::invert(mask_type::load(hm, i)), n - i)};
@@ -899,7 +1290,7 @@ int64_t RedisClusterTable<MaskType, KeyType, MetaType, PartitionerType>::find_(
         (void)meta_k_views;
       } else if constexpr (std::is_same_v<meta_type, lfu_meta_type>) {
         if (!meta_k_views.empty()) {
-          sw::redis::Pipeline pipe{cluster->pipeline(m_key, false)};
+          sw::redis::Pipeline pipe{cluster->pipeline(m_key)};
           for (const sw::redis::StringView& k_view : meta_k_views) {
             pipe.hincrby(m_key, k_view, 1);
           }
@@ -969,6 +1360,7 @@ void from_json(const nlohmann::json& json, RedisClusterTableFactoryConfig& conf)
   NVE_READ_JSON_FIELD_(address);
   NVE_READ_JSON_FIELD_(user_name);
   NVE_READ_JSON_FIELD_(password);
+  NVE_READ_JSON_FIELD_(single_node);
 
   NVE_READ_JSON_FIELD_(keep_alive);
   NVE_READ_JSON_FIELD_(connections_per_node);
@@ -987,6 +1379,7 @@ void to_json(nlohmann::json& json, const RedisClusterTableFactoryConfig& conf) {
   NVE_WRITE_JSON_FIELD_(address);
   NVE_WRITE_JSON_FIELD_(user_name);
   NVE_WRITE_JSON_FIELD_(password);
+  NVE_WRITE_JSON_FIELD_(single_node);
 
   NVE_WRITE_JSON_FIELD_(keep_alive);
   NVE_WRITE_JSON_FIELD_(connections_per_node);
@@ -998,9 +1391,11 @@ void to_json(nlohmann::json& json, const RedisClusterTableFactoryConfig& conf) {
   NVE_WRITE_JSON_FIELD_(server_name_identification);
 }
 
-RedisClusterTableFactory::RedisClusterTableFactory(const config_type& config) : base_type(config) {
+RedisClusterTableFactory::RedisClusterTableFactory(const config_type& config)
+    : base_type(config), single_node_{config.single_node} {
   const std::string& addr{config.address};
-  NVE_LOG_INFO_("Connecting to Redis cluster '", addr, "'.");
+  const char* const kind{single_node_ ? "standalone" : "cluster"};
+  NVE_LOG_INFO_("Connecting to Redis ", kind, " '", addr, "'.");
 
   sw::redis::ConnectionOptions conn_opts;
   sw::redis::ConnectionPoolOptions pool_opts;
@@ -1030,44 +1425,62 @@ RedisClusterTableFactory::RedisClusterTableFactory(const config_type& config) : 
   conn_opts.tls.key = config.client_key;
   conn_opts.tls.sni = config.server_name_identification;
 
-  // Connect to the cluster.
-  cluster_ = {new sw::redis::RedisCluster(conn_opts, pool_opts),
-              [addr](sw::redis::RedisCluster* const p) {
-                NVE_LOG_INFO_("Disconnecting from Redis cluster '", addr, "'.");
-                delete p;
-                NVE_LOG_INFO_("Disconnection from Redis cluster '", addr, "' concluded.");
-              }};
+  // Connect to the server (standalone) or cluster, wrapping the connection so the table can issue
+  // commands without caring which kind it is.
+  if (single_node_) {
+    redis_ptr_t standalone{new sw::redis::Redis(conn_opts, pool_opts),
+                           [addr](sw::redis::Redis* const p) {
+                             NVE_LOG_INFO_("Disconnecting from Redis standalone '", addr, "'.");
+                             delete p;
+                             NVE_LOG_INFO_("Disconnection from Redis standalone '", addr,
+                                           "' concluded.");
+                           }};
+    conn_ = std::make_shared<RedisConn>(std::move(standalone));
+  } else {
+    redis_cluster_ptr_t cluster{new sw::redis::RedisCluster(conn_opts, pool_opts),
+                                [addr](sw::redis::RedisCluster* const p) {
+                                  NVE_LOG_INFO_("Disconnecting from Redis cluster '", addr, "'.");
+                                  delete p;
+                                  NVE_LOG_INFO_("Disconnection from Redis cluster '", addr,
+                                                "' concluded.");
+                                }};
+    conn_ = std::make_shared<RedisConn>(std::move(cluster));
+  }
 
-  NVE_LOG_INFO_("Connection to Redis cluster '", addr, "' established.");
+  NVE_LOG_INFO_("Connection to Redis ", kind, " '", addr, "' established.");
 }
 
 template <typename MaskType, typename KeyType, typename MetaType>
 inline static host_table_ptr_t make_redis_cluster_table_3(table_id_t id,
                                                           const RedisClusterTableConfig& config,
-                                                          redis_cluster_ptr_t& cluster) {
-  if (config.num_partitions == 1) {
-    if (config.partitioner != Partitioner_t::AlwaysZero) {
+                                                          redis_conn_ptr_t& conn,
+                                                          const bool string_mode) {
+  // String mode splits work by index range and never calls the partitioner, and a single partition
+  // routes everything to one task — both use AlwaysZeroPartitioner so no `ht_part_*` feature is
+  // required.
+  if (config.num_partitions == 1 || string_mode) {
+    if (!string_mode && config.partitioner != Partitioner_t::AlwaysZero) {
       NVE_LOG_VERBOSE_("Selected ", config.partitioner, " partitioner was disabled because table has only 1 partition.");
     }
-    return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, AlwaysZeroPartitioner>>(id, config, cluster);
+    return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, AlwaysZeroPartitioner>>(id, config, conn);
   }
 
   switch (config.partitioner) {
 #if defined(NVE_FEATURE_HT_PART_FNV1A)
     case Partitioner_t::FowlerNollVo:
-      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, FowlerNollVoPartitioner>>(id, config, cluster);
+      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, FowlerNollVoPartitioner>>(id, config, conn);
 #endif
 #if defined(NVE_FEATURE_HT_PART_MURMUR)
     case Partitioner_t::Murmur3:
-      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, Murmur3Partitioner>>(id, config, cluster);
+      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, Murmur3Partitioner>>(id, config, conn);
 #endif
 #if defined(NVE_FEATURE_HT_PART_RRXMRRXMSX0)
     case Partitioner_t::Rrxmrrxmsx0:
-      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, Rrxmrrxmsx0Partitioner>>(id, config, cluster);
+      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, Rrxmrrxmsx0Partitioner>>(id, config, conn);
 #endif
 #if defined(NVE_FEATURE_HT_PART_STD_HASH)
     case Partitioner_t::StdHash:
-      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, StdHashPartitioner>>(id, config, cluster);
+      return std::make_shared<RedisClusterTable<MaskType, KeyType, MetaType, StdHashPartitioner>>(id, config, conn);
 #endif
     default:
       NVE_THROW_("`config.partitioner` (", config.partitioner, ") is out of bounds!");
@@ -1077,14 +1490,15 @@ inline static host_table_ptr_t make_redis_cluster_table_3(table_id_t id,
 template <typename MaskType, typename KeyType>
 inline static host_table_ptr_t make_redis_cluster_table_2(const table_id_t id,
                                                           const RedisClusterTableConfig& config,
-                                                          redis_cluster_ptr_t& cluster) {
+                                                          redis_conn_ptr_t& conn,
+                                                          const bool string_mode) {
   switch (config.overflow_policy.handler) {
     case OverflowHandler_t::EvictRandom:
-      return make_redis_cluster_table_3<MaskType, KeyType, no_meta_type>(id, config, cluster);
+      return make_redis_cluster_table_3<MaskType, KeyType, no_meta_type>(id, config, conn, string_mode);
     case OverflowHandler_t::EvictLRU:
-      return make_redis_cluster_table_3<MaskType, KeyType, lru_meta_type>(id, config, cluster);
+      return make_redis_cluster_table_3<MaskType, KeyType, lru_meta_type>(id, config, conn, string_mode);
     case OverflowHandler_t::EvictLFU:
-      return make_redis_cluster_table_3<MaskType, KeyType, lfu_meta_type>(id, config, cluster);
+      return make_redis_cluster_table_3<MaskType, KeyType, lfu_meta_type>(id, config, conn, string_mode);
   }
   NVE_THROW_("`config.overflow_policy.handler` (", config.overflow_policy.handler,
              ") is out of bounds!");
@@ -1093,23 +1507,24 @@ inline static host_table_ptr_t make_redis_cluster_table_2(const table_id_t id,
 template <typename MaskType>
 static host_table_ptr_t make_redis_cluster_table_1(table_id_t id,
                                                    const RedisClusterTableConfig& config,
-                                                   redis_cluster_ptr_t& cluster) {
+                                                   redis_conn_ptr_t& conn,
+                                                   const bool string_mode) {
   switch (config.key_size) {
 #if defined(NVE_FEATURE_HT_KEY_8)
     case sizeof(int8_t):
-      return make_redis_cluster_table_2<MaskType, int8_t>(id, config, cluster);
+      return make_redis_cluster_table_2<MaskType, int8_t>(id, config, conn, string_mode);
 #endif
 #if defined(NVE_FEATURE_HT_KEY_16)
     case sizeof(int16_t):
-      return make_redis_cluster_table_2<MaskType, int16_t>(id, config, cluster);
+      return make_redis_cluster_table_2<MaskType, int16_t>(id, config, conn, string_mode);
 #endif
 #if defined(NVE_FEATURE_HT_KEY_32)
     case sizeof(int32_t):
-      return make_redis_cluster_table_2<MaskType, int32_t>(id, config, cluster);
+      return make_redis_cluster_table_2<MaskType, int32_t>(id, config, conn, string_mode);
 #endif
 #if defined(NVE_FEATURE_HT_KEY_64)
     case sizeof(int64_t):
-      return make_redis_cluster_table_2<MaskType, int64_t>(id, config, cluster);
+      return make_redis_cluster_table_2<MaskType, int64_t>(id, config, conn, string_mode);
 #endif
   }
   NVE_THROW_("`config.key_size` (", config.key_size, ") is out of bounds!");
@@ -1117,22 +1532,41 @@ static host_table_ptr_t make_redis_cluster_table_1(table_id_t id,
 
 host_table_ptr_t RedisClusterTableFactory::produce(const table_id_t id,
                                                    const RedisClusterTableConfig& config) {
+  // String mode: store each entry as a Redis string (`MSET`/`MGET`/`DEL`) on a standalone server.
+  // `num_partitions` (when > 1) only splits the client-side work across threads — the keys are plain
+  // strings, so no partitioner is needed and storage is unaffected. String mode requires a standalone
+  // connection (`MSET`/`MGET` across arbitrary keys hit `CROSSSLOT` errors on a cluster) and offers no
+  // metadata/eviction support (capacity must be bounded via the Redis server's `maxmemory` policy).
+  const bool string_mode{is_string_mode(conn_, config)};
+  if (string_mode) {
+    NVE_CHECK_(config.overflow_policy.handler == OverflowHandler_t::EvictRandom,
+               "String mode does not support LRU/LFU eviction; set the overflow handler to "
+               "`evict_random` and bound capacity via the Redis server's `maxmemory` policy.");
+  } else {
+    // Hash modes shard keys across `num_partitions` Redis hashes by hash slot, which only makes sense
+    // against a cluster; a standalone connection can host a single hash (`num_partitions` 0 or 1).
+    NVE_CHECK_(single_node_ ? (config.num_partitions == 0 || config.num_partitions == 1) : true,
+               "A standalone Redis connection in hash mode requires `num_partitions` of 0 or 1, but "
+               "got ",
+               config.num_partitions, '.');
+  }
+
   switch (config.mask_size) {
 #if defined(NVE_FEATURE_HT_MASK_8)
     case bitmask8_t::size:
-      return make_redis_cluster_table_1<bitmask8_t>(id, config, cluster_);
+      return make_redis_cluster_table_1<bitmask8_t>(id, config, conn_, string_mode);
 #endif
 #if defined(NVE_FEATURE_HT_MASK_16)
     case bitmask16_t::size:
-      return make_redis_cluster_table_1<bitmask16_t>(id, config, cluster_);
+      return make_redis_cluster_table_1<bitmask16_t>(id, config, conn_, string_mode);
 #endif
 #if defined(NVE_FEATURE_HT_MASK_32)
     case bitmask32_t::size:
-      return make_redis_cluster_table_1<bitmask32_t>(id, config, cluster_);
+      return make_redis_cluster_table_1<bitmask32_t>(id, config, conn_, string_mode);
 #endif
 #if defined(NVE_FEATURE_HT_MASK_64)
     case bitmask64_t::size:
-      return make_redis_cluster_table_1<bitmask64_t>(id, config, cluster_);
+      return make_redis_cluster_table_1<bitmask64_t>(id, config, conn_, string_mode);
 #endif
   }
   NVE_THROW_("`config.mask_size` (", config.mask_size, ") is out of bounds!");

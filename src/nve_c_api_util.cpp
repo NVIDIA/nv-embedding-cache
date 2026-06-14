@@ -106,6 +106,14 @@ nve_hierarchical_layer_config_t nve_hierarchical_layer_config_default(void) {
   return c;
 }
 
+nve_host_embedding_layer_config_t nve_host_embedding_layer_config_default(void) {
+  nve_host_embedding_layer_config_t c;
+  c.layer_name = "";
+  c.default_embedding = NULL;
+  c.default_embedding_size = 0;
+  return c;
+}
+
 nve_overflow_policy_config_t nve_overflow_policy_config_default(void) {
   nve_overflow_policy_config_t c;
   c.overflow_margin = INT64_MAX;
@@ -125,3 +133,64 @@ nve_host_table_config_t nve_host_table_config_default(void) {
 }
 
 }  // extern "C"
+
+/* ============================================================================
+ * Enum conversion implementations
+ * ============================================================================ */
+
+nve::DataType_t convert_dtype(nve_data_type_t dt) {
+  switch (dt) {
+    case NVE_DTYPE_UNKNOWN:  return nve::DataType_t::Unknown;
+    case NVE_DTYPE_FLOAT32:  return nve::DataType_t::Float32;
+    case NVE_DTYPE_BFLOAT16: return nve::DataType_t::BFloat;
+    case NVE_DTYPE_FLOAT16:  return nve::DataType_t::Float16;
+    case NVE_DTYPE_E4M3:     return nve::DataType_t::E4M3;
+    case NVE_DTYPE_E5M2:     return nve::DataType_t::E5M2;
+    case NVE_DTYPE_FLOAT64:  return nve::DataType_t::Float64;
+    case NVE_DTYPE_QINT8_ROWWISE_F32: return nve::DataType_t::QInt8RowwiseF32;
+    case NVE_DTYPE_QINT8_ROWWISE_F16: return nve::DataType_t::QInt8RowwiseF16;
+    case NVE_DTYPE_QUINT8_ROWWISE_F32: return nve::DataType_t::QUint8RowwiseF32;
+    case NVE_DTYPE_QUINT8_ROWWISE_F16: return nve::DataType_t::QUint8RowwiseF16;
+  }
+  return nve::DataType_t::Unknown;
+}
+
+nve::SparseType_t convert_sparse_type(nve_sparse_type_t st) {
+  switch (st) {
+    case NVE_SPARSE_FIXED: return nve::SparseType_t::Fixed;
+    case NVE_SPARSE_CSR:   return nve::SparseType_t::CSR;
+    case NVE_SPARSE_COO:   return nve::SparseType_t::COO;
+  }
+  return nve::SparseType_t::Fixed;
+}
+
+nve::PoolingType_t convert_pooling_type(nve_pooling_type_t pt) {
+  switch (pt) {
+    case NVE_POOL_CONCATENATE:  return nve::PoolingType_t::Concatenate;
+    case NVE_POOL_SUM:          return nve::PoolingType_t::Sum;
+    case NVE_POOL_MEAN:         return nve::PoolingType_t::Mean;
+    case NVE_POOL_WEIGHTED_SUM: return nve::PoolingType_t::WeightedSum;
+    case NVE_POOL_WEIGHTED_MEAN:return nve::PoolingType_t::WeightedMean;
+  }
+  return nve::PoolingType_t::Concatenate;
+}
+
+nve::Partitioner_t convert_partitioner(nve_partitioner_t p) {
+  switch (p) {
+    case NVE_PART_ALWAYS_ZERO:    return nve::Partitioner_t::AlwaysZero;
+    case NVE_PART_FOWLER_NOLL_VO: return nve::Partitioner_t::FowlerNollVo;
+    case NVE_PART_MURMUR3:        return nve::Partitioner_t::Murmur3;
+    case NVE_PART_RRXMRRXMSX0:    return nve::Partitioner_t::Rrxmrrxmsx0;
+    case NVE_PART_STD_HASH:       return nve::Partitioner_t::StdHash;
+  }
+  return nve::Partitioner_t::FowlerNollVo;
+}
+
+nve::OverflowHandler_t convert_overflow_handler(nve_overflow_handler_t oh) {
+  switch (oh) {
+    case NVE_OVERFLOW_EVICT_RANDOM: return nve::OverflowHandler_t::EvictRandom;
+    case NVE_OVERFLOW_EVICT_LRU:    return nve::OverflowHandler_t::EvictLRU;
+    case NVE_OVERFLOW_EVICT_LFU:    return nve::OverflowHandler_t::EvictLFU;
+  }
+  return nve::OverflowHandler_t::EvictRandom;
+}

@@ -28,29 +28,24 @@ if HAS_TORCH_OPS:
     # Meta (shape-inference) kernels for torch.export / AOTInductor.
     # The C++ stable-ABI Meta impls were removed because aoti_torch_get_numel
     # can't resolve SymInts; Python fakes handle dynamic shapes natively.
-    _NVE_TO_TORCH_DTYPE = {
-        pynve.nve.DataType_t.Float32: torch.float32,
-        pynve.nve.DataType_t.Float16: torch.float16,
-    }
-
-    def _torch_dtype_for(nve_dtype):
-        try:
-            return _NVE_TO_TORCH_DTYPE[nve_dtype]
-        except KeyError:
-            raise RuntimeError(
-                f"nve_ops fake kernel: unsupported NVE dtype {nve_dtype}")
+    #
+    # The fakes are PURE: output shape comes from the baked `embedding_size`
+    # arg and dtype from the baked `dtype` tag (= int(nve.DataType_t)). No
+    # registry lookup — the real layer is located at runtime via the marker
+    # tensor's data_ptr (forward path only), which the meta path can't read.
+    def _fake_out_dtype(dtype_tag):
+        # lazy import avoids a package-init cycle
+        # (pynve.torch.__init__ <-> nve_layers). Fakes only run at trace time.
+        from pynve.torch.nve_layers import nve_type_to_torch_type
+        return nve_type_to_torch_type(pynve.nve.DataType_t(dtype_tag))
 
     @torch.library.register_fake("nve_ops::embedding_lookup")
-    def _embedding_lookup_fake(keys, layer_id):
-        emb_dim, nve_dtype = pynve.nve.get_torch_binding_info(layer_id)
+    def _embedding_lookup_fake(marker, keys, embedding_size, dtype):
         return keys.new_empty(
-            (keys.size(0), emb_dim),
-            dtype=_torch_dtype_for(nve_dtype))
+            (keys.size(0), embedding_size), dtype=_fake_out_dtype(dtype))
 
     @torch.library.register_fake("nve_ops::embedding_lookup_with_pooling")
     def _embedding_lookup_with_pooling_fake(
-            keys, offsets, weights, pooling_type, layer_id):
-        emb_dim, nve_dtype = pynve.nve.get_torch_binding_info(layer_id)
+            marker, keys, offsets, weights, pooling_type, embedding_size, dtype):
         return offsets.new_empty(
-            (offsets.size(0) - 1, emb_dim),
-            dtype=_torch_dtype_for(nve_dtype))
+            (offsets.size(0) - 1, embedding_size), dtype=_fake_out_dtype(dtype))

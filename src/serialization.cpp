@@ -88,11 +88,9 @@ void NumpyTensorFileFormat::load_header() {
 
     bytes_read = stream_->read(&header_len, header_len_size_in_bytes);
     NVE_CHECK_(bytes_read == header_len_size_in_bytes, "Problem reading numpy header length");
-    char* buffer = new char[header_len];
-    bytes_read = stream_->read(buffer, header_len);
+    std::string header_str(header_len, '\0');
+    bytes_read = stream_->read(header_str.data(), header_len);
     NVE_CHECK_(bytes_read == header_len, "Problem reading numpy header");
-    std::string header_str(buffer);
-    delete[] buffer;
     {
         // data format string
         std::regex descr_regex("'descr': '([^']+)'");
@@ -261,7 +259,6 @@ TensorFileFormat::TableKey TensorFileFormat::get_key(uint64_t name, const Tensor
 {
     NVE_CHECK_(tensor.col < (1llu << TableKey::ROW_SIZE_BITS), "nve support max 16 bit row size");
     NVE_CHECK_(tensor.row < (1llu << TableKey::ROWS_BITS), "nve support max 44 bit rows");
-    NVE_CHECK_(name < (1llu << TableKey::AUX_BITS), "nve support max 32 bit unique name");
     NVE_CHECK_(tensor.element_size_in_bytes < (1llu << TableKey::DATA_TYPE_BITS), "nve support max 2 bit data type");
     TableKey key;
     key.key1 = tensor.col | tensor.element_size_in_bytes << TableKey::ROW_SIZE_BITS | tensor.row << (TableKey::ROW_SIZE_BITS + TableKey::DATA_TYPE_BITS);
@@ -271,7 +268,7 @@ TensorFileFormat::TableKey TensorFileFormat::get_key(uint64_t name, const Tensor
 
 uint64_t TensorFileFormat::get_name_from_key(const TableKey& key) const
 {
-    return key.key2 & ((1llu << TableKey::AUX_BITS) - 1);
+    return key.key2;
 }
 
 }

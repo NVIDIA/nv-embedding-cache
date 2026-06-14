@@ -73,13 +73,14 @@ Example layers are:
 * [GPU Embedding Layer](../include/gpu_embedding_layer.hpp) - an embedding layer storing all data in GPU memory.
 * [Linear Embedding Layer](../include/linear_embedding_layer.hpp) - an embedding layer storing data in linear system memory and using a cache in GPU memory.
 * [Hierarchical Embedding Layer](../include/hierarchical_embedding_layer.hpp) - an embedding layer using the full storage hierarchy of GPU memory cache, system memory cache and remote paramter server.
+* [Host Embedding Layer](../include/host_embedding_layer.hpp) - an embedding layer storing all data in host memory for CPU-only inference.
 
 ### Tables
-The middle level is the [table](../include/table.hpp) level. Tables represent a single data storage location (e.g. GPU tables store on GPU memory, Redis cluster tables store on remote Redis servers etc.). While tables provide lookup and modification services, similar to layers, they are not aware of other tables' operations. Such coordination of multiple tables is handled at the embedding layer level.
+The middle level is the [table](../include/table.hpp) level. Tables represent a single data storage location (e.g. GPU tables store on GPU memory, Redis tables store on remote Redis servers etc.). While tables provide lookup and modification services, similar to layers, they are not aware of other tables' operations. Such coordination of multiple tables is handled at the embedding layer level.
 Example tables are:
 * [GPU table](../include/gpu_table.hpp) - a table with storage in GPU memory.
 * [nvHashMap table]() - a table with storage in system memory.
-* [Redis cluster table]() - a table with storage on remote Redis servers
+* [Redis table](../plugins/redis/include/redis_cluster_table.hpp) - a table with storage on a remote Redis Cluster or a standalone single-node server.
 * [RocksDB table]() - a table with storage on remote RocksDB servers
 
 ### Low-level Components

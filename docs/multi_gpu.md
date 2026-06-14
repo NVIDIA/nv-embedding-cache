@@ -4,9 +4,9 @@
 
 - [Introduction](#introduction)
 - [Embedding Configurations](#embedding-configurations)
-  - [GPUEmbeddingLayer / CacheType.NoCache](#gpuembeddinglayer-c--cachetypenocache-py)
-  - [LinearUVMEmbeddingLayer / CacheType.LinearUVM](#linearuvmembeddinglayer-c--cachetypelinearuvm-py)
-  - [HierarchicalEmbeddingLayer / CacheType.Hierarchical](#hierarchicalembeddinglayer-c--cachetypehierarchical-py)
+  - [GPUEmbeddingLayer / LayerType.GPULayer](#gpuembeddinglayer-c--layertypegpulayer-py)
+  - [LinearUVMEmbeddingLayer / LayerType.LinearUVM](#linearuvmembeddinglayer-c--layertypelinearuvm-py)
+  - [HierarchicalEmbeddingLayer / LayerType.Hierarchical](#hierarchicalembeddinglayer-c--layertypehierarchical-py)
 - [Code Examples](#code-examples)
 - [Data Races and Read-After-Write Safety](#data-races-and-read-after-write-safety)
 - [Glossary](#glossary)
@@ -30,17 +30,17 @@ Different layer types and table configurations have different sharing options av
 
 Every layer type handles sharing differently.
 
-### GPUEmbeddingLayer (C++) / CacheType.NoCache (Py)
+### GPUEmbeddingLayer (C++) / LayerType.GPULayer (Py)
 
 > **Source:** [include/gpu_embedding_layer.hpp](../include/gpu_embedding_layer.hpp) / [python/pynve/torch/nve_layers.py](../python/pynve/torch/nve_layers.py)
 
 This layer is meant for small embedding tables that fit in GPU memory and need no caching. However, the layer will function as long as the table is GPU accessible - even if it's in host memory (e.g. when using `cudaMallocManaged`/`cudaMallocHost`).
 
-The C++ class gets a pointer to the embedding table buffer, so you can use multiple instances of `GPUEmbeddingLayer` with the same pointer to share this buffer. In Python, every `NVEmbedding` with `CacheType.NoCache` has its own tensor for the table (weights) and there's no sharing.
+The C++ class gets a pointer to the embedding table buffer, so you can use multiple instances of `GPUEmbeddingLayer` with the same pointer to share this buffer. In Python, every `NVEmbedding` with `LayerType.GPULayer` has its own tensor for the table (weights) and there's no sharing.
 
 > **Tip:** The better approach to share this buffer in C++ is to use the same `GPUEmbeddingLayer` object with different execution contexts (using multiple threads/streams).
 
-### LinearUVMEmbeddingLayer (C++) / CacheType.LinearUVM (Py)
+### LinearUVMEmbeddingLayer (C++) / LayerType.LinearUVM (Py)
 
 > **Source:** [include/linear_embedding_layer.hpp](../include/linear_embedding_layer.hpp) / [python/pynve/torch/nve_layers.py](../python/pynve/torch/nve_layers.py)
 
@@ -68,7 +68,7 @@ This requires multiple processes to be launched with `mpirun`/`torchrun`/etc. an
 
 For a working example of multi-GPU sharding, see `benchmarks/multi_gpu_bench.py`. More details in [benchmarks.md](benchmarks.md#multi-gpu-benchmark)
 
-### HierarchicalEmbeddingLayer (C++) / CacheType.Hierarchical (Py)
+### HierarchicalEmbeddingLayer (C++) / LayerType.Hierarchical (Py)
 
 > **Source:** [include/hierarchical_embedding_layer.hpp](../include/hierarchical_embedding_layer.hpp) / [python/pynve/torch/nve_layers.py](../python/pynve/torch/nve_layers.py)
 
@@ -138,18 +138,19 @@ local_device = torch.device(f"cuda:{local_device_id}")
 
 embedding_dim = 256
 num_table_rows = 2**30
-data_type = nve.DataType_t.Float32
-memblock = nve.MPIMemBlock(embedding_dim, num_table_rows, data_type)
+nve_dtype = nve.DataType_t.Float32
+torch_dtype = torch.float32
+memblock = nve.MPIMemBlock(embedding_dim, num_table_rows, nve_dtype)
 
 cache_size = 2**20
 emb_layer = nve_layers.NVEmbedding(
     num_table_rows,
     embedding_dim,
-    data_type,
-    nve_layers.CacheType.LinearUVM,
+    torch_dtype,
+    nve_layers.LayerType.LinearUVM,
     gpu_cache_size=cache_size,
     optimize_for_training=False,
-    memblock=memblock,
+    storage=memblock,
     device=local_device)
 
 # At this point every process forked from mpirun has it's own memblock and emb_layer, but all memblocks are using the same group of GPU buffers.

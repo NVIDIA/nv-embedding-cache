@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <default_allocator.hpp>
 #include <cuda_runtime_api.h>
+#include <cstring>
 
 namespace nve {
 

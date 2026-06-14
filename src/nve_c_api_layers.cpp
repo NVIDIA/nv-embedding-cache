@@ -19,6 +19,7 @@
 #include <gpu_embedding_layer.hpp>
 #include <linear_embedding_layer.hpp>
 #include <hierarchical_embedding_layer.hpp>
+#include <host_embedding_layer.hpp>
 
 extern "C" {
 
@@ -169,6 +170,53 @@ nve_status_t nve_hierarchical_layer_create(
 }
 
 /* ============================================================================
+ * Host Embedding Layer
+ * ============================================================================ */
+
+nve_status_t nve_host_embedding_layer_create(
+    nve_layer_t* out, nve_key_type_t key_type,
+    const nve_host_embedding_layer_config_t* config,
+    nve_table_t host_table, nve_allocator_t allocator) {
+  if (!out || !config || !host_table || !host_table->ptr) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out, config, and host_table must not be NULL");
+  }
+  if (host_table->key_type != key_type) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "host_table key type must match layer key type");
+  }
+  NVE_C_TRY
+    auto alloc = unwrap_allocator(allocator);
+    std::shared_ptr<nve::EmbeddingLayerBase> layer;
+
+    switch (key_type) {
+      case NVE_KEY_INT32: {
+        typename nve::HostEmbeddingLayer<int32_t>::Config cfg;
+        cfg.layer_name = config->layer_name ? config->layer_name : "";
+        if (config->default_embedding && config->default_embedding_size > 0) {
+          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
+          cfg.default_embedding.assign(p, p + config->default_embedding_size);
+        }
+        layer = std::make_shared<nve::HostEmbeddingLayer<int32_t>>(cfg, host_table->ptr, alloc);
+        break;
+      }
+      case NVE_KEY_INT64: {
+        typename nve::HostEmbeddingLayer<int64_t>::Config cfg;
+        cfg.layer_name = config->layer_name ? config->layer_name : "";
+        if (config->default_embedding && config->default_embedding_size > 0) {
+          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
+          cfg.default_embedding.assign(p, p + config->default_embedding_size);
+        }
+        layer = std::make_shared<nve::HostEmbeddingLayer<int64_t>>(cfg, host_table->ptr, alloc);
+        break;
+      }
+      default:
+        return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Unsupported key type");
+    }
+    *out = new nve_layer_s{std::move(layer), key_type};
+    return NVE_SUCCESS;
+  NVE_C_CATCH
+}
+
+/* ============================================================================
  * Layer lifecycle
  * ============================================================================ */
 
@@ -205,7 +253,7 @@ nve_status_t nve_layer_lookup_pooled(
     void* output, int64_t output_stride,
     uint64_t* hitmask,
     nve_pooling_type_t pooling_type, nve_sparse_type_t sparse_type,
-    const int64_t* key_indices, int64_t num_key_indices,
+    const void* key_indices, int64_t num_key_indices,
     const void* sparse_weights,
     nve_data_type_t weight_type, float* hitrates) {
   if (!layer || !layer->ptr || !ctx || !ctx->ptr) {
@@ -243,12 +291,12 @@ nve_status_t nve_layer_insert(
 nve_status_t nve_layer_update(
     nve_layer_t layer, nve_context_t ctx,
     int64_t num_keys, const void* keys,
-    int64_t value_stride, int64_t value_size, const void* values) {
+    int64_t value_stride, int64_t value_size, const void* values, int64_t table_id) {
   if (!layer || !layer->ptr || !ctx || !ctx->ptr) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "layer and ctx must not be NULL");
   }
   NVE_C_TRY
-    layer->ptr->update(ctx->ptr, num_keys, keys, value_stride, value_size, values);
+    layer->ptr->update(ctx->ptr, num_keys, keys, value_stride, value_size, values, table_id);
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -257,13 +305,13 @@ nve_status_t nve_layer_accumulate(
     nve_layer_t layer, nve_context_t ctx,
     int64_t num_keys, const void* keys,
     int64_t value_stride, int64_t value_size, const void* values,
-    nve_data_type_t value_type) {
+    nve_data_type_t value_type, int64_t table_id) {
   if (!layer || !layer->ptr || !ctx || !ctx->ptr) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "layer and ctx must not be NULL");
   }
   NVE_C_TRY
     layer->ptr->accumulate(ctx->ptr, num_keys, keys, value_stride, value_size,
-                           values, convert_dtype(value_type));
+                           values, convert_dtype(value_type), table_id);
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -304,6 +352,16 @@ nve_status_t nve_layer_create_execution_context(
         unwrap_thread_pool(thread_pool),
         unwrap_allocator(allocator));
     *out = new nve_context_s{std::move(ctx)};
+    return NVE_SUCCESS;
+  NVE_C_CATCH
+}
+
+nve_status_t nve_layer_get_num_tables(nve_layer_t layer, int64_t* out) {
+  if (!layer || !layer->ptr || !out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "layer and out must not be NULL");
+  }
+  NVE_C_TRY
+    *out = layer->ptr->get_num_tables();
     return NVE_SUCCESS;
   NVE_C_CATCH
 }

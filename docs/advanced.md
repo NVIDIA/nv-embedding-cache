@@ -60,37 +60,45 @@ export_aot(model, (example_keys,), "save_dir/")
 
 This produces:
 - `save_dir/model.pt2` — AOTInductor-compiled graph (loadable by C++ `AOTIModelPackageLoader`)
-- `save_dir/metadata.json` — per-layer configuration (num_embeddings, embedding_size, dtype, cache_type, memblock_type, etc.)
-- `save_dir/weights/<module_name>.nve` — embedding weights in NVE binary format, one file per layer
+- `save_dir/metadata.json` — schema-v2 layer configuration plus shared storage resources (`resources`, `storage_ref`, `layer_type`, `config`, etc.)
+- `save_dir/weights/<resource_key>.nve` — embedding weights in NVE binary format, one file per memblock-backed storage resource
 
 ### Step 2: Load and run in C++
 
-Use `nve::LayerDirectory` (RAII) to create embedding layers, load weights, and register them in the `NVELayerRegistry`. Then load the AOT model and run:
+Load the AOT model, then use `nve::LayerDirectory` (RAII) to create embedding layers, load weights, wire marker constants, and register the layers in the `NVELayerRegistry`:
 
 ```cpp
+#include <memory>
+#include <string>
 #include <torch/torch.h>
 #include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #include "python/pynve/torch_bindings/nve_loader.hpp"
 
-// Constructor reads metadata.json, creates layers, loads weights, registers in registry.
-// Destructor unregisters layers.
-nve::LayerDirectory dir("save_dir/");
+const std::string save_dir = "save_dir";
+const int device_index = 0;
 
-// Load AOT-compiled model
-torch::inductor::AOTIModelPackageLoader loader("save_dir/model.pt2");
+// The loader holds non-owning handles to marker tensors owned by LayerDirectory.
+auto loader = std::make_unique<torch::inductor::AOTIModelPackageLoader>(
+    save_dir + "/model.pt2");
+
+auto resources = std::make_shared<nve::ResourceDirectory>();
+nve::LayerDirectory dir(save_dir, *loader, device_index, resources);
 
 // Run inference
 auto keys = torch::tensor({0L, 1L, 5L, 10L},
-    torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA, device_index));
 c10::InferenceMode mode;
-auto outputs = loader.run({keys});
+auto outputs = loader->run({keys});
+
+// Destroy the AOTI container before LayerDirectory releases its marker tensors.
+loader.reset();
 ```
 
 No Python or pybind11 is required at C++ runtime. The C++ program links against `libnve-torch-ops.so` (custom op registration) and `libnve-common.so` (NVE core).
 
 ### Architecture
 
-The custom op `nve_ops::embedding_lookup` is registered in the C10 dispatcher via `STABLE_TORCH_LIBRARY` (LibTorch Stable ABI) in `libnve-torch-ops.so`. When the AOT model calls this op at runtime, it dispatches it looks up the layer by ID in the `NVELayerRegistry` singleton and calls the appropriate NveLayer lookup().
+The custom op `nve_ops::embedding_lookup` is registered in the C10 dispatcher via `STABLE_TORCH_LIBRARY` (LibTorch Stable ABI) in `libnve-torch-ops.so`. When the AOT model calls this op at runtime, it uses the per-layer marker tensor pointer to find the layer in the `NVELayerRegistry` singleton and calls the appropriate NVE layer lookup.
 
 ```
 AOT Model → C10 Dispatcher → nve_ops::embedding_lookup → NVELayerRegistry → LinearUVMEmbedding::lookup()
@@ -110,7 +118,7 @@ sleep 5
 for test in build_dir/bin/*test*; do  ./$test; done
 ./tests/embedding_layer/redis_cluster.sh stop
 ```
-* Note: the redis_cluster.sh script is handling local redis server nodes needed for some of the tests
+* Note: the redis_cluster.sh script starts the local Redis cluster and a standalone single-node server (for the Redis string-mode tests) needed by some of the tests
 
 To run the PyTest tests use:
 ```bash
@@ -121,3 +129,7 @@ pytest tests
     pip install .
     pip install -r benchmarks/requirements.txt
     ```
+
+## Pooling support status
+
+Pooling support is under active development. At this time, only a limited set of pooling configurations is supported and expected to work reliably.

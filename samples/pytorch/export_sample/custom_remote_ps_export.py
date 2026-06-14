@@ -55,9 +55,9 @@ class HierarchicalModel(torch.nn.Module):
         super().__init__()
         self.emb = nve_layers.NVEmbedding(
             num_embeddings, embedding_size, torch.float32,
-            nve_layers.CacheType.Hierarchical,
+            nve_layers.LayerType.Hierarchical,
             gpu_cache_size=gpu_cache_size,
-            remote_interface=remote_interface,
+            storage=remote_interface,
             optimize_for_training=False,
         )
 
@@ -115,8 +115,10 @@ def main():
 
         with open(os.path.join(save_dir, "metadata.json")) as f:
             metadata = json.load(f)
-        assert metadata[0]["remote_ps_config"]["plugin_name"] == "libnve-plugin-custom_remote.so"
-        print(f"Metadata remote_ps_config: {metadata[0]['remote_ps_config']}")
+        layer = metadata["layers"][0]
+        ps_cfg = metadata["resources"]["remote_ps"][layer["storage_ref"]]
+        assert ps_cfg["plugin_name"] == "libnve-plugin-custom_remote.so"
+        print(f"Metadata remote_ps_config: {ps_cfg}")
 
         # --- Load — PS is reconstructed directly through the plugin ctor ---
         del model, ps

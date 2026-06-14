@@ -17,6 +17,17 @@ import torch
 from pynve.torch.nve_tensors import CachedTable
 import pynve.nve as nve
 
+
+def _stream_handle(device: torch.device) -> int:
+    """Return the CUDA stream handle for `device`, or 0 on CPU.
+
+    NVE's binding identifies execution contexts by stream pointer; on CPU we use
+    0 as the sentinel — the underlying layer never enters the CUDA runtime.
+    """
+    if device.type == 'cpu':
+        return 0
+    return torch.cuda.current_stream(device).cuda_stream
+
 # ---------------------------------------------------------------------------
 # torch.export-compatible ops
 #
@@ -40,8 +51,10 @@ class NVEmbeddingOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(keys: torch.Tensor, layer_id: int):
-        return torch.ops.nve_ops.embedding_lookup(keys, layer_id)
+    def forward(marker: torch.Tensor, keys: torch.Tensor,
+                embedding_size: int, dtype: int):
+        return torch.ops.nve_ops.embedding_lookup(
+            marker, keys, embedding_size, dtype)
 
     @staticmethod
     def setup_context(ctx, inputs, output):
@@ -63,12 +76,14 @@ class NVEmbeddingOpTraining(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(keys: torch.Tensor, weight: CachedTable, layer_id: int):
-        return torch.ops.nve_ops.embedding_lookup(keys, layer_id)
+    def forward(marker: torch.Tensor, keys: torch.Tensor, weight: CachedTable,
+                embedding_size: int, dtype: int):
+        return torch.ops.nve_ops.embedding_lookup(
+            marker, keys, embedding_size, dtype)
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        keys, weight, layer_id = inputs
+        marker, keys, weight, embedding_size, dtype = inputs
         ctx.save_for_backward(keys, weight)
 
     @staticmethod
@@ -79,7 +94,7 @@ class NVEmbeddingOpTraining(torch.autograd.Function):
         embed_dim = grad_output.shape[-1]
         unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
         result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
-        stream = torch.cuda.current_stream(keys.device).cuda_stream
+        stream = _stream_handle(keys.device)
         nve_op = weight.emb_layer
         num_unique = nve_op.concat_backprop(
             num_keys, keys_flat.data_ptr(), grad_output.data_ptr(),
@@ -88,7 +103,8 @@ class NVEmbeddingOpTraining(torch.autograd.Function):
         result = result[:num_unique]
         grad_weight = torch.sparse_coo_tensor(
             unique_keys, result, weight.shape, device=weight.device)
-        return None, grad_weight, None
+        # grads for (marker, keys, weight, embedding_size, dtype)
+        return None, None, grad_weight, None, None
 
 
 # ===== EmbeddingBag =====
@@ -101,10 +117,12 @@ class NVEmbeddingBagOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(keys: torch.Tensor, offsets: torch.Tensor,
-                per_sample_weights, pooling_type: int, layer_id: int):
+    def forward(marker: torch.Tensor, keys: torch.Tensor, offsets: torch.Tensor,
+                per_sample_weights, pooling_type: int,
+                embedding_size: int, dtype: int):
         return torch.ops.nve_ops.embedding_lookup_with_pooling(
-            keys, offsets, per_sample_weights, pooling_type, layer_id)
+            marker, keys, offsets, per_sample_weights, pooling_type,
+            embedding_size, dtype)
 
     @staticmethod
     def setup_context(ctx, inputs, output):
@@ -126,14 +144,17 @@ class NVEmbeddingBagOpTraining(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(keys: torch.Tensor, weight: CachedTable, offsets: torch.Tensor,
-                per_sample_weights, pooling_type: int, layer_id: int):
+    def forward(marker: torch.Tensor, keys: torch.Tensor, weight: CachedTable,
+                offsets: torch.Tensor, per_sample_weights, pooling_type: int,
+                embedding_size: int, dtype: int):
         return torch.ops.nve_ops.embedding_lookup_with_pooling(
-            keys, offsets, per_sample_weights, pooling_type, layer_id)
+            marker, keys, offsets, per_sample_weights, pooling_type,
+            embedding_size, dtype)
 
     @staticmethod
     def setup_context(ctx, inputs, output):
-        keys, weight, offsets, per_sample_weights, pooling_type, layer_id = inputs
+        (marker, keys, weight, offsets, per_sample_weights, pooling_type,
+         embedding_size, dtype) = inputs
         ctx.pooling_type = pooling_type
         if per_sample_weights is not None:
             ctx.save_for_backward(keys, weight, offsets, per_sample_weights)
@@ -154,7 +175,7 @@ class NVEmbeddingBagOpTraining(torch.autograd.Function):
         embed_dim = grad_output.shape[-1]
         unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
         result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
-        stream = torch.cuda.current_stream(keys.device).cuda_stream
+        stream = _stream_handle(keys.device)
         nve_op = weight.emb_layer
 
         weight_dtype = nve.DataType_t.Unknown
@@ -174,9 +195,9 @@ class NVEmbeddingBagOpTraining(torch.autograd.Function):
         result = result[:num_unique]
         grad_weight = torch.sparse_coo_tensor(
             unique_keys, result, weight.shape, device=weight.device)
-        # grad_keys=None, grad_weight=sparse, grad_offsets=None,
-        # grad_per_sample_weights=None, grad_pooling_type=None, grad_layer_id=None
-        return None, grad_weight, None, None, None, None
+        # grads for (marker, keys, weight, offsets, per_sample_weights,
+        #            pooling_type, embedding_size, dtype)
+        return None, None, grad_weight, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +213,7 @@ class CacheEmbeddingOp(torch.autograd.Function):
         nve_op = weight.emb_layer
         result = torch.empty(keys.numel(), weight.shape[-1], dtype=weight.dtype, device=keys.device)
         nve_op.lookup(keys.numel(), keys.data_ptr(), result.data_ptr(),
-                      torch.cuda.current_stream(keys.device).cuda_stream)
+                      _stream_handle(keys.device))
         return result
 
     @staticmethod
@@ -212,7 +233,7 @@ class CacheEmbeddingOp(torch.autograd.Function):
         num_unique = nve_op.concat_backprop(
             num_keys, keys_flat.data_ptr(), grad_output.data_ptr(),
             unique_keys.data_ptr(), result.data_ptr(),
-            torch.cuda.current_stream(keys.device).cuda_stream)
+            _stream_handle(keys.device))
         unique_keys = unique_keys[:num_unique].reshape((1, -1))
         result = result[:num_unique]
         return None, torch.sparse_coo_tensor(unique_keys, result, weight.shape, device=weight.device)
@@ -225,7 +246,7 @@ class CacheEmbeddingBagOp(torch.autograd.Function):
         nve_op = weight.emb_layer
         device = keys.device
         result = torch.empty(offsets.numel() - 1, weight.shape[-1], dtype=weight.dtype, device=device)
-        stream = torch.cuda.current_stream(device).cuda_stream
+        stream = _stream_handle(device)
         if per_sample_weights is not None:
             w_type = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
                      else nve.DataType_t.Float16
@@ -254,7 +275,7 @@ class CacheEmbeddingBagOp(torch.autograd.Function):
         unique_keys = torch.empty(num_keys, dtype=torch.int64, device=weight.device)
         result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=weight.device)
         nve_op = weight.emb_layer
-        stream = torch.cuda.current_stream(weight.device).cuda_stream
+        stream = _stream_handle(weight.device)
         if per_sample_weights is not None:
             w_type = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
                      else nve.DataType_t.Float16

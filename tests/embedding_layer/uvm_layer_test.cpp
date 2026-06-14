@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include "emb_layer_utils.hpp"
+#include <buffer_wrapper.hpp>
 #include <embedding_layer.hpp>
 #include <linear_embedding_layer.hpp>
 #include <execution_context.hpp>
@@ -49,8 +50,12 @@ struct UVMTestCase {
   DataType_t data_type; // for now using the same type for table and accumulate
   PrivateStreamMode private_stream_mode;
   bool modify_on_gpu;
+  int64_t hotness = 1;
+  PoolingType_t pooling_type = PoolingType_t::Concatenate;
+  SparseType_t  offsets_layout = SparseType_t::Fixed;
 };
 class UVM : public ::testing::TestWithParam<UVMTestCase> {};
+class UVMPooling : public ::testing::TestWithParam<UVMTestCase> {};
 
 static bool IsCpu(const std::string cpu_name) {
   FILE* pipe = popen("lscpu|grep 'Model name:'|cut -d':' -f2|sed -e 's/^[[:space:]]*//'", "r");
@@ -150,6 +155,7 @@ class UVMLayerTest {
     {
       HostTableConfig mock_cfg;
       mock_cfg.value_dtype = data_type;
+      mock_cfg.max_value_size = m_row_size;
       m_ref_tab = std::make_shared<MockHostTable<IndexT>>(mock_cfg, true /*functional_ref*/);
     }
   }
@@ -193,7 +199,17 @@ class UVMLayerTest {
     NVE_CHECK_(cudaDeviceSynchronize());
     int64_t ref_hits;
     m_ref_tab->reset_lookup_counter(m_ctx);
-    m_ref_tab->find(m_ctx, num_keys, keys_buffer, ref_hitmask.data(), m_row_size, ref_output.data(), nullptr /*value_sizes*/);
+    {
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+      auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+          m_ctx, "hit_mask", ref_hitmask.data(), hitmask_size * sizeof(max_bitmask_repr_t));
+      auto values_bw = std::make_shared<BufferWrapper<void>>(
+          m_ctx, "values", ref_output.data(),
+          static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+      m_ref_tab->find(m_ctx, num_keys, std::move(keys_bw), std::move(hit_mask_bw), m_row_size,
+                         std::move(values_bw), nullptr /*value_sizes*/);
+    }
     m_ref_tab->get_lookup_counter(m_ctx, &ref_hits);
 
 
@@ -212,6 +228,108 @@ class UVMLayerTest {
     if (hitrate != nullptr) {
       *hitrate = hitrates[0];
     }
+  }
+
+  void LookupAndCheckPooling(const UVMTestCase& tc, std::vector<IndexT>& keys,
+                             uint64_t start_key = 0, uint64_t end_key = uint64_t(-1)) {
+    if (keys.empty()) {
+      return;
+    }
+    SetupKeys setup(keys, start_key, end_key);
+    auto num_keys = setup.num_keys;
+    auto keys_buffer = setup.keys_buffer;
+    auto output_bags = num_keys;
+
+    EmbeddingLayerBase::PoolingParams pp;
+    pp.pooling_type = tc.pooling_type;
+    pp.sparse_type = tc.offsets_layout;
+
+    SetupCSROffsets<int64_t> offsets_setup(
+        tc.offsets_layout == SparseType_t::CSR ? static_cast<int64_t>(num_keys) : 1,
+        std::max<int64_t>(tc.hotness, 1));
+    if (tc.offsets_layout == SparseType_t::CSR) {
+      pp.key_indices = offsets_setup.offsets_buffer;
+      pp.num_key_indices = static_cast<int64_t>(offsets_setup.num_offsets);
+      output_bags = static_cast<int64_t>(offsets_setup.num_offsets) - 1;
+    } else {
+      const int64_t hotness = (num_keys == 1) ? 1 : tc.hotness; // special handling for single key test
+      offsets_setup.offsets_buffer[0] = hotness;
+      pp.key_indices = offsets_setup.offsets_buffer;
+      pp.num_key_indices = 1;
+      if (tc.pooling_type != PoolingType_t::Concatenate) {
+        output_bags = num_keys / hotness;
+      }
+    }
+
+    std::vector<int8_t> weights;
+    if ((tc.pooling_type == PoolingType_t::WeightedSum) || (tc.pooling_type == PoolingType_t::WeightedMean)) {
+      GenerateWeights(weights, static_cast<uint64_t>(num_keys), tc.data_type);
+      pp.sparse_weights = weights.data();
+      pp.weight_type = tc.data_type;
+    } else {
+      pp.sparse_weights = nullptr;
+    }
+
+    // Allocate based on num_keys (matches the BufferWrapper size used by the layer internally),
+    // even though only output_bags * m_row_size bytes are written for Sum/Mean pooling.
+    auto output_size = static_cast<size_t>(num_keys * m_row_size);
+    int8_t* output{nullptr};
+    NVE_CHECK_(cudaMallocHost(&output, output_size));
+    NVE_CHECK_(output != 0);
+
+    std::vector<float> hitrates(3);
+
+    m_layer->lookup(m_ctx, num_keys, keys_buffer, output, m_row_size, nullptr /*hitmask*/,
+                    &pp /*pool_params*/, hitrates.data());
+
+    std::vector<int8_t> find_output(static_cast<size_t>(num_keys * m_row_size));
+    {
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+      auto values_bw = std::make_shared<BufferWrapper<void>>(
+          m_ctx, "values", find_output.data(),
+          static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+      m_ref_tab->find(m_ctx, num_keys, std::move(keys_bw), nullptr /* hitmask */, m_row_size,
+                      std::move(values_bw), nullptr /*value_sizes*/);
+    }
+
+    std::vector<int8_t> ref_output(static_cast<size_t>(output_bags * m_row_size));
+    auto* mock_ref = static_cast<MockHostTable<IndexT>*>(m_ref_tab.get());
+    mock_ref->combine(find_output.data(), num_keys, pp.pooling_type, pp.sparse_type, pp.key_indices,
+                      pp.num_key_indices, pp.sparse_weights, pp.weight_type, ref_output.data());
+
+    NVE_CHECK_(cudaDeviceSynchronize());
+
+    float tolerance = 0.f;
+    if (tc.pooling_type != PoolingType_t::Concatenate) {
+      switch (tc.data_type) {
+        case DataType_t::Float32:
+          tolerance = 1e-5f;
+          break;
+        case DataType_t::Float16:
+          // The UVM find_and_combine kernel uses an fp16 accumulator, so summing `hotness` random
+          // fp16 values in [0,1) yields a result up to ~hotness with fp16 ulp ~hotness/1024.
+          // Scale tolerance with hotness so Sum/WeightedSum at hotness>1 stays within ~1 ulp of the
+          // accumulated magnitude; Mean/WeightedMean divides by the count so a smaller floor suffices.
+          tolerance = (tc.pooling_type == PoolingType_t::Mean ||
+                       tc.pooling_type == PoolingType_t::WeightedMean)
+                          ? 5e-3f
+                          : 5e-3f * static_cast<float>(std::max<int64_t>(tc.hotness, 1));
+          break;
+        default:
+          throw std::runtime_error("Invalid datatype");
+      }
+    }
+
+    const int64_t output_elements = static_cast<int64_t>(ref_output.size()) / dtype_size(tc.data_type);
+    for (int64_t i = 0; i < output_elements; i++) {
+      ASSERT_NEAR(
+        load_as_float(output, i, tc.data_type),
+        load_as_float(ref_output.data(), i, tc.data_type),
+        tolerance
+      );
+    }
+    NVE_CHECK_(cudaFreeHost(output));
   }
 
   void Insert(std::vector<IndexT>& keys, std::vector<uint8_t>& datavectors, uint64_t start_key = 0, uint64_t end_key = uint64_t(-1)) {
@@ -236,7 +354,13 @@ class UVMLayerTest {
     m_layer->insert(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, 0);
     bool ref_insert = (m_gpu_tab != nullptr);
     if (ref_insert) {
-      m_ref_tab->insert(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+      auto values_bw = std::make_shared<BufferWrapper<const void>>(
+          m_ctx, "values", data_buffer,
+          static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+      m_ref_tab->insert(m_ctx, num_keys, std::move(keys_bw), m_row_size, m_row_size,
+                           std::move(values_bw));
     }
   }
 
@@ -250,8 +374,14 @@ class UVMLayerTest {
     auto keys_buffer = setup.keys_buffer;
     auto data_buffer = setup.data_buffer;
 
-    m_layer->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
-    m_ref_tab->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer);
+    m_layer->update(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, -1);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "values", data_buffer,
+        static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+    m_ref_tab->update(m_ctx, num_keys, std::move(keys_bw), m_row_size, m_row_size,
+                         std::move(values_bw));
   }
 
   void Accumulate(std::vector<IndexT>& keys, std::vector<uint8_t>& datavectors,
@@ -264,8 +394,14 @@ class UVMLayerTest {
     auto keys_buffer = setup.keys_buffer;
     auto data_buffer = setup.data_buffer;
 
-    m_layer->accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, value_type);
-    m_ref_tab->update_accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, value_type);
+    m_layer->accumulate(m_ctx, num_keys, keys_buffer, m_row_size, m_row_size, data_buffer, value_type, -1);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+    auto updates_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "updates", data_buffer,
+        static_cast<size_t>(num_keys) * static_cast<size_t>(m_row_size));
+    m_ref_tab->update_accumulate(m_ctx, num_keys, std::move(keys_bw), m_row_size, m_row_size,
+                                    std::move(updates_bw), value_type);
   }
 
   void Erase(std::vector<IndexT>& keys, uint64_t start_key = 0, uint64_t end_key = uint64_t(-1)) {
@@ -276,7 +412,9 @@ class UVMLayerTest {
     auto num_keys = setup.num_keys;
     auto keys_buffer = setup.keys_buffer;
     m_layer->erase(m_ctx, num_keys, keys_buffer, 0);
-    m_ref_tab->erase(m_ctx, num_keys, keys_buffer);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        m_ctx, "keys", keys_buffer, static_cast<size_t>(num_keys) * sizeof(IndexT));
+    m_ref_tab->erase(m_ctx, num_keys, std::move(keys_bw));
   }
 
   void Clear(bool clear_ref = true) {
@@ -553,6 +691,79 @@ INSTANTIATE_TEST_SUITE_P(
         //  TestCase: uvm_table_size,   gpu_table_Size,   row_size,         test_keys         data_Type            private_stream           modify_on_gpu
         UVMTestCase({ int64_t(1) << 32, int64_t(1) << 30, int64_t(1) << 10, int64_t(1) << 16, DataType_t::Float16, PrivateStreamMode::None, false}),  // Large 
         UVMTestCase({ int64_t(1) << 32, int64_t(1) << 30, int64_t(1) << 10, int64_t(1) << 16, DataType_t::Float32, PrivateStreamMode::None, false})  // Large 
+      ));
+
+// [Pooling - Sanity] insert 1 key, lookup 1 key with pooling
+TEST_P(UVMPooling, SingleLookup) {
+  cudaGetLastError();  // Clear potential errors left by previous tests.
+  const auto tc = GetParam();
+  if (IsLargeTestAnd7xxx(tc)) {
+    GTEST_SKIP() << "Skipping large UVM test";
+    return;
+  }
+  UVMLayerTest<int64_t> ult(tc);
+  std::vector<int64_t> keys;
+  std::vector<uint8_t> data;
+
+  GenerateData<int64_t>(keys, data, 1, tc.row_size, 0, ult.m_max_rows, tc.data_type);
+  ult.Insert(keys, data);
+  NVE_CHECK_(cudaDeviceSynchronize());
+  ult.LookupAndCheckPooling(tc, keys);
+}
+
+// [Pooling] insert k, lookup k with pooling and compare against reference combine
+TEST_P(UVMPooling, Lookup) {
+  cudaGetLastError();  // Clear potential errors left by previous tests.
+  const auto tc = GetParam();
+  if (IsLargeTestAnd7xxx(tc)) {
+    GTEST_SKIP() << "Skipping large UVM test";
+    return;
+  }
+  UVMLayerTest<int64_t> ult(tc);
+  std::vector<int64_t> keys;
+  std::vector<uint8_t> data;
+
+  // For Fixed offsets layout, ensure test_keys is divisible by hotness
+  size_t num_keys = tc.test_keys;
+  if (tc.offsets_layout == SparseType_t::Fixed && tc.hotness > 0) {
+    auto h = static_cast<size_t>(tc.hotness);
+    num_keys = (num_keys / h) * h;
+    if (num_keys == 0) {
+      num_keys = h;
+    }
+  }
+
+  GenerateData<int64_t>(keys, data, num_keys, tc.row_size, 0, ult.m_max_rows, tc.data_type);
+  ult.Insert(keys, data);
+  NVE_CHECK_(cudaDeviceSynchronize());
+  ult.LookupAndCheckPooling(tc, keys);
+}
+
+// Note: PoolingType_t::Concatenate is not supported by the GpuTable::find_and_combine path used by
+// LinearUVMEmbeddingLayer (NVE_THROW_NOT_IMPLEMENTED_), so it is not exercised here.
+INSTANTIATE_TEST_SUITE_P(
+    EmbLayer,
+    UVMPooling,
+    ::testing::Values(
+        //  TestCase: uvm_table_size,   gpu_table_Size,   row_size,         test_keys         data_type            private_stream                modify_on_gpu  hotness  pooling_type                    offsets_layout
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::Sum,             SparseType_t::Fixed}),  // fp32 fixed sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::Sum,             SparseType_t::CSR}),    // fp32 CSR sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::Mean,            SparseType_t::Fixed}),  // fp32 fixed mean
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::Mean,            SparseType_t::CSR}),    // fp32 CSR mean
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedSum,     SparseType_t::Fixed}),  // fp32 fixed weighted sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedSum,     SparseType_t::CSR}),    // fp32 CSR weighted sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedMean,    SparseType_t::Fixed}),  // fp32 fixed weighted mean
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float32, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedMean,    SparseType_t::CSR}),    // fp32 CSR weighted mean
+
+        // fp16 coverage
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::Sum,             SparseType_t::Fixed}),  // fp16 fixed sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::Sum,             SparseType_t::CSR}),    // fp16 CSR sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::Mean,            SparseType_t::Fixed}),  // fp16 fixed mean
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::Mean,            SparseType_t::CSR}),    // fp16 CSR mean
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedSum,     SparseType_t::Fixed}),  // fp16 fixed weighted sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedSum,     SparseType_t::CSR}),    // fp16 CSR weighted sum
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedMean,    SparseType_t::Fixed}),  // fp16 fixed weighted mean
+        UVMTestCase({ int64_t(1) << 30, int64_t(1) << 26, int64_t(1) << 10, int64_t(1) << 11, DataType_t::Float16, PrivateStreamMode::None,      false,         32,      PoolingType_t::WeightedMean,    SparseType_t::CSR})     // fp16 CSR weighted mean
       ));
 
 class UVMSpecialConfig : public ::testing::TestWithParam<UVMTestCase> {};

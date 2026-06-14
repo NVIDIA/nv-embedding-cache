@@ -22,7 +22,7 @@ def main():
     num_embeddings = 1000000
     embedding_dim = 16
     weight_init = torch.randn(num_embeddings, embedding_dim, dtype=torch.float32, device="cuda")
-    layers = nve_layers.NVEmbedding(num_embeddings, embedding_dim, torch.float32, nve_layers.CacheType.LinearUVM, gpu_cache_size=1024**3, weight_init=weight_init)
+    layers = nve_layers.NVEmbedding(num_embeddings, embedding_dim, torch.float32, nve_layers.LayerType.LinearUVM, gpu_cache_size=1024**3, weight_init=weight_init)
 
     # create keys
     keys = torch.tensor([7], dtype=torch.int64, device="cuda")

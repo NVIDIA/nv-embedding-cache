@@ -9,10 +9,11 @@ We accelerate embedding lookups with a combination of SW caches in GPU/Host memo
 The main focus is recommender inference with embeddings that exceed the local GPU's memory capacity.
 
 The SDK offers several configurations to support different memory allocations:
-- All embeddings are allocated in linear GPU memory: use **NVEmbedding** with cache_type **NoCache**(Py) / **GPUEmbeddingLayer** (C++)
-- Some embeddings are cached in GPU memory and all embeddings are in linear memory (Host or other GPUs): use **NVEmbedding** with cache_type **LinearUVM**(Py) / **LinearUVMEmbeddingLayer** (C++)
+- All embeddings are allocated in linear GPU memory: use **NVEmbedding** with layer_type **GPULayer**(Py) / **GPUEmbeddingLayer** (C++)
+- Some embeddings are cached in GPU memory and all embeddings are in linear memory (Host or other GPUs): use **NVEmbedding** with layer_type **LinearUVM**(Py) / **LinearUVMEmbeddingLayer** (C++)
 - Some embeddings are cached in GPU memory, Some embeddings cached in host memory and all embeddings kept in a remote parameter server:
-use **NVEmbedding** with cache_type **Hierarchical**(Py) / **HierarchicalEmbeddingLayer** (C++)
+use **NVEmbedding** with layer_type **Hierarchical**(Py) / **HierarchicalEmbeddingLayer** (C++)
+- All embeddings are kept in CPU host memory and looked up via CPU threads (no GPU cache): use **NVEmbedding** with layer_type **HostLayer**(Py)
 
 ** Linear memory in this context, means all embeddings are consecutive in virtual memory space. More specifically, the address of embedding *i* can be computed as start_address + *i* * embedding_size
 

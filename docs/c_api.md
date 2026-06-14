@@ -72,8 +72,28 @@ Available config initializers:
 - `nve_gpu_embedding_layer_config_default()`
 - `nve_linear_uvm_layer_config_default()`
 - `nve_hierarchical_layer_config_default()`
+- `nve_host_embedding_layer_config_default()`
 - `nve_overflow_policy_config_default()`
 - `nve_host_table_config_default()`
+
+### Data Types
+
+`nve_data_type_t` covers floating-point storage and rowwise quantized storage:
+
+| Value | Description |
+| --- | --- |
+| `NVE_DTYPE_FLOAT32` | 32-bit floating point |
+| `NVE_DTYPE_BFLOAT16` | bfloat16 |
+| `NVE_DTYPE_FLOAT16` | IEEE fp16 |
+| `NVE_DTYPE_E4M3` | fp8 E4M3 |
+| `NVE_DTYPE_E5M2` | fp8 E5M2 |
+| `NVE_DTYPE_FLOAT64` | 64-bit floating point |
+| `NVE_DTYPE_QINT8_ROWWISE_F32` | int8 values with one fp32 scale per row |
+| `NVE_DTYPE_QINT8_ROWWISE_F16` | int8 values with one fp16 scale per row |
+| `NVE_DTYPE_QUINT8_ROWWISE_F32` | uint8 values with fp32 scale and offset per row |
+| `NVE_DTYPE_QUINT8_ROWWISE_F16` | uint8 values with fp16 scale and offset per row |
+
+For rowwise quantized formats, `row_size_in_bytes` / `max_value_size` is the full stored row size: value bytes plus trailing scale metadata, and offset metadata for the affine `QUINT8` variants.
 
 ## Tables
 
@@ -120,8 +140,81 @@ Available plugin implementations:
 - `nvhm_map` — NVIDIA nvHashMap
 - `abseil_flat_map` — Google Abseil
 - `phmap_flat_map` — Parallel Hashmap
-- `redis_cluster` — Redis cluster (requires `"address"` in factory config)
+- `redis_cluster` — Redis backend (requires `"address"` in factory config). Connects to a Redis
+  **Cluster** by default, or to a **standalone single-node** server when `"single_node": true` — see
+  [Redis backend configuration](#redis-backend-configuration) below.
 - `rocksdb` — RocksDB
+
+#### Redis backend configuration
+
+The `redis_cluster` plugin supports two deployment modes, selected by the `single_node` factory
+option and the table's `num_partitions`:
+
+- **Cluster mode** (default, `single_node: false`): connects to a Redis Cluster and shards keys
+  across `num_partitions` (a power of two) Redis hashes. Use a high partition count relative to the
+  number of cluster nodes for parallelism.
+- **Standalone string mode** (`single_node: true`, empty `hash_key`): connects to a single Redis
+  server and stores each entry as a Redis **string** (`MSET`/`MGET`/`DEL`). Here `num_partitions` is
+  purely a client-side parallelism knob — `0`/`1` run single-threaded, while `>1` (a power of two)
+  splits the command-building/parsing work across that many threads (storage stays plain strings).
+  Set `connections_per_node ≥ num_partitions` for full parallelism. Setting a `hash_key` instead
+  stores everything in a single named Redis hash.
+
+```c
+// Cluster mode: shard across Redis hashes.
+nve_load_host_table_plugin("libnve-plugin-redis.so");
+nve_host_factory_t cluster_factory = NULL;
+nve_create_host_table_factory(&cluster_factory, "{"
+    "\"implementation\": \"redis_cluster\","
+    "\"address\": \"localhost:7000\""
+"}");
+nve_table_t cluster_table = NULL;
+nve_host_factory_produce(cluster_factory, 0, "{"
+    "\"mask_size\": 8,"
+    "\"key_size\": 8,"
+    "\"max_value_size\": 128,"
+    "\"value_dtype\": \"float32\","
+    "\"num_partitions\": 16"
+"}", &cluster_table);
+
+// Standalone string mode: single-node Redis with MSET/MGET.
+nve_host_factory_t standalone_factory = NULL;
+nve_create_host_table_factory(&standalone_factory, "{"
+    "\"implementation\": \"redis_cluster\","
+    "\"address\": \"localhost:6379\","
+    "\"single_node\": true"
+"}");
+nve_table_t standalone_table = NULL;
+nve_host_factory_produce(standalone_factory, 0, "{"
+    "\"mask_size\": 8,"
+    "\"key_size\": 8,"
+    "\"max_value_size\": 128,"
+    "\"value_dtype\": \"float32\","
+    "\"num_partitions\": 0,"
+    "\"string_namespace_id\": 1"
+"}", &standalone_table);
+```
+
+Factory config options (`nve_create_host_table_factory`):
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `address` | `localhost:6379` | Address of a Redis node (`host:port`). Required. |
+| `single_node` | `false` | If `true`, connect to a standalone server instead of a cluster (string mode, or a single hash if `hash_key` is set). |
+| `user_name` | `default` | Redis username. |
+| `password` | `""` | Plaintext password. |
+| `keep_alive` | `true` | Keep TCP connections alive. |
+| `connections_per_node` | `5` | Max parallel connections per Redis node. In standalone string mode set this `≥ num_partitions` so the parallel work isn't bottlenecked on the pool. |
+| `use_tls` | `false` | Encrypt connections with TLS (with `ca_certificate`, `client_certificate`, `client_key`, `server_name_identification`). |
+
+Table config options (`nve_host_factory_produce`), in addition to the common fields above:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `num_partitions` | `1` | In **cluster** mode: number of Redis hashes (power of two) to shard keys across. In **standalone string** mode: the client-side parallelism degree — `0`/`1` = single-threaded, `>1` (power of two) splits the `MSET`/`MGET`/`DEL` work across that many threads while still storing plain Redis strings (no sharding). |
+| `hash_key` | `""` | When set with `num_partitions: 0`, store all entries in this single named Redis hash instead of strings. |
+| `string_namespace_id` | `-1` | String mode only. `-1` = raw key bytes; `≥0` = prefix every key with these bytes, namespacing the table so several tables can share one Redis DB and `clear()` only removes this table's keys (via `SCAN`+`DEL`). With `-1`, `clear()` issues `FLUSHDB` and wipes the entire server. |
+| `overflow_policy` | `evict_random` | String mode supports `evict_random` only (no LRU/LFU eviction — bound capacity via the Redis server's `maxmemory` policy). |
 
 ### Table operations
 
@@ -145,7 +238,7 @@ nve_table_destroy(table);
 
 ## Embedding Layers
 
-Three layer types are available, mirroring the C++ API:
+The C API exposes constructors for GPU, Linear UVM, Hierarchical, and Host embedding layers.
 
 ### GPU Embedding Layer
 
@@ -199,24 +292,68 @@ nve_layer_t layer = NULL;
 nve_hierarchical_layer_create(&layer, NVE_KEY_INT64, &cfg, tables, 2, NULL);
 ```
 
+### Host Embedding Layer
+
+CPU-only layer wrapping one host table. The table must use the same key type as the layer and must report a host/CPU device.
+
+```c
+// Create any host table first, for example through a plugin factory.
+nve_load_host_table_plugin("libnve-plugin-nvhm.so");
+nve_host_factory_t factory = NULL;
+nve_create_host_table_factory(&factory, "{\"implementation\": \"nvhm_map\"}");
+
+nve_table_t host_table = NULL;
+nve_host_factory_produce(factory, 0, "{"
+    "\"mask_size\": 8,"
+    "\"key_size\": 8,"
+    "\"max_value_size\": 128,"
+    "\"value_dtype\": \"float32\","
+    "\"num_partitions\": 4,"
+    "\"initial_capacity\": 4096,"
+    "\"value_alignment\": 32"
+"}", &host_table);
+
+float default_row[32] = {0};  // optional miss fallback
+nve_host_embedding_layer_config_t cfg = nve_host_embedding_layer_config_default();
+cfg.layer_name = "my_host_layer";
+cfg.default_embedding = default_row;
+cfg.default_embedding_size = sizeof(default_row);
+
+nve_layer_t layer = NULL;
+nve_host_embedding_layer_create(&layer, NVE_KEY_INT64, &cfg, host_table, NULL);
+```
+
+Host layers support lookup, insert, update, accumulate, erase, clear, and pooled lookup through the generic `nve_layer_*` APIs. Pooled host lookup supports `NVE_SPARSE_FIXED` and `NVE_SPARSE_CSR` layouts.
+
 ### Layer operations
 
 ```c
 nve_context_t ctx = NULL;
 nve_layer_create_execution_context(layer, &ctx, NULL, NULL, NULL, NULL);
 
+// Query the number of tables in the layer
+int64_t num_tables = 0;
+nve_layer_get_num_tables(layer, &num_tables);
+
 // Lookup
 float hitrates[2];
 nve_layer_lookup(layer, ctx, num_keys, keys, output, row_size, NULL, hitrates);
+
+// Lookup with pooling: CSR offsets {0, 2, 5} describe two bags over five keys
+int64_t offsets[] = {0, 2, 5};
+nve_layer_lookup_pooled(
+    layer, ctx, 5, keys, pooled_output, row_size, NULL,
+    NVE_POOL_MEAN, NVE_SPARSE_CSR, offsets, 3,
+    NULL, NVE_DTYPE_UNKNOWN, hitrates);
 
 // Insert into a specific table (table_id = 0 for first table)
 nve_layer_insert(layer, ctx, num_keys, keys, stride, size, values, 0);
 
 // Update across all tables
-nve_layer_update(layer, ctx, num_keys, keys, stride, size, values);
+nve_layer_update(layer, ctx, num_keys, keys, stride, size, values, -1);
 
 // Accumulate gradients
-nve_layer_accumulate(layer, ctx, num_keys, keys, stride, size, grads, NVE_DTYPE_FLOAT32);
+nve_layer_accumulate(layer, ctx, num_keys, keys, stride, size, grads, NVE_DTYPE_FLOAT32, -1);
 
 // Erase/Clear
 nve_layer_erase(layer, ctx, num_keys, keys, 0);

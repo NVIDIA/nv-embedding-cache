@@ -23,6 +23,7 @@
 #include <utility>
 #include <unistd.h>
 
+#include <buffer_wrapper.hpp>
 #include <execution_context.hpp>
 #include <host_table.hpp>
 #include "test_utils.hpp"
@@ -146,12 +147,23 @@ TEST(host_table_invalid_key, valid_keys_survive_batch_with_sentinel) {
   const int64_t n = static_cast<int64_t>(keys.size());
 
   // Insert with values=null (only registers presence; find_insert_tests.cpp does the same).
-  tab->insert(ctx, n, keys.data(), max_value_size + 1, 0, nullptr);
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "keys", keys.data(), static_cast<size_t>(n) * sizeof(key_type));
+    tab->insert(ctx, n, std::move(keys_bw), max_value_size + 1, 0, nullptr);
+  }
 
   std::vector<max_bitmask_repr_t> hit_mask(
       static_cast<uint64_t>(max_bitmask_t::mask_size(n)), 0);
   tab->reset_lookup_counter(ctx);
-  tab->find(ctx, n, keys.data(), hit_mask.data(), max_value_size, nullptr, nullptr);
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "keys", keys.data(), static_cast<size_t>(n) * sizeof(key_type));
+    auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+        ctx, "hit_mask", hit_mask.data(),
+        static_cast<size_t>(max_bitmask_t::mask_size(n)) * sizeof(max_bitmask_repr_t));
+    tab->find(ctx, n, std::move(keys_bw), std::move(hit_mask_bw), max_value_size, nullptr, nullptr);
+  }
 
   // Look up the valid keys on their own — they must hit.
   std::vector<key_type> valid_keys{static_cast<key_type>(1),
@@ -161,8 +173,16 @@ TEST(host_table_invalid_key, valid_keys_survive_batch_with_sentinel) {
       static_cast<uint64_t>(max_bitmask_t::mask_size(static_cast<int64_t>(valid_keys.size()))), 0);
   int64_t valid_cnt = 0;
   tab->reset_lookup_counter(ctx);
-  tab->find(ctx, static_cast<int64_t>(valid_keys.size()), valid_keys.data(),
-            valid_hit_mask.data(), max_value_size, nullptr, nullptr);
+  {
+    const int64_t valid_n = static_cast<int64_t>(valid_keys.size());
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "keys", valid_keys.data(), valid_keys.size() * sizeof(key_type));
+    auto hit_mask_bw = std::make_shared<BufferWrapper<max_bitmask_repr_t>>(
+        ctx, "hit_mask", valid_hit_mask.data(),
+        static_cast<size_t>(max_bitmask_t::mask_size(valid_n)) * sizeof(max_bitmask_repr_t));
+    tab->find(ctx, valid_n, std::move(keys_bw), std::move(hit_mask_bw),
+                 max_value_size, nullptr, nullptr);
+  }
   tab->get_lookup_counter(ctx, &valid_cnt);
   EXPECT_EQ(static_cast<int64_t>(valid_keys.size()), valid_cnt);
 }

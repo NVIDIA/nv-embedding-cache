@@ -23,7 +23,6 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(f"{dir_path}/../../samples/pytorch")
 import pytorch_samples_common as common
 import pynve.torch.nve_layers as nve_layers
-import pynve.torch.nve_serialization as nve_serialization
 import pynve.nve as nve
 import pynve.torch.nve_ps as nve_ps
 import nvtx
@@ -73,13 +72,13 @@ def functional(quiet : bool, data_type : torch.dtype, device : torch.device = to
         )
 
     # create nv emb layer wrapping the nvHashMap as PS
-    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=nvhm_ps, device=device)
 
     # create a uvm backed nv emb layer
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, remote_interface=None, weight_init=emb_layer.weight, device=device)
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, storage=None, weight_init=emb_layer.weight, device=device)
 
     # create nv emb gpu layer
-    nv_gpu_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.NoCache, remote_interface=None, weight_init=emb_layer.weight, device=device)
+    nv_gpu_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.GPULayer, storage=None, weight_init=emb_layer.weight, device=device)
 
     # from here the interface should be same for all layers as demonstrated by the loop function
 
@@ -125,10 +124,10 @@ def functional_bag(quiet : bool, data_type : torch.dtype, device : torch.device 
     # See functional() for how to test with PS based on NVHM
     
     # create a uvm backed nv emb layer
-    nv_uvm_emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, data_type, nve_layers.CacheType.LinearUVM, mode='sum', gpu_cache_size=cache_size, remote_interface=None, weight_init=emb_layer.weight, device=device)
+    nv_uvm_emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, data_type, nve_layers.LayerType.LinearUVM, mode='sum', gpu_cache_size=cache_size, storage=None, weight_init=emb_layer.weight, device=device)
 
     # create nv emb layer wrapping the PS
-    nv_gpu_emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, data_type, nve_layers.CacheType.NoCache, mode='sum', remote_interface=None, weight_init=emb_layer.weight, device=device)
+    nv_gpu_emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, data_type, nve_layers.LayerType.GPULayer, mode='sum', storage=None, weight_init=emb_layer.weight, device=device)
 
     # from here the interface should be same for all layers as demonstrated by the loop function
     num_steps = 5
@@ -175,7 +174,7 @@ def benchmark(data_type):
     
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, dtype=data_type)
     
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, remote_interface=None, weight_init=emb_layer.weight)
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, storage=None, weight_init=emb_layer.weight)
 
     num_steps = 25
     batch = 1024
@@ -224,12 +223,12 @@ def test_pytorch_init_linear():
     num_embeddings = 100000
     embed_size = 2
     cache_size = 128*1024*1024
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
 
 def test_pytorch_init_gpu():
     num_embeddings = 100000
     embed_size = 2
-    gpu_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.NoCache,  weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
+    gpu_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.GPULayer,  weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
 
 @requires_nvhm
 def test_pytorch_init_hierarchical_nvhm():
@@ -243,7 +242,7 @@ def test_pytorch_init_hierarchical_nvhm():
             embed_size,
             torch.float32,
         )
-    hierarchical_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, host_cache_size=cache_size, remote_interface=nvhm_ps, optimize_for_training=False)
+    hierarchical_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, host_cache_size=cache_size, storage=nvhm_ps, optimize_for_training=False)
 
 def test_pytorch_init_hierarchical_redis():
     num_embeddings = 100000
@@ -258,14 +257,14 @@ def test_pytorch_init_hierarchical_redis():
             ps_type = nve.Redis,
             extra_params = {"plugin": {"address": "localhost:7001"}}
         )
-    hierarchical_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, host_cache_size=cache_size, remote_interface=mw_ps, optimize_for_training=False)
+    hierarchical_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, host_cache_size=cache_size, storage=mw_ps, optimize_for_training=False)
 
 def test_pytorch_init_memblock():
     num_embeddings = 100000
     embed_size = 2
     cache_size = 128*1024*1024
     memblock = nve.NVLMemBlock(num_embeddings, embed_size, common.torch_data_type_to_nve_data_type(torch.float32), [0])
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, memblock=memblock, gpu_cache_size=cache_size, weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, storage=memblock, gpu_cache_size=cache_size, weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
 
 @requires_nvhm
 def test_pytorch_concat():
@@ -274,6 +273,101 @@ def test_pytorch_concat():
         assert all(torch.isclose(nvhm_ps_output, torch_output).tolist())
         assert all(torch.isclose(uvm_output, torch_output).tolist())
         assert all(torch.isclose(gpu_output, torch_output).tolist())
+
+def test_pytorch_init_host():
+    num_embeddings = 100000
+    embed_size = 4
+    # Host-resident buffer that the LinearHostTable will gather from.
+    host_weight = torch.zeros(num_embeddings, embed_size, dtype=torch.float32).contiguous().pin_memory()
+    memblock = nve.UserMemBlock(host_weight.data_ptr())
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32,
+                                   layer_type=nve_layers.LayerType.HostLayer,
+                                   storage=memblock,
+                                   optimize_for_training=False)
+    # Keep host_weight alive on the layer instance so the memblock stays valid.
+    layer._host_weight = host_weight
+
+def test_pytorch_host_gather():
+    num_embeddings = 1024
+    embed_size = 8
+    # row i = [i, i, ...] so the gather result is verifiable
+    host_weight = (torch.arange(num_embeddings, dtype=torch.float32)
+                   .unsqueeze(1).expand(num_embeddings, embed_size)
+                   .contiguous().pin_memory())
+    memblock = nve.UserMemBlock(host_weight.data_ptr())
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32,
+                                   layer_type=nve_layers.LayerType.HostLayer,
+                                   storage=memblock,
+                                   optimize_for_training=False)
+    layer._host_weight = host_weight
+    keys = torch.tensor([0, 5, 17, 256, 1023], dtype=torch.int64, device="cuda")
+    out = layer(keys)
+    expected = host_weight[keys.cpu()].to(device="cuda")
+    assert torch.equal(out, expected)
+
+def test_pytorch_host_update():
+    num_embeddings = 256
+    embed_size = 4
+    host_weight = torch.zeros(num_embeddings, embed_size, dtype=torch.float32).contiguous().pin_memory()
+    memblock = nve.UserMemBlock(host_weight.data_ptr())
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32,
+                                   layer_type=nve_layers.LayerType.HostLayer,
+                                   storage=memblock,
+                                   optimize_for_training=False)
+    layer._host_weight = host_weight
+    keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device="cuda")
+    updates = torch.arange(1.0, 1.0 + 5 * embed_size, dtype=torch.float32, device="cuda").reshape(5, embed_size)
+    layer.update(keys, updates)
+    torch.cuda.current_stream().synchronize()
+    out = layer(keys)
+    assert torch.equal(out, updates)
+
+def test_pytorch_host_weight_init():
+    num_embeddings = 512
+    embed_size = 4
+    weight_init = (torch.arange(num_embeddings, dtype=torch.float32)
+                   .unsqueeze(1).expand(num_embeddings, embed_size).contiguous())
+    # Buffer starts zeroed; NVEmbedding should copy weight_init into it.
+    host_weight = torch.zeros(num_embeddings, embed_size, dtype=torch.float32).contiguous().pin_memory()
+    memblock = nve.UserMemBlock(host_weight.data_ptr())
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32,
+                                   layer_type=nve_layers.LayerType.HostLayer,
+                                   storage=memblock,
+                                   weight_init=weight_init,
+                                   optimize_for_training=False)
+    layer._host_weight = host_weight
+    keys = torch.tensor([0, 7, 42, 511], dtype=torch.int64, device="cuda")
+    out = layer(keys)
+    expected = weight_init[keys.cpu()].to(device="cuda")
+    assert torch.equal(out, expected)
+    # And the underlying host buffer was actually populated.
+    assert torch.equal(host_weight, weight_init)
+
+def test_pytorch_host_auto_storage():
+    # storage=None should auto-allocate a host-resident buffer.
+    num_embeddings = 256
+    embed_size = 4
+    weight_init = torch.randn(num_embeddings, embed_size, dtype=torch.float32)
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32,
+                                   layer_type=nve_layers.LayerType.HostLayer,
+                                   weight_init=weight_init,
+                                   optimize_for_training=False)
+    keys = torch.tensor([0, 13, 200, 255], dtype=torch.int64, device="cuda")
+    out = layer(keys)
+    expected = weight_init[keys.cpu()].to(device="cuda")
+    assert torch.equal(out, expected)
+
+def test_pytorch_host_rejects_gpu_memblock():
+    import pytest
+    num_embeddings = 64
+    embed_size = 2
+    # NVL memblock is GPU-only — should be rejected.
+    nvl_block = nve.NVLMemBlock(embed_size, num_embeddings, nve.DataType_t.Float32, [0])
+    with pytest.raises(ValueError, match="host-accessible"):
+        nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32,
+                               layer_type=nve_layers.LayerType.HostLayer,
+                               storage=nvl_block,
+                               optimize_for_training=False)
 
 def test_pytorch_linear_gather_flows():
     num_embeddings = 10000000
@@ -285,7 +379,7 @@ def test_pytorch_linear_gather_flows():
     num_keys = 100000
 
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, dtype=data_type, device=torch.device("cuda"))
-    nve_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight , optimize_for_training=False, config=config)
+    nve_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight , optimize_for_training=False, config=config)
 
     for i in range(100):
         print(f"test {i}")
@@ -299,7 +393,7 @@ def test_pytorch_managed_memblock():
     embed_size = 2
     cache_size = 128*1024
     memblock = nve.ManagedMemBlock(num_embeddings, embed_size, common.torch_data_type_to_nve_data_type(torch.float32), [0])
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, memblock=memblock, gpu_cache_size=cache_size, weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, storage=memblock, gpu_cache_size=cache_size, weight_init=torch.zeros(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
     keys = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=torch.int64, device=torch.device("cuda"))
     out = nv_uvm_emb_layer(keys)
     assert torch.equal(out, torch.zeros(10, 2, device=torch.device("cuda")))
@@ -336,7 +430,7 @@ def test_pytorch_load_from_binary_file():
 
     nvhm_ps.load_from_file(keys_path, values_path)
 
-    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=nvhm_ps, device=device)
 
     out = nv_nvhm_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
     assert torch.equal(out, torch.tensor([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=torch.float32, device=device))
@@ -347,8 +441,8 @@ def test_pytorch_multi_layer():
     cache_size = 128*1024
     ref_embedding_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, dtype=torch.float32, device=torch.device("cuda"))
     ref_embedding_layer_2 = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, dtype=torch.float32, device=torch.device("cuda"))
-    nve_emb_layer_1 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=ref_embedding_layer.weight, optimize_for_training=False)
-    nve_emb_layer_2 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=ref_embedding_layer_2.weight, optimize_for_training=False)
+    nve_emb_layer_1 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=ref_embedding_layer.weight, optimize_for_training=False)
+    nve_emb_layer_2 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=ref_embedding_layer_2.weight, optimize_for_training=False)
     keys = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=torch.int64, device=torch.device("cuda"))
     out_1 = nve_emb_layer_1(keys)
     out_2 = nve_emb_layer_2(keys)
@@ -388,14 +482,14 @@ def test_pytorch_load_from_numpy_file():
 
     nvhm_ps.load_from_file(keys_path, values_path)
 
-    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=device)
+    nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=nvhm_ps, device=device)
 
     out = nv_nvhm_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
     assert torch.equal(out, torch.tensor([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=torch.float32, device=device))
 
 def test_pytorch_update():
     weight_init = torch.zeros(10000, 2, dtype=torch.float32)
-    layer = nve_layers.NVEmbedding(10000, 2, torch.float32, nve_layers.CacheType.LinearUVM, gpu_cache_size=1*1024, weight_init=weight_init, optimize_for_training=False)
+    layer = nve_layers.NVEmbedding(10000, 2, torch.float32, nve_layers.LayerType.LinearUVM, gpu_cache_size=1*1024, weight_init=weight_init, optimize_for_training=False)
     keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device='cuda')
     updates = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=torch.float32, device='cuda')
 
@@ -423,7 +517,7 @@ def test_pytorch_erase():
         )
 
     # create nv emb layer wrapping the nvHashMap as PS
-    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.CacheType.Hierarchical, gpu_cache_size=cache_size, remote_interface=nvhm_ps, device=torch.device('cuda'))
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=nvhm_ps, device=torch.device('cuda'))
 
     # Inserting different values on tables
     # This is an intentional inconsistency for testing purposes.
@@ -470,7 +564,7 @@ def test_pytorch_multi_stream():
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True)
 
     # create a uvm backed nv emb layer
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False)
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False)
     # from here the interface should be same for all layers as demonstrated by the loop function
 
     emb_layer.to(device="cuda")
@@ -492,7 +586,7 @@ def test_pytorch_update_non_default_device():
         return
     device = torch.device("cuda:1")
     weight_init = torch.zeros(7, 2, dtype=torch.float32, device=device)
-    layer = nve_layers.NVEmbedding(7, 2, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=1*1024, weight_init=weight_init, optimize_for_training=False, device=device)
+    layer = nve_layers.NVEmbedding(7, 2, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=1*1024, weight_init=weight_init, optimize_for_training=False, device=device)
     keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device=device)
     updates = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=torch.float32, device=device)
     layer.update(keys, updates)
@@ -527,7 +621,7 @@ def test_pytorch_non_default_device():
         print("Skipping multi-GPU test as only one GPU is available")
         return
     device = torch.device("cuda:1")
-    layer = nve_layers.NVEmbedding(10000, 2, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=1*1024, weight_init=torch.zeros(10000, 2, dtype=torch.float32), optimize_for_training=False, device=device)
+    layer = nve_layers.NVEmbedding(10000, 2, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=1*1024, weight_init=torch.zeros(10000, 2, dtype=torch.float32), optimize_for_training=False, device=device)
     keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device=device)
     out = layer(keys)
     assert torch.equal(out, torch.zeros(5, 2, device=device))
@@ -537,7 +631,7 @@ def test_pytorch_pooling_non_default_device():
         print("Skipping multi-GPU test as only one GPU is available")
         return
     device = torch.device("cuda:1")
-    layer = nve_layers.NVEmbeddingBag(10000, 2, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, mode='sum', gpu_cache_size=1*1024, weight_init=torch.zeros(10000, 2, dtype=torch.float32), optimize_for_training=False, device=device)
+    layer = nve_layers.NVEmbeddingBag(10000, 2, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, mode='sum', gpu_cache_size=1*1024, weight_init=torch.zeros(10000, 2, dtype=torch.float32), optimize_for_training=False, device=device)
     keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device=device)
     offsets = torch.tensor([0, 3, 6], dtype=torch.int64, device=device)
     out = layer(keys, offsets)
@@ -554,8 +648,8 @@ def test_pytorch_multi_gpu():
     cache_size = 1024*1024
     # create a regular embedding layer for reference, we place it on cpu to avoid device mismatch
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, device='cpu')
-    nv_uvm_emb_layer_device_1 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=device_1)
-    nv_uvm_emb_layer_device_2 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=device_2)
+    nv_uvm_emb_layer_device_1 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=device_1)
+    nv_uvm_emb_layer_device_2 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=device_2)
 
     def thread_func(layer, num_iterations, num_keys, results):
         torch.cuda.set_device(layer.device)
@@ -625,7 +719,7 @@ def test_pytorch_multi_thread():
     cache_size = 1024*1024
     # create a regular embedding layer for reference, we place it on cpu to avoid device mismatch
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, device="cuda")
-    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=torch.device("cuda"))
+    nv_uvm_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=torch.device("cuda"))
     num_iterations = 3
     num_keys = 5
     num_threads = 2
@@ -669,8 +763,8 @@ def test_pytorch_multi_gpu_memblock():
     # create a regular embedding layer for reference, we place it on cpu to avoid device mismatch
     emb_layer = torch.nn.Embedding(num_embeddings, embed_size, sparse=True, device='cpu')
     memblock = nve.NVLMemBlock(num_embeddings, embed_size, common.torch_data_type_to_nve_data_type(torch.float32), [0, 1])
-    nv_uvm_emb_layer_device_1 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, memblock=memblock, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=device_1)
-    nv_uvm_emb_layer_device_2 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, memblock=memblock, gpu_cache_size=cache_size, optimize_for_training=False, device=device_2)
+    nv_uvm_emb_layer_device_1 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, storage=memblock, gpu_cache_size=cache_size, weight_init=emb_layer.weight, optimize_for_training=False, device=device_1)
+    nv_uvm_emb_layer_device_2 = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, storage=memblock, gpu_cache_size=cache_size, optimize_for_training=False, device=device_2)
     def thread_func(layer, num_iterations, num_keys, results):
         torch.cuda.set_device(layer.device)
         for i in range(num_iterations):
@@ -695,77 +789,6 @@ def test_pytorch_multi_gpu_memblock():
     assert all(results_1)
     assert all(results_2)
 
-
-import tempfile
-
-def compare_layer(emb_layer_1, emb_layer_2):
-    same_cache = emb_layer_1.cache_type == emb_layer_2.cache_type
-    same_gpu_cache_size = emb_layer_1.gpu_cache_size == emb_layer_2.gpu_cache_size
-    same_optimize_for_training = emb_layer_1.optimize_for_training == emb_layer_2.optimize_for_training
-    same_num_embeddings = emb_layer_1.num_embeddings == emb_layer_2.num_embeddings
-    same_embedding_size = emb_layer_1.embedding_size == emb_layer_2.embedding_size
-    same_weight = torch.equal(emb_layer_1.weight, emb_layer_2.weight)
-    return same_cache and same_gpu_cache_size and same_optimize_for_training and same_num_embeddings and same_embedding_size and same_weight
-
-def save_load_module(module):
-    tf_torch = tempfile.TemporaryFile()
-    tf_nve = tempfile.TemporaryFile()
-    nve_serialization.save(module, tf_torch, tf_nve)
-    tf_torch.seek(0)
-    tf_nve.seek(0)
-    return nve_serialization.load(tf_torch, tf_nve)
-
-def test_save_load_embedding():
-    import tempfile
-    num_embeddings = 100000
-    embed_size = 2
-    cache_size = 1024*1024
-    weight_init = torch.randn(num_embeddings, embed_size, dtype=torch.float32)
-    
-    emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=cache_size, weight_init=weight_init, optimize_for_training=False, device=torch.device("cuda"))
-    emb_layer_2 = save_load_module(emb_layer)
-    assert compare_layer(emb_layer, emb_layer_2)
-    
-    emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.NoCache, weight_init=weight_init, optimize_for_training=False, device=torch.device("cuda"))
-    emb_layer_2 = save_load_module(emb_layer)
-    assert compare_layer(emb_layer, emb_layer_2)
-
-def test_save_load_embedding_bag():
-    num_embeddings = 100000
-    embed_size = 2
-    cache_size = 1024*1024
-    weight_init = torch.randn(num_embeddings, embed_size, dtype=torch.float32)
-    
-    emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, mode='sum', gpu_cache_size=cache_size, weight_init=weight_init, optimize_for_training=False, device=torch.device("cuda"))
-    emb_layer_2 = save_load_module(emb_layer)
-    assert compare_layer(emb_layer, emb_layer_2)
-    
-    emb_layer = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.NoCache, mode='sum', weight_init=weight_init, optimize_for_training=False, device=torch.device("cuda"))
-    emb_layer_2 = save_load_module(emb_layer)
-    assert compare_layer(emb_layer, emb_layer_2)
-
-class MyBlock(torch.nn.Module):
-    def __init__(self):
-        super(MyBlock, self).__init__()
-        self.seq = torch.nn.Sequential(
-            nve_layers.NVEmbedding(1000, 2, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=1024*1024, weight_init=torch.randn(1000, 2, dtype=torch.float32), optimize_for_training=False, device=torch.device("cuda")),
-            torch.nn.ReLU()
-        )
-        self.emb_layer = nve_layers.NVEmbeddingBag(100, 2, torch.float32, cache_type=nve_layers.CacheType.NoCache, mode='sum', weight_init=torch.randn(100, 2, dtype=torch.float32), optimize_for_training=False, device=torch.device("cuda"))
-
-class MyModel(torch.nn.Module):
-    def __init__(self):
-        super(MyModel, self).__init__()
-        self.emb_layer = nve_layers.NVEmbedding(200, 2, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, gpu_cache_size=1024*1024, weight_init=torch.randn(200, 2, dtype=torch.float32), optimize_for_training=False, device=torch.device("cuda"))
-        self.block = MyBlock()
-
-
-def test_load_save_nested_model():
-    model = MyModel()
-    model_2 = save_load_module(model)
-    assert compare_layer(model.emb_layer, model_2.emb_layer)
-    assert compare_layer(model.block.emb_layer, model_2.block.emb_layer)
-    assert compare_layer(model.block.seq[0], model_2.block.seq[0])
 
 @requires_nvhm
 def test_pytorch_multi_thread_multi_device_training():
@@ -797,7 +820,7 @@ def test_pytorch_user_memblock():
     cache_size = 2**20
     linear_memblock = nve.LinearMemBlock(embed_size, num_embeddings, nve.DataType_t.Float32)
     user_memblock = nve.UserMemBlock(linear_memblock.get_handle())
-    emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, cache_type=nve_layers.CacheType.LinearUVM, memblock=user_memblock, gpu_cache_size=cache_size, weight_init=torch.ones(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
+    emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, torch.float32, layer_type=nve_layers.LayerType.LinearUVM, storage=user_memblock, gpu_cache_size=cache_size, weight_init=torch.ones(num_embeddings, embed_size, dtype=torch.float32), optimize_for_training=False)
     num_keys = 100
     keys = torch.randint(1, num_embeddings, (num_keys,), device="cuda", dtype=torch.int64)
     res = emb_layer(keys)

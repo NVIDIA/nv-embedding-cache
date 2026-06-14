@@ -106,7 +106,7 @@ void CallScatterKernelVecType(
         CallScatterKernelVecTypeSubwarp<1, DataType>(src, dst, embed_width_in_bytes, embed_src_stride_in_bytes, embed_dst_stride_in_bytes, hit_mask, num_indices, stream);
         break;
     default:
-        assert(0);
+        NVE_THROW_("Unsupported kernel dimensions ", subgroupWidth);
     }
 }
 

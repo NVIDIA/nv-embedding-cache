@@ -22,15 +22,15 @@
 #include "../common/check_error.h"
 
 template<typename T>
-struct Buffer
+struct TestBuffer
 {
-    Buffer(size_t size) : m_size(size)
+    TestBuffer(size_t size) : m_size(size)
     {
         CHECK_CUDA_ERROR(cudaMalloc(&pd, size));
         CHECK_CUDA_ERROR(cudaMallocHost(&ph, size));
     }
 
-    ~Buffer()
+    ~TestBuffer()
     {
         CHECK_CUDA_ERROR(cudaFree(pd));
         CHECK_CUDA_ERROR(cudaFreeHost(ph));

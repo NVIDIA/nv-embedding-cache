@@ -287,12 +287,16 @@ void GPUEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t num_ke
     const int64_t* d_offsets = nullptr;
     int64_t hotness = 1;
 
-    const auto offsets_buffer_size = pool_params->num_key_indices * sizeof(*(pool_params->key_indices));
-    auto offsets_bw = std::make_shared<BufferWrapper<const int64_t>>(ctx, "offsets", pool_params->key_indices, offsets_buffer_size);
+    const auto offsets_buffer_size = (size_t)pool_params->num_key_indices * sizeof(KeyType);
+    auto offsets_bw = std::make_shared<BufferWrapper<const KeyType>>(ctx, "offsets", static_cast<const KeyType*>(pool_params->key_indices), offsets_buffer_size);
 
     if (pool_params->num_key_indices != 1) {
       NVE_CHECK_(pool_params->key_indices != nullptr, "Invalid pooling indices");
-      d_offsets = offsets_bw->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream);
+      // cuembed_find_and_combine consumes the offsets as int64_t, so this access is only
+      // type-safe when the layer's key type (and thus the offsets) is int64_t.
+      NVE_CHECK_((std::is_same_v<KeyType, int64_t>),
+                 "CSR/COO pooling on the GPU layer requires int64 key_indices");
+      d_offsets = reinterpret_cast<const int64_t*>(offsets_bw->access_buffer(cudaMemoryTypeDevice, true /*copy_content*/, lookup_stream));
     } else {
       // This assumes key_indices is in host memory for fixed pooling
       hotness = offsets_bw->access_buffer(cudaMemoryTypeHost, true /*copy_content*/, lookup_stream)[0];
@@ -346,13 +350,14 @@ void GPUEmbeddingLayer<KeyType>::insert(context_ptr_t& /*ctx*/, const int64_t /*
 template <typename KeyType>
 void GPUEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
                     const int64_t value_stride, const int64_t value_size,
-                    const void* values) {
+                    const void* values, const int64_t table_id) {
   NVE_NVTX_SCOPED_FUNCTION_COL3_();
   ScopedDevice scope_device(config_.device_id);
   NVE_CHECK_(num_keys >= 0, "Invalid num_keys");
   NVE_CHECK_(keys != nullptr, "Invalid keys buffer");
   NVE_CHECK_(values != nullptr, "Invalid values buffer");
   NVE_CHECK_(value_size == config_.embedding_width_in_bytes, "Invalid value size");
+  NVE_CHECK_(table_id < get_num_tables(), "Invalid table_id");
 
   auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
   NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
@@ -392,13 +397,14 @@ void GPUEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64_t num_ke
 template <typename KeyType>
 void GPUEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const int64_t num_keys, const void* keys,
                         const int64_t value_stride, const int64_t value_size, const void* values,
-                        DataType_t value_type) {
+                        DataType_t value_type, const int64_t table_id) {
   NVE_NVTX_SCOPED_FUNCTION_COL4_();
   ScopedDevice scope_device(config_.device_id);
   NVE_CHECK_(num_keys >= 0, "Invalid num_keys");
   NVE_CHECK_(keys != nullptr, "Invalid keys buffer");
   NVE_CHECK_(values != nullptr, "Invalid values buffer");
   NVE_CHECK_(value_size == config_.embedding_width_in_bytes, "Invalid value size");
+  NVE_CHECK_(table_id < get_num_tables(), "Invalid table_id");
 
   auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
   NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");

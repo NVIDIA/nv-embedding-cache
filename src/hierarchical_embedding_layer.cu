@@ -62,7 +62,7 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
   allocator_ = allocator ? allocator : GetDefaultAllocator();
   NVE_CHECK_(allocator_ != nullptr, "Failed to get default allocator");
   gpu_device_ = -1;
-  for (size_t i=0 ; i < tables_.size() ; i++) {
+  for (size_t i=0; i < tables_.size(); i++) {
     auto table = tables_.at(i);
     NVE_CHECK_(table != nullptr, "Invalid table");
     auto device = table->get_device_id();
@@ -98,7 +98,7 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
     }
     heuristic = std::make_shared<DefaultInsertHeuristic>(thresholds);
   }
-  for (size_t i=0 ; i < tables_.size() ; i++) {
+  for (size_t i=0; i < tables_.size(); i++) {
     auto table = tables_.at(i);
     bool gpu_table = (table->get_device_id() >= 0);
     KeyType invalid_key = static_cast<KeyType>(table->get_invalid_key());
@@ -132,14 +132,17 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   if (gpu_device_ >= 0) {
     scope_device = std::make_shared<ScopedDevice>(gpu_device_);
   }
+  auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
+  NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
+  const cudaStream_t lookup_stream = layer_ctx->get_lookup_stream();
+  if (pool_params) {
+    NVE_THROW_NOT_IMPLEMENTED_();
+  }
   auto constexpr hitmask_elem_bits = sizeof(max_bitmask_repr_t) * 8;
   const auto hitmask_elements = (num_keys + hitmask_elem_bits - 1) / hitmask_elem_bits;
   const auto hitmask_buffer_size = hitmask_elements * sizeof(max_bitmask_repr_t);
   const auto output_buffer_size = num_keys * output_stride;
   const auto key_buffer_size = sizeof(KeyType) * num_keys;
-  auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
-  NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
-  const cudaStream_t lookup_stream = layer_ctx->get_lookup_stream();
 
   // Prepare buffer wrappers
   auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
@@ -169,7 +172,7 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   std::vector<int64_t> table_hits(num_tables);
   std::vector<float> table_hitrates(num_tables);
 
-  for (size_t i=0 ; i < num_tables ; i++) {
+  for (size_t i=0; i < num_tables; i++) {
     auto table = tables_.at(i);
     auto table_ctx = layer_ctx->table_contexts_.at(i);
     NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
@@ -177,7 +180,7 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
     // Call table->find and collect counters
     table->reset_lookup_counter(table_ctx);
     std::shared_ptr<BufferWrapper<int64_t>> value_sizes{nullptr}; // for now variable value size is not supported at the layer level
-    table->find_bw(table_ctx, num_keys, keys_bw, hitmask_bw, output_stride, output_bw, std::move(value_sizes));
+    table->find(table_ctx, num_keys, keys_bw, hitmask_bw, output_stride, output_bw, std::move(value_sizes));
     table->get_lookup_counter(table_ctx, table_hits.data() + i);
   }
 
@@ -201,7 +204,7 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   }
   // Update hitrates
   if (hitrates) {
-    for (size_t i=0 ; i<num_tables ; i++) {
+    for (size_t i=0; i<num_tables; i++) {
       hitrates[i] = static_cast<float>(table_hits[i]) / static_cast<float>(num_keys);
     }
   }
@@ -287,9 +290,6 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
     }
   }
 
-  if (pool_params) {
-    NVE_THROW_NOT_IMPLEMENTED_();
-  }
 }
 
 template <typename KeyType>
@@ -298,45 +298,55 @@ void HierarchicalEmbeddingLayer<KeyType>::insert(context_ptr_t& ctx, const int64
                                                  const int64_t value_size, const void* values,
                                                  const int64_t table_id) {
   NVE_NVTX_SCOPED_FUNCTION_COL2_();
-  if (table_id < 0 || table_id >= static_cast<int64_t>(tables_.size())) {
-    NVE_LOG_INFO_("Insert called with invalid table_id - ignored call");
+  if (num_keys < 1) {
     return;
   }
-  auto& table = tables_.at(table_id);
+  NVE_CHECK_(keys != nullptr, "Invalid Keys buffer");
+  NVE_CHECK_(table_id < get_num_tables(), "Invalid table_id");
+  auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
+  NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
+
+  const auto values_buffer_size = num_keys * value_stride;
+  const auto key_buffer_size = sizeof(KeyType) * num_keys;
+  auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
+  auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx, "values", values, values_buffer_size);
+
   std::shared_ptr<ScopedDevice> scope_device = nullptr;
-  const auto device = table->get_device_id();
   if (gpu_device_ >= 0) { // Need scoped device for potential copies in buffer wrappers
     scope_device = std::make_shared<ScopedDevice>(gpu_device_);
   }
 
-  auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
-  NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
-  auto table_ctx = layer_ctx->table_contexts_.at(table_id);
-  NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
-  const auto values_buffer_size = num_keys * value_stride;
-  const auto key_buffer_size = sizeof(KeyType) * num_keys;
-
-  auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, key_buffer_size);
-  auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx, "values", values, values_buffer_size);
-  table->insert_bw(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
+  const size_t t_start = table_id < 0 ? 0 : static_cast<size_t>(table_id);
+  const size_t t_end = table_id < 0 ? tables_.size() : static_cast<size_t>(table_id + 1);
+  for (size_t i = t_start; i < t_end; i++) {
+    auto table = tables_.at(i);
+    NVE_CHECK_(table != nullptr);
+    auto table_ctx = layer_ctx->table_contexts_.at(i);
+    NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
+    table->insert(table_ctx, num_keys, keys_bw, value_stride, value_size, values_bw);
+  }
 }
 
 template <typename KeyType>
 void HierarchicalEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64_t num_keys,
                                                  const void* keys, const int64_t value_stride,
-                                                 const int64_t value_size, const void* values) {
+                                                 const int64_t value_size, const void* values,
+                                                 const int64_t table_id) {
   NVE_NVTX_SCOPED_FUNCTION_COL3_();
   auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
   NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
   const auto values_buffer_size = num_keys * value_stride;
   const auto key_buffer_size = sizeof(KeyType) * num_keys;
+  NVE_CHECK_(table_id < get_num_tables(), "Invalid table_id");
 
   std::shared_ptr<ScopedDevice> scope_device = nullptr;
   if (gpu_device_ >= 0) {
     scope_device = std::make_shared<ScopedDevice>(gpu_device_);
   }
 
-  for (size_t i=0 ; i < tables_.size() ; i++) {
+  const size_t t_start = table_id < 0 ? 0 : static_cast<size_t>(table_id);
+  const size_t t_end = table_id < 0 ? tables_.size() : static_cast<size_t>(table_id + 1);
+  for (size_t i = t_start; i < t_end; i++) {
     auto table = tables_.at(i);
     auto table_ctx = layer_ctx->table_contexts_.at(i);
     NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
@@ -346,7 +356,7 @@ void HierarchicalEmbeddingLayer<KeyType>::update(context_ptr_t& ctx, const int64
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
-    table->update_bw(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
+    table->update(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
@@ -357,19 +367,23 @@ template <typename KeyType>
 void HierarchicalEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const int64_t num_keys,
                                                      const void* keys, const int64_t value_stride,
                                                      const int64_t value_size, const void* values,
-                                                     DataType_t value_type) {
+                                                     DataType_t value_type, const int64_t table_id) {
   NVE_NVTX_SCOPED_FUNCTION_COL4_();
   auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
   NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
   const cudaStream_t modify_stream = layer_ctx->get_modify_stream();
   const auto values_buffer_size = num_keys * value_stride;
   const auto key_buffer_size = sizeof(KeyType) * num_keys;
+  NVE_CHECK_(table_id < get_num_tables(), "Invalid table_id");
 
   std::shared_ptr<ScopedDevice> scope_device = nullptr;
   if (gpu_device_ >= 0) {
     scope_device = std::make_shared<ScopedDevice>(gpu_device_);
   }
-  for (size_t i=0 ; i < tables_.size() ; i++) {
+
+  const size_t t_start = table_id < 0 ? 0 : static_cast<size_t>(table_id);
+  const size_t t_end = table_id < 0 ? tables_.size() : static_cast<size_t>(table_id + 1);
+  for (size_t i = t_start; i < t_end; i++) {
     auto table = tables_.at(i);
     auto table_ctx = layer_ctx->table_contexts_.at(i);
     NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
@@ -379,7 +393,7 @@ void HierarchicalEmbeddingLayer<KeyType>::accumulate(context_ptr_t& ctx, const i
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->lock_modify();
     }
-    table->update_accumulate_bw(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw), value_type);
+    table->update_accumulate(table_ctx, num_keys, std::move(keys_bw), value_stride, value_size, std::move(values_bw), value_type);
     if (!auto_insert_handlers_.empty()) {
       auto_insert_handlers_.at(i)->unlock_modify();
     }
@@ -391,7 +405,7 @@ void HierarchicalEmbeddingLayer<KeyType>::clear(context_ptr_t& ctx) {
   NVE_NVTX_SCOPED_FUNCTION_COL5_();
   auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
   NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
-  for (size_t i=0 ; i < tables_.size() ; i++) {
+  for (size_t i=0; i < tables_.size(); i++) {
     auto table = tables_.at(i);
     auto table_ctx = layer_ctx->table_contexts_.at(i);
     NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
@@ -414,33 +428,38 @@ void HierarchicalEmbeddingLayer<KeyType>::erase(context_ptr_t& ctx, const int64_
     return;
   }
   NVE_CHECK_(keys != nullptr, "Invalid Keys buffer");
-  if (table_id < 0 || table_id >= static_cast<int64_t>(tables_.size())) {
-    NVE_LOG_INFO_("Erase called with invalid table_id - ignored call");
-    return;
-  }
-  auto& table = tables_.at(table_id);
+  NVE_CHECK_(table_id < get_num_tables(), "Invalid table_id");
+  auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
+  NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
+  const auto keys_buffer_size = sizeof(KeyType) * num_keys;
+  auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, keys_buffer_size);
+
   std::shared_ptr<ScopedDevice> scope_device = nullptr;
-  const auto device = table->get_device_id();
   if (gpu_device_ >= 0) { // Need scoped device for potential copies in buffer wrappers
     scope_device = std::make_shared<ScopedDevice>(gpu_device_);
   }
 
-  auto layer_ctx = std::dynamic_pointer_cast<LayerExecutionContext>(ctx);
-  NVE_CHECK_(layer_ctx != nullptr, "Invalid layer context");
-  auto table_ctx = layer_ctx->table_contexts_.at(table_id);
-  NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
-  const cudaStream_t modify_stream = layer_ctx->get_modify_stream();
+  const size_t t_start = table_id < 0 ? 0 : static_cast<size_t>(table_id);
+  const size_t t_end = table_id < 0 ? tables_.size() : static_cast<size_t>(table_id + 1);
+  for (size_t i = t_start; i < t_end; i++) {
+    auto table = tables_.at(i);
+    NVE_CHECK_(table != nullptr);
+    auto table_ctx = layer_ctx->table_contexts_.at(i);
+    NVE_CHECK_(table_ctx != nullptr, "Invalid table context");
 
-  const auto keys_buffer_size = sizeof(KeyType) * num_keys;
-  auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys, keys_buffer_size);
+    if (!auto_insert_handlers_.empty()) {
+      auto_insert_handlers_.at(i)->lock_modify();
+    }
+    table->erase(table_ctx, num_keys, keys_bw);
+    if (!auto_insert_handlers_.empty()) {
+      auto_insert_handlers_.at(i)->unlock_modify();
+    }
+  }
+}
 
-  if (!auto_insert_handlers_.empty()) {
-    auto_insert_handlers_.at(table_id)->lock_modify();
-  }
-  table->erase_bw(table_ctx, num_keys, std::move(keys_bw));
-  if (!auto_insert_handlers_.empty()) {
-    auto_insert_handlers_.at(table_id)->unlock_modify();
-  }
+template <typename KeyType>
+int64_t HierarchicalEmbeddingLayer<KeyType>::get_num_tables() const {
+  return static_cast<int64_t>(tables_.size());
 }
 
 // Instantiate versions of HierarchicalEmbeddingLayer (todo: add more)

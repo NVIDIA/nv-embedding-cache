@@ -174,7 +174,7 @@ void ParameterServerTable::insert_keys(size_t num_keys, uintptr_t keys, uintptr_
     const auto values_buffer_size = num_keys * row_bytes_;
     auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "keys", reinterpret_cast<const void*>(keys), keys_buffer_size);
     auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "values", reinterpret_cast<const void*>(values), values_buffer_size);
-    insert_bw(  ctx_,
+    insert(  ctx_,
                 static_cast<int64_t>(num_keys),
                 std::move(keys_bw),
                 static_cast<int64_t>(row_bytes_),
@@ -207,7 +207,7 @@ void ParameterServerTable::erase_keys(size_t num_keys, uintptr_t keys) {
     NVE_CHECK_(keys != 0, "Invalid Keys tensor");
     const auto keys_buffer_size = num_keys * sizeof(KeyType);
     auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "keys", reinterpret_cast<const void*>(keys), keys_buffer_size);
-    erase_bw(ctx_, static_cast<int64_t>(num_keys), std::move(keys_bw));
+    erase(ctx_, static_cast<int64_t>(num_keys), std::move(keys_bw));
 }
 
 void ParameterServerTable::clear_keys() {

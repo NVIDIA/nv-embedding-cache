@@ -16,6 +16,7 @@
  */
 
 #include "nve_c_api_internal.hpp"
+#include <buffer_wrapper.hpp>
 #include <json_support.hpp>
 
 /* ============================================================================
@@ -92,7 +93,29 @@ nve_status_t nve_table_find(
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and ctx must not be NULL");
   }
   NVE_C_TRY
-    table->ptr->find(ctx->ptr, n, keys, hit_mask, value_stride, values, value_sizes);
+    const auto key_size = table->ptr->get_key_size();
+    const auto keys_buffer_size = static_cast<size_t>(n * key_size);
+    constexpr auto hitmask_elem_bits = sizeof(nve::max_bitmask_repr_t) * 8;
+    const auto hitmask_elements = (static_cast<size_t>(n) + hitmask_elem_bits - 1) / hitmask_elem_bits;
+    const auto hitmask_buffer_size = static_cast<size_t>(hitmask_elements * sizeof(nve::max_bitmask_repr_t));
+    const auto values_buffer_size = static_cast<size_t>(n * value_stride);
+    const auto value_sizes_buffer_size = static_cast<size_t>(n) * sizeof(int64_t);
+
+    auto keys_bw = keys
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "keys", keys, keys_buffer_size)
+      : nullptr;
+    auto hit_mask_bw = hit_mask
+      ? std::make_shared<nve::BufferWrapper<nve::max_bitmask_repr_t>>(ctx->ptr, "hit_mask", hit_mask, hitmask_buffer_size)
+      : nullptr;
+    auto values_bw = values
+      ? std::make_shared<nve::BufferWrapper<void>>(ctx->ptr, "values", values, values_buffer_size)
+      : nullptr;
+    auto value_sizes_bw = value_sizes
+      ? std::make_shared<nve::BufferWrapper<int64_t>>(ctx->ptr, "value_sizes", value_sizes, value_sizes_buffer_size)
+      : nullptr;
+
+    table->ptr->find(ctx->ptr, n, std::move(keys_bw), std::move(hit_mask_bw),
+                        value_stride, std::move(values_bw), std::move(value_sizes_bw));
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -104,7 +127,18 @@ nve_status_t nve_table_insert(
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and ctx must not be NULL");
   }
   NVE_C_TRY
-    table->ptr->insert(ctx->ptr, n, keys, value_stride, value_size, values);
+    const auto key_size = table->ptr->get_key_size();
+    const auto keys_buffer_size = static_cast<size_t>(n * key_size);
+    const auto values_buffer_size = static_cast<size_t>(n * value_stride);
+
+    auto keys_bw = keys
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "keys", keys, keys_buffer_size)
+      : nullptr;
+    auto values_bw = values
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "values", values, values_buffer_size)
+      : nullptr;
+
+    table->ptr->insert(ctx->ptr, n, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -116,7 +150,18 @@ nve_status_t nve_table_update(
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and ctx must not be NULL");
   }
   NVE_C_TRY
-    table->ptr->update(ctx->ptr, n, keys, value_stride, value_size, values);
+    const auto key_size = table->ptr->get_key_size();
+    const auto keys_buffer_size = static_cast<size_t>(n * key_size);
+    const auto values_buffer_size = static_cast<size_t>(n * value_stride);
+
+    auto keys_bw = keys
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "keys", keys, keys_buffer_size)
+      : nullptr;
+    auto values_bw = values
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "values", values, values_buffer_size)
+      : nullptr;
+
+    table->ptr->update(ctx->ptr, n, std::move(keys_bw), value_stride, value_size, std::move(values_bw));
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -129,8 +174,19 @@ nve_status_t nve_table_update_accumulate(
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and ctx must not be NULL");
   }
   NVE_C_TRY
-    table->ptr->update_accumulate(ctx->ptr, n, keys, update_stride, update_size,
-                                  updates, convert_dtype(update_dtype));
+    const auto key_size = table->ptr->get_key_size();
+    const auto keys_buffer_size = static_cast<size_t>(n * key_size);
+    const auto updates_buffer_size = static_cast<size_t>(n * update_stride);
+
+    auto keys_bw = keys
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "keys", keys, keys_buffer_size)
+      : nullptr;
+    auto updates_bw = updates
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "updates", updates, updates_buffer_size)
+      : nullptr;
+
+    table->ptr->update_accumulate(ctx->ptr, n, std::move(keys_bw), update_stride, update_size,
+                                     std::move(updates_bw), convert_dtype(update_dtype));
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -151,7 +207,14 @@ nve_status_t nve_table_erase(
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and ctx must not be NULL");
   }
   NVE_C_TRY
-    table->ptr->erase(ctx->ptr, n, keys);
+    const auto key_size = table->ptr->get_key_size();
+    const auto keys_buffer_size = static_cast<size_t>(n * key_size);
+
+    auto keys_bw = keys
+      ? std::make_shared<nve::BufferWrapper<const void>>(ctx->ptr, "keys", keys, keys_buffer_size)
+      : nullptr;
+
+    table->ptr->erase(ctx->ptr, n, std::move(keys_bw));
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -174,7 +237,7 @@ nve_status_t nve_table_create_execution_context(
   NVE_C_CATCH
 }
 
-nve_status_t nve_table_get_device_id(nve_table_t table, int32_t* out) {
+nve_status_t nve_table_get_device_id(const nve_table_t table, int32_t* out) {
   if (!table || !table->ptr || !out) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and out must not be NULL");
   }
@@ -184,12 +247,22 @@ nve_status_t nve_table_get_device_id(nve_table_t table, int32_t* out) {
   NVE_C_CATCH
 }
 
-nve_status_t nve_table_get_max_row_size(nve_table_t table, int64_t* out) {
+nve_status_t nve_table_get_max_row_size(const nve_table_t table, int64_t* out) {
   if (!table || !table->ptr || !out) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and out must not be NULL");
   }
   NVE_C_TRY
     *out = table->ptr->get_max_row_size();
+    return NVE_SUCCESS;
+  NVE_C_CATCH
+}
+
+nve_status_t nve_table_get_key_size(const nve_table_t table, int64_t* out) {
+  if (!table || !table->ptr || !out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table and out must not be NULL");
+  }
+  NVE_C_TRY
+    *out = table->ptr->get_key_size();
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -204,7 +277,7 @@ nve_status_t nve_table_reset_lookup_counter(nve_table_t table, nve_context_t ctx
   NVE_C_CATCH
 }
 
-nve_status_t nve_table_get_lookup_counter(nve_table_t table, nve_context_t ctx, int64_t* counter) {
+nve_status_t nve_table_get_lookup_counter(const nve_table_t table, nve_context_t ctx, int64_t* counter) {
   if (!table || !table->ptr || !ctx || !ctx->ptr || !counter) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Invalid arguments");
   }
@@ -316,12 +389,12 @@ nve_status_t nve_free_host_database(
 }
 
 nve_status_t nve_host_table_size(
-    nve_table_t table, nve_context_t ctx, int exact, int64_t* out) {
+    const nve_table_t table, nve_context_t ctx, int exact, int64_t* out) {
   if (!table || !table->ptr || !ctx || !ctx->ptr || !out) {
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Invalid arguments");
   }
   NVE_C_TRY
-    auto* host_table = dynamic_cast<nve::HostTableLike*>(table->ptr.get());
+    const auto* host_table = dynamic_cast<const nve::HostTableLike*>(table->ptr.get());
     if (!host_table) {
       return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Table is not a host table");
     }

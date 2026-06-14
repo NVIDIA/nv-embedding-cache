@@ -17,6 +17,7 @@
 
 #include <stl_map_backed_table.hpp>
 #include <atomic>
+#include <buffer_wrapper.hpp>
 #include <thread_pool.hpp>
 #include <execution_context.hpp>
 
@@ -54,10 +55,14 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
 template <typename ConfigType, typename MaskType, typename KeyType, typename MetaType,
           typename PartitionerType>
 void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>::erase(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw) {
   if (n <= 0) return;
   const auto& __restrict config{this->config_};
 
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                       ctx->get_modify_stream())
+              : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
 
   std::vector<Partition>& __restrict parts{parts_};
@@ -88,12 +93,28 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
 template <typename ConfigType, typename MaskType, typename KeyType, typename MetaType,
           typename PartitionerType>
 void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>::find(
-    context_ptr_t& ctx, int64_t n, const void* const keys_vptr,
-    max_bitmask_repr_t* const hit_mask, const int64_t value_stride, void* const values_vptr,
-    int64_t* const value_sizes) const {
+    context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys_bw,
+    buffer_ptr<max_bitmask_repr_t> hit_mask_bw, const int64_t value_stride,
+    buffer_ptr<void> values_bw, buffer_ptr<int64_t> value_sizes_bw) const {
   if (n <= 0) return;
   const auto& __restrict config{this->config_};
 
+  auto lookup_stream = ctx->get_lookup_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, lookup_stream)
+              : nullptr};
+  max_bitmask_repr_t* const hit_mask{
+      hit_mask_bw ? hit_mask_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/,
+                                               lookup_stream)
+                  : nullptr};
+  void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, false /*copy_content*/,
+                                           lookup_stream)
+                : nullptr};
+  int64_t* const value_sizes{
+      value_sizes_bw ? value_sizes_bw->access_buffer(cudaMemoryTypeUnregistered,
+                                                     false /*copy_content*/, lookup_stream)
+                     : nullptr};
   const key_type* const keys{reinterpret_cast<const key_type*>(keys_vptr)};
   mask_repr_type* const hm{reinterpret_cast<mask_repr_type*>(hit_mask)};
   char* const values{reinterpret_cast<char*>(values_vptr)};
@@ -127,7 +148,7 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
       }
     }
   }
-  auto counter = this->get_internal_counter(ctx);
+  auto counter = this->lookup_counter_storage(ctx);
   NVE_CHECK_(counter != nullptr, "Invalid key counter");
   *counter += n;
 }
@@ -135,11 +156,18 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
 template <typename ConfigType, typename MaskType, typename KeyType, typename MetaType,
           typename PartitionerType>
 void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>::insert(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr, const int64_t value_stride,
-    const int64_t value_size, const void* const values_vptr) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
+    const int64_t value_stride, const int64_t value_size, buffer_ptr<const void> values_bw) {
   if (n <= 0) return;
   const auto& __restrict config{this->config_};
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const char* const __restrict values{reinterpret_cast<const char*>(values_vptr)};
 
@@ -291,11 +319,18 @@ int64_t STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerTy
 template <typename ConfigType, typename MaskType, typename KeyType, typename MetaType,
           typename PartitionerType>
 void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>::update(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr, const int64_t value_stride,
-    const int64_t value_size, const void* const values_vptr) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
+    const int64_t value_stride, const int64_t value_size, buffer_ptr<const void> values_bw) {
   if (n <= 0) return;
   const auto& __restrict config{this->config_};
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const values_vptr{
+      values_bw ? values_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const char* const __restrict values{reinterpret_cast<const char*>(values_vptr)};
 
@@ -330,11 +365,19 @@ void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>
 template <typename ConfigType, typename MaskType, typename KeyType, typename MetaType,
           typename PartitionerType>
 void STLContainerTable<ConfigType, MaskType, KeyType, MetaType, PartitionerType>::update_accumulate(
-    context_ptr_t& ctx, const int64_t n, const void* const keys_vptr, const int64_t update_stride,
-    const int64_t update_size, const void* const updates_vptr, const DataType_t update_dtype) {
+    context_ptr_t& ctx, const int64_t n, buffer_ptr<const void> keys_bw,
+    const int64_t update_stride, const int64_t update_size, buffer_ptr<const void> updates_bw,
+    const DataType_t update_dtype) {
   if (n <= 0) return;
   const auto& __restrict config{this->config_};
 
+  auto modify_stream = ctx->get_modify_stream();
+  const void* const keys_vptr{
+      keys_bw ? keys_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+              : nullptr};
+  const void* const updates_vptr{
+      updates_bw ? updates_bw->access_buffer(cudaMemoryTypeUnregistered, true /*copy_content*/, modify_stream)
+                 : nullptr};
   const key_type* const __restrict keys{reinterpret_cast<const key_type*>(keys_vptr)};
   const char* const __restrict updates{reinterpret_cast<const char*>(updates_vptr)};
 

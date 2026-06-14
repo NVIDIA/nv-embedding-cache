@@ -29,7 +29,7 @@
 #include "cuda_ops/find_and_combine_kernel.cuh"
 #include "cuda_ops/gradient_calculator.cuh"
 #include "cuda_ops/gather_keys_data_ptrs.cuh"
-#include "../common/buffer.h"
+#include "../common/test_buffer.h"
 #include <default_allocator.hpp>
 
 struct Near {
@@ -101,13 +101,13 @@ class EmbeddingCacheRefTest : public ::testing::Test {
       return m_table->ph;
     }
 
-    void GetCacheContent(ElemType* d_cache_content, std::shared_ptr<Buffer<IndexType>> keys_in_c, size_t& num_keys) 
+    void GetCacheContent(ElemType* d_cache_content, std::shared_ptr<TestBuffer<IndexType>> keys_in_c, size_t& num_keys) 
     {
         
         m_cache_ptr->get_keys_stored_in_cache(m_handle_lookup, keys_in_c->ph, num_keys);
         keys_in_c->HtoD(m_stream);
         int64_t num_hitmask_elems = (num_keys + 31) / 32;
-        auto hitmask = std::make_shared<Buffer<uint32_t>>(num_hitmask_elems * sizeof(uint32_t));
+        auto hitmask = std::make_shared<TestBuffer<uint32_t>>(num_hitmask_elems * sizeof(uint32_t));
         CHECK_CUDA_ERROR(cudaMemset(hitmask->pd, 0, num_hitmask_elems * sizeof(uint32_t)));
 
         NVE_DEBUG_PRINTF_("launch lookup with hitmask kernel\n");
@@ -118,8 +118,8 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     std::map<IndexType, std::vector<ElemType>> GetCacheContent()
     {
         auto num_vec_in_c = m_cache_ptr->get_max_num_embedding_vectors_in_cache();
-        auto key_in_c = std::make_shared<Buffer<IndexType>>(sizeof(IndexType)*num_vec_in_c);
-        auto cache_content = std::make_shared<Buffer<ElemType>>(sizeof(ElemType)*this->m_num_elements*num_vec_in_c);
+        auto key_in_c = std::make_shared<TestBuffer<IndexType>>(sizeof(IndexType)*num_vec_in_c);
+        auto cache_content = std::make_shared<TestBuffer<ElemType>>(sizeof(ElemType)*this->m_num_elements*num_vec_in_c);
         size_t num_keys_in_c = 0;
         this->GetCacheContent(cache_content->pd, key_in_c, num_keys_in_c);
         cache_content->DtoH(this->m_stream);
@@ -134,7 +134,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
         return mock_cache;
     }
 
-    std::shared_ptr<Buffer<IndexType>> m_keys = nullptr;
+    std::shared_ptr<TestBuffer<IndexType>> m_keys = nullptr;
 
   private:
     virtual void ComputeRefResults(const ElemType* /*table*/,
@@ -173,7 +173,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     }
 
     void AllocateTable() {
-        m_table = std::make_shared<Buffer<ElemType>>(this->m_num_rows * this->m_num_elements * sizeof(ElemType));
+        m_table = std::make_shared<TestBuffer<ElemType>>(this->m_num_rows * this->m_num_elements * sizeof(ElemType));
         std::mt19937 gen(0X814753);
         // init to [a / 2^b] when a and b are in specific range,
         // to minimize arithmetic error in half when doing weigthed math
@@ -197,7 +197,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     }
 
     virtual void AllocateKeys() {
-        m_keys = std::make_shared<Buffer<IndexType>>(m_num_keys * sizeof(IndexType));
+        m_keys = std::make_shared<TestBuffer<IndexType>>(m_num_keys * sizeof(IndexType));
         const float alpha = 1.05f;
 
         auto sg = getSampleGenerator<IndexType>(alpha, static_cast<IndexType>(this->m_num_rows), this->m_hotness, 283982);
@@ -257,7 +257,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
 
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_table = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_table = nullptr;
 
     nve::DefaultAllocator m_cache_allocator;
     nve::Logger m_cache_logger;
@@ -284,7 +284,7 @@ class EmbeddingCacheLookupRefTest : public EmbeddingCacheRefTest<T> {
             this->m_num_keys = this->m_batch * this->m_hotness;
         } else {
             // allocate and init offsets
-            m_offsets = std::make_shared<Buffer<IndexType>>((this->m_batch + 1) * sizeof(IndexType));
+            m_offsets = std::make_shared<TestBuffer<IndexType>>((this->m_batch + 1) * sizeof(IndexType));
             std::mt19937 gen(0X475381);
             std::uniform_int_distribution<uint32_t> dist_offset(1, 31);
 
@@ -300,7 +300,7 @@ class EmbeddingCacheLookupRefTest : public EmbeddingCacheRefTest<T> {
 
         if (T::IS_WEIGHTED_FLAG) {
             // allocate and init weights
-            m_weights = std::make_shared<Buffer<ElemType>>(this->m_num_keys * sizeof(ElemType));
+            m_weights = std::make_shared<TestBuffer<ElemType>>(this->m_num_keys * sizeof(ElemType));
             std::mt19937 genr(0X753812);
             std::uniform_real_distribution<float> dist_float(0.1f, 1.0f);
             std::bernoulli_distribution distrib(0.5);
@@ -313,7 +313,7 @@ class EmbeddingCacheLookupRefTest : public EmbeddingCacheRefTest<T> {
     }
 
     void AllocateKeys() {
-        this->m_keys = std::make_shared<Buffer<IndexType>>(this->m_num_keys * sizeof(IndexType));
+        this->m_keys = std::make_shared<TestBuffer<IndexType>>(this->m_num_keys * sizeof(IndexType));
         const float alpha = 1.05f;
 
         const size_t seed = 283982;
@@ -376,7 +376,7 @@ class EmbeddingCacheLookupRefTest : public EmbeddingCacheRefTest<T> {
     void LaunchKernel(const ElemType* table, 
                       const IndexType* indices,
                       CacheDataType& cache_data) {
-        m_result = std::make_shared<Buffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
+        m_result = std::make_shared<TestBuffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
         NVE_DEBUG_PRINTF_("launch lookup kernel\n");
 
         int8_t** tables_d;
@@ -410,10 +410,10 @@ class EmbeddingCacheLookupRefTest : public EmbeddingCacheRefTest<T> {
         }
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_result = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_result = nullptr;
     std::vector<ElemType> m_ref_result;
-    std::shared_ptr<Buffer<ElemType>> m_weights = nullptr;
-    std::shared_ptr<Buffer<IndexType>> m_offsets = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_weights = nullptr;
+    std::shared_ptr<TestBuffer<IndexType>> m_offsets = nullptr;
 };
 
 TYPED_TEST_SUITE_P(EmbeddingCacheLookupRefTest);
@@ -485,8 +485,8 @@ class EmbeddingCacheLookupHitMaskRefTest : public EmbeddingCacheRefTest<T> {
         int64_t num_indices = static_cast<int64_t>(this->m_batch) * static_cast<int64_t>(this->m_hotness);
         int64_t num_hitmask_elems = (num_indices + 31) / 32;
 
-        m_result = std::make_shared<Buffer<ElemType>>(num_indices *this->m_num_elements * sizeof(ElemType));
-        m_hitmask = std::make_shared<Buffer<uint32_t>>(num_hitmask_elems * sizeof(uint32_t));
+        m_result = std::make_shared<TestBuffer<ElemType>>(num_indices *this->m_num_elements * sizeof(ElemType));
+        m_hitmask = std::make_shared<TestBuffer<uint32_t>>(num_hitmask_elems * sizeof(uint32_t));
 
         std::memset(m_hitmask->ph, 0, num_hitmask_elems * sizeof(uint32_t));
         m_hitmask->HtoD(this->m_stream);
@@ -528,8 +528,8 @@ class EmbeddingCacheLookupHitMaskRefTest : public EmbeddingCacheRefTest<T> {
         }
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_result = nullptr;
-    std::shared_ptr<Buffer<uint32_t>> m_hitmask = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_result = nullptr;
+    std::shared_ptr<TestBuffer<uint32_t>> m_hitmask = nullptr;
     std::vector<ElemType> m_ref_result;
     std::vector<uint32_t> m_ref_hitmask;
 };
@@ -567,8 +567,8 @@ class ScatterRefTest : public EmbeddingCacheRefTest<T> {
         // reference - just do gather of all indices
         int64_t num_indices = static_cast<int64_t>(this->m_batch) * static_cast<int64_t>(this->m_hotness);
         int64_t num_hitmask_elems = (num_indices + 63) / 64;
-        m_hitmask = std::make_shared<Buffer<uint64_t>>(num_hitmask_elems * sizeof(uint64_t));
-        m_input = std::make_shared<Buffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
+        m_hitmask = std::make_shared<TestBuffer<uint64_t>>(num_hitmask_elems * sizeof(uint64_t));
+        m_input = std::make_shared<TestBuffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
 
         uint64_t mask = 0;
 
@@ -603,7 +603,7 @@ class ScatterRefTest : public EmbeddingCacheRefTest<T> {
 
         m_hitmask->HtoD(this->m_stream);
         m_input->HtoD(this->m_stream);
-        m_result = std::make_shared<Buffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
+        m_result = std::make_shared<TestBuffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
         uint64_t num_indices = static_cast<uint64_t>(this->m_batch) * static_cast<uint64_t>(this->m_hotness);
         for (uint64_t i = 0; i < num_indices; i++) {
             for (uint32_t el = 0; el < this->m_num_elements; el++) {
@@ -648,9 +648,9 @@ class ScatterRefTest : public EmbeddingCacheRefTest<T> {
         }
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_result = nullptr;
-    std::shared_ptr<Buffer<ElemType>> m_input = nullptr;
-    std::shared_ptr<Buffer<uint64_t>> m_hitmask = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_result = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_input = nullptr;
+    std::shared_ptr<TestBuffer<uint64_t>> m_hitmask = nullptr;
     std::vector<ElemType> m_ref_result;
 };
 
@@ -686,7 +686,7 @@ class UpdateRefTest : public EmbeddingCacheRefTest<T> {
 
         // reference - just do gather of all indices
         int64_t num_indices = static_cast<int64_t>(this->m_batch) * static_cast<int64_t>(this->m_hotness);
-        m_input = std::make_shared<Buffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
+        m_input = std::make_shared<TestBuffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
 
         m_ref_result.resize(this->m_num_elements * this->m_num_rows);
         memcpy(&m_ref_result[0], table, this->m_num_elements * this->m_num_rows * sizeof(ElemType));
@@ -725,7 +725,7 @@ class UpdateRefTest : public EmbeddingCacheRefTest<T> {
         EXPECT_TRUE(std::equal(m_ref_result.begin(), m_ref_result.end(), curr_table));
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_input = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_input = nullptr;
     std::vector<ElemType> m_ref_result;
 };
 
@@ -760,7 +760,7 @@ class UpdateAccumulateRefTest : public EmbeddingCacheRefTest<T> {
 
         // reference - just do gather of all indices
         int64_t num_indices = static_cast<int64_t>(this->m_batch) * static_cast<int64_t>(this->m_hotness);
-        m_input = std::make_shared<Buffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
+        m_input = std::make_shared<TestBuffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
 
         m_ref_result.resize(this->m_num_elements * this->m_num_rows);
         memcpy(&m_ref_result[0], table, this->m_num_elements * this->m_num_rows * sizeof(ElemType));
@@ -803,7 +803,7 @@ class UpdateAccumulateRefTest : public EmbeddingCacheRefTest<T> {
         EXPECT_TRUE(std::equal(m_ref_result.begin(), m_ref_result.end(), curr_table, Near(tolerance)));
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_input = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_input = nullptr;
     std::vector<ElemType> m_ref_result;
 };
 
@@ -847,14 +847,14 @@ class EmbeddingCacheFusedUpdateAccumlateTest : public EmbeddingCacheRefTest<T> {
         m_ref_cache = this->GetCacheContent();
         
         // second dedup keys
-        m_unique_keys = std::make_shared<Buffer<IndexType>>(num_keys * sizeof(IndexType));
+        m_unique_keys = std::make_shared<TestBuffer<IndexType>>(num_keys * sizeof(IndexType));
         // allocate 1 extra element for counts, because we call cub exclusive prefix sum kernel
         // to compute n + 1 outputs, and it reads the last input element even though it is not used
         // in the output
-        auto counts_out = std::make_shared<Buffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
+        auto counts_out = std::make_shared<TestBuffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
         
-        auto inverse_buffer = std::make_shared<Buffer<IndexType>>(num_keys * sizeof(IndexType));
-        auto offsets = std::make_shared<Buffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
+        auto inverse_buffer = std::make_shared<TestBuffer<IndexType>>(num_keys * sizeof(IndexType));
+        auto offsets = std::make_shared<TestBuffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
         
         std::shared_ptr<Deduper<IndexType, -1>> deduper_ = std::make_shared<Deduper<IndexType, -1>>();
         size_t tmp_mem_size_device, tmp_mem_size_host;
@@ -878,7 +878,7 @@ class EmbeddingCacheFusedUpdateAccumlateTest : public EmbeddingCacheRefTest<T> {
 
         m_unique_keys->DtoH(this->m_stream);
         CHECK_CUDA_ERROR(cudaDeviceSynchronize());
-        m_input = std::make_shared<Buffer<ElemType>>(*m_h_num_runs_out * this->m_num_elements * sizeof(ElemType));
+        m_input = std::make_shared<TestBuffer<ElemType>>(*m_h_num_runs_out * this->m_num_elements * sizeof(ElemType));
 
         m_ref_result.resize(this->m_num_elements * this->m_num_rows);
         memcpy(&m_ref_result[0], table, this->m_num_elements * this->m_num_rows * sizeof(ElemType));
@@ -951,9 +951,9 @@ class EmbeddingCacheFusedUpdateAccumlateTest : public EmbeddingCacheRefTest<T> {
 
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_input = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_input = nullptr;
     std::vector<ElemType> m_ref_result;
-    std::shared_ptr<Buffer<IndexType>> m_unique_keys = nullptr;
+    std::shared_ptr<TestBuffer<IndexType>> m_unique_keys = nullptr;
     IndexType* m_h_num_runs_out = nullptr;
     std::map<IndexType, std::vector<ElemType>> m_ref_cache;
 };
@@ -1004,7 +1004,7 @@ class EmbeddingCacheLookupSortGatherRefTest : public EmbeddingCacheRefTest<T> {
     void LaunchKernel(const ElemType* table, 
                       const IndexType* indices,
                       CacheDataType& cache_data) {
-        m_result = std::make_shared<Buffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
+        m_result = std::make_shared<TestBuffer<ElemType>>(this->m_batch * this->m_hotness * this->m_num_elements * sizeof(ElemType));
         NVE_DEBUG_PRINTF_("launch sort gather lookup kernel\n");
 
         // first calc required aux size
@@ -1058,7 +1058,7 @@ class EmbeddingCacheLookupSortGatherRefTest : public EmbeddingCacheRefTest<T> {
         }
     }
 
-    std::shared_ptr<Buffer<ElemType>> m_result = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_result = nullptr;
     std::vector<ElemType> m_ref_result;
 };
 
@@ -1334,17 +1334,17 @@ TEST(dedupgrad, dedupgrad)
     const size_t m_batch = 512;
     const size_t m_hotness = 4096;
     const auto num_keys = m_batch * m_hotness;
-    auto keys = std::make_shared<Buffer<IndexType>>(num_keys * sizeof(IndexType));
-    auto unique_keys = std::make_shared<Buffer<IndexType>>(num_keys * sizeof(IndexType));
+    auto keys = std::make_shared<TestBuffer<IndexType>>(num_keys * sizeof(IndexType));
+    auto unique_keys = std::make_shared<TestBuffer<IndexType>>(num_keys * sizeof(IndexType));
     // allocate an extra element for loc_map, because it is reused for counters, and the
     // way we use counters in Dedup may lead to a read of extra element in one of cub kernels 
-    auto loc_map = std::make_shared<Buffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
+    auto loc_map = std::make_shared<TestBuffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
     IndexType* h_num_runs_out;
-    auto inverse_buffer = std::make_shared<Buffer<IndexType>>(num_keys * sizeof(IndexType));
-    auto offsets = std::make_shared<Buffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
-    auto grads = std::make_shared<Buffer<DataType>>(num_keys * m_row_size);
-    auto unique_grads = std::make_shared<Buffer<DataType>>(num_keys * m_row_size);
-    auto ref = std::make_shared<Buffer<DataType>>(num_keys * m_row_size);
+    auto inverse_buffer = std::make_shared<TestBuffer<IndexType>>(num_keys * sizeof(IndexType));
+    auto offsets = std::make_shared<TestBuffer<IndexType>>((num_keys + 1) * sizeof(IndexType));
+    auto grads = std::make_shared<TestBuffer<DataType>>(num_keys * m_row_size);
+    auto unique_grads = std::make_shared<TestBuffer<DataType>>(num_keys * m_row_size);
+    auto ref = std::make_shared<TestBuffer<DataType>>(num_keys * m_row_size);
 
     cudaStream_t m_stream;
     CHECK_CUDA_ERROR(cudaStreamCreate(&m_stream));
@@ -1469,7 +1469,7 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
             this->m_num_keys = this->m_batch * this->m_hotness;
         } else {
             // allocate and init offsets
-            m_offsets = std::make_shared<Buffer<IndexType>>((this->m_batch + 1) * sizeof(IndexType));
+            m_offsets = std::make_shared<TestBuffer<IndexType>>((this->m_batch + 1) * sizeof(IndexType));
             std::mt19937 gen(0X475381);
             std::uniform_int_distribution<uint32_t> dist_offset(1, 31);
 
@@ -1484,7 +1484,7 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
         }
 
         // allocate and init weights
-        m_weights = std::make_shared<Buffer<ElemType>>(this->m_num_keys * sizeof(ElemType));
+        m_weights = std::make_shared<TestBuffer<ElemType>>(this->m_num_keys * sizeof(ElemType));
         const bool is_weighted = (T::POOLING_TYPE == PoolingType_t::WeightedSum) ||
                                  (T::POOLING_TYPE == PoolingType_t::WeightedMean);
         if (is_weighted) {
@@ -1505,7 +1505,7 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
         if (T::POOLING_TYPE == PoolingType_t::Concatenate) {
             batch_ *= this->m_hotness;
         }
-        m_grads_in = std::make_shared<Buffer<ElemType>>(batch_ * this->m_num_elements * sizeof(ElemType));
+        m_grads_in = std::make_shared<TestBuffer<ElemType>>(batch_ * this->m_num_elements * sizeof(ElemType));
         
         std::mt19937 genr(0X387512);
         std::uniform_int_distribution<int32_t> dist_nom(-8, 8);
@@ -1521,7 +1521,7 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
     }
 
     void AllocateKeys() {
-        this->m_keys = std::make_shared<Buffer<IndexType>>(this->m_num_keys * sizeof(IndexType));
+        this->m_keys = std::make_shared<TestBuffer<IndexType>>(this->m_num_keys * sizeof(IndexType));
         const float alpha = 1.05f;
 
         const size_t seed = 283982;
@@ -1599,8 +1599,8 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
                       CacheDataType& /*cache_data*/) {
         NVE_DEBUG_PRINTF_("launch pooling backprop kernel %lu keys\n", static_cast<uint64_t>(this->m_num_keys));
 
-        m_unique_keys = std::make_shared<Buffer<IndexType>>(this->m_num_keys * sizeof(IndexType));
-        m_grads_out = std::make_shared<Buffer<ElemType>>(this->m_num_keys * this->m_num_elements * sizeof(ElemType));
+        m_unique_keys = std::make_shared<TestBuffer<IndexType>>(this->m_num_keys * sizeof(IndexType));
+        m_grads_out = std::make_shared<TestBuffer<ElemType>>(this->m_num_keys * this->m_num_elements * sizeof(ElemType));
     
         const int32_t MAX_RUN_SIZE = 32;
         m_split_grads = MAX_RUN_SIZE != -1;
@@ -1660,11 +1660,11 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
     }
 
     std::vector<ElemType> m_ref_result;
-    std::shared_ptr<Buffer<ElemType>> m_weights = nullptr;
-    std::shared_ptr<Buffer<IndexType>> m_offsets = nullptr;
-    std::shared_ptr<Buffer<ElemType>> m_grads_in = nullptr;
-    std::shared_ptr<Buffer<ElemType>> m_grads_out = nullptr;
-    std::shared_ptr<Buffer<IndexType>> m_unique_keys = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_weights = nullptr;
+    std::shared_ptr<TestBuffer<IndexType>> m_offsets = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_grads_in = nullptr;
+    std::shared_ptr<TestBuffer<ElemType>> m_grads_out = nullptr;
+    std::shared_ptr<TestBuffer<IndexType>> m_unique_keys = nullptr;
 
     std::map<IndexType, ElemType*> m_ref_grads;
 
@@ -1726,7 +1726,7 @@ class HistogramTest : public ::testing::Test {
             unique_keys.insert(dist_keys(genr));
         }
 
-        auto keys = std::make_shared<Buffer<KeyType>>(num_keys * (num_keys + 1) * sizeof(KeyType) / 2);
+        auto keys = std::make_shared<TestBuffer<KeyType>>(num_keys * (num_keys + 1) * sizeof(KeyType) / 2);
         KeyType idx = 0;
         std::vector<KeyType> keys_(unique_keys.begin(), unique_keys.end());
 

@@ -23,6 +23,7 @@ add_library(nve-torch-ops SHARED
     nve_registry.cu
     torch_binding.cpp
     nve_torch_ops.cu
+    nve_torch_ops_cpu.cpp
 )
 
 # Target the minimum torch stable ABI version (set in top-level CMakeLists.txt).

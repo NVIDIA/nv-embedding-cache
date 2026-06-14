@@ -65,6 +65,11 @@ TEST(NveCApiBasic, ConfigDefaults) {
   EXPECT_EQ(1 << 16, hier_cfg.min_insert_size_gpu);
   EXPECT_EQ(0, hier_cfg.min_insert_size_host);
 
+  auto host_layer_cfg = nve_host_embedding_layer_config_default();
+  EXPECT_STREQ("", host_layer_cfg.layer_name);
+  EXPECT_EQ(nullptr, host_layer_cfg.default_embedding);
+  EXPECT_EQ(0, host_layer_cfg.default_embedding_size);
+
   auto overflow_cfg = nve_overflow_policy_config_default();
   EXPECT_EQ(NVE_OVERFLOW_EVICT_RANDOM, overflow_cfg.handler);
   EXPECT_DOUBLE_EQ(0.8, overflow_cfg.resolution_margin);
