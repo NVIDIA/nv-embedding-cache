@@ -23,6 +23,9 @@ Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means re
 - Fixed AOT export/load marker handling for multiple model instances and shared resources
 - Fixed performance regression in Python inference (redundant buffer copy)
 - Removed stale torch-save serialization path
+### API Changes
+- Embedding layers update/accumulate how have an additional table_id param for fine grain control (using -1 will keep current behavior)
+- Tables no longer expose raw buffer pointer APIs, use the BufferWrapper APIs instead.
 
 ## NV Embedding Cache 26.05
 ### New Features
@@ -78,5 +81,7 @@ Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means re
 ### Improvements
 - ...
 ### Bug Fixes
+- ...
+### API Changes
 - ...
 ```
