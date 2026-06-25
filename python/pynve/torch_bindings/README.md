@@ -18,6 +18,14 @@ cmake ..
 make
 ```
 
+### Build options
+
+The build accepts the following optional CMake flag (pass with `-D<OPTION>=<VALUE>` to `cmake`):
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `NVE_TORCH_OPS_CPU_ONLY` | `OFF` | Build `libnve-torch-ops.so` without the CUDA dispatch translation unit, so it links against a **CPU-only** libtorch (no `libtorch_cuda` dependency). The op schema and CPU implementation are kept, so a host-resident `LayerType.HostLayer` still resolves the op on the CPU dispatch key. Leave `OFF` for normal GPU builds. |
+
 ## Usage Example
 
 ```python
