@@ -39,16 +39,20 @@ target_link_libraries(allocator_test PUBLIC gtest_main nve-common)
 add_executable(buffer_wrapper_test buffer_wrapper_test.cpp)
 target_link_libraries(buffer_wrapper_test PUBLIC gtest_main nve-common)
 
-find_package(MPI REQUIRED)
-add_executable(mpi_buffer_test
-  mpi_buffer_test.cpp
-)
-target_include_directories(mpi_buffer_test PRIVATE
-     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
-     ${MPI_INCLUDE_PATH}
-)
-target_link_libraries(mpi_buffer_test
-     gtest_main
-     nve-common
-     CUDA::cuda_driver
-)
+# mpi_buffer_test exercises the MPI distributed buffer; only build it when the
+# MPI backends are enabled (see top-level NVE_WITH_MPI).
+if(NVE_WITH_MPI)
+  find_package(MPI REQUIRED)
+  add_executable(mpi_buffer_test
+    mpi_buffer_test.cpp
+  )
+  target_include_directories(mpi_buffer_test PRIVATE
+       ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+       ${MPI_INCLUDE_PATH}
+  )
+  target_link_libraries(mpi_buffer_test
+       gtest_main
+       nve-common
+       CUDA::cuda_driver
+  )
+endif()

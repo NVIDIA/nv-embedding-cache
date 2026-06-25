@@ -226,6 +226,7 @@ PYBIND11_MODULE(nve, m) {
     py::class_<NVLMemBlock, MemBlock, std::shared_ptr<NVLMemBlock>>(m, "NVLMemBlock")
         .def(py::init<size_t, size_t, nve::DataType_t, std::vector<int>>());
 
+#ifdef NVE_WITH_MPI
     py::class_<MPIMemBlock, MemBlock, std::shared_ptr<MPIMemBlock>>(m, "MPIMemBlock")
         .def(py::init<size_t, size_t, nve::DataType_t, std::vector<size_t>, std::vector<int>>(),
             py::arg("row_size"),
@@ -234,6 +235,7 @@ PYBIND11_MODULE(nve, m) {
             py::arg("ranks") = std::vector<size_t>{},
             py::arg("devices") = std::vector<int>{}
         );
+#endif // NVE_WITH_MPI
 
     py::class_<DistMemBlock, MemBlock, std::shared_ptr<DistMemBlock>>(m, "DistMemBlock")
         .def(py::init<std::shared_ptr<DistributedEnv>, size_t, size_t, nve::DataType_t>());

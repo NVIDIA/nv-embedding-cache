@@ -55,6 +55,14 @@ The provided [Dockerfile](Dockerfile) satisfies these prerequisites. If you're u
     cd -
     ```
 
+### Build options
+
+The C++ / CMake build accepts the following optional flags (pass with `-D<OPTION>=<VALUE>` to `cmake`, e.g. `cmake .. -DNVE_WITH_MPI=OFF`):
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `NVE_WITH_MPI` | `ON` | Build the MPI / distributed backends. Set to `OFF` for an inference-only build with no OpenMPI dependency: `find_package(MPI)` is skipped and the resulting `libnve-common.so` carries no `libmpi` dependency. The injected-`DistributedEnv` distributed memblocks remain available; only the MPI-owned `MPIMemBlock` / `MPIEnv` path is compiled out. |
+
 ## Documentation & Samples
 The [docs](docs/) dir contains our documentation. It's structured as follows:
 ```bash

@@ -200,6 +200,18 @@ if (${NVE_WITH_LIBNUMA})
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNVE_WITH_LIBNUMA=1")
 endif()
 
+# MPI / distributed backends. Default ON preserves current behavior. When OFF,
+# the MPI-backed memblock (MPIMemBlock) and MPIEnv are dropped along with the
+# hard OpenMPI build- and runtime-dependency, so an inference-only build needs
+# no OpenMPI (create_memblock never builds an MPI block on the serving path).
+option(NVE_WITH_MPI "Build the MPI/distributed backends (OFF = inference-only, no OpenMPI dependency)" ON)
+message(STATUS "NVE_WITH_MPI: ${NVE_WITH_MPI}")
+if (${NVE_WITH_MPI})
+  set(CMAKE_C_FLAGS    "${CMAKE_C_FLAGS}    -DNVE_WITH_MPI=1")
+  set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS}  -DNVE_WITH_MPI=1")
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DNVE_WITH_MPI=1")
+endif()
+
 if(NOT DEFINED NVE_SM_VERSION)
     # Get target compute capability from current platform
     message(STATUS "NVE_SM_VERSION not defined")
