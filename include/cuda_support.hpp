@@ -19,7 +19,9 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#ifdef NVE_ENABLE_NVTX
 #include <nvtx3/nvtx3.hpp>
+#endif
 #include <common.hpp>
 #include <functional>
 #include <memory>
