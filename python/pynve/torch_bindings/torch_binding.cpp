@@ -39,6 +39,7 @@
 // Python meta/fake impl; the real kernels read shape+dtype from the binding, so
 // those scalars are not forwarded here.
 extern "C" {
+#ifndef NVE_TORCH_OPS_CPU_ONLY
 AtenTensorHandle nve_embedding_lookup_cuda(
     AtenTensorHandle marker, AtenTensorHandle keys);
 
@@ -46,6 +47,7 @@ AtenTensorHandle nve_embedding_lookup_with_pooling_cuda(
     AtenTensorHandle marker, AtenTensorHandle keys, AtenTensorHandle offsets,
     AtenTensorHandle weights,  // nullptr when optional is empty
     int64_t pooling_type);
+#endif  // NVE_TORCH_OPS_CPU_ONLY
 
 AtenTensorHandle nve_embedding_lookup_cpu(
     AtenTensorHandle marker, AtenTensorHandle keys);
@@ -64,6 +66,7 @@ AtenTensorHandle nve_embedding_lookup_with_pooling_cpu(
 // tensor handle back to stack[0] with from().
 // ---------------------------------------------------------------------------
 
+#ifndef NVE_TORCH_OPS_CPU_ONLY
 // embedding_lookup(Tensor marker, Tensor keys, int embedding_size, int dtype) -> Tensor
 // embedding_size/dtype (stack[2]/stack[3]) are consumed by the Python fake only.
 static void embedding_lookup_cuda_boxed(
@@ -91,6 +94,7 @@ static void embedding_lookup_with_pooling_cuda_boxed(
         marker, keys, offsets, weights_handle, pooling_type);
     stack[0] = from(result);
 }
+#endif  // NVE_TORCH_OPS_CPU_ONLY
 
 // CPU dispatch — mirrors the CUDA boxed wrappers, just routes to the *_cpu
 // kernel which never touches the CUDA runtime.
@@ -134,12 +138,18 @@ STABLE_TORCH_LIBRARY(nve_ops, m) {
 // the stable C ABI can't resolve SymInts through aoti_torch_get_numel, so
 // Meta is handled by torch.library.register_fake on the Python side
 // (see pynve/torch/__init__.py).
+//
+// Dropped entirely in the CPU-only build (NVE_TORCH_OPS_CPU_ONLY): the CUDA
+// kernels live in nve_torch_ops.cu, which is excluded there, and registering a
+// CUDA impl for a driverless HostLayer runtime would be dead weight anyway.
 // ---------------------------------------------------------------------------
+#ifndef NVE_TORCH_OPS_CPU_ONLY
 STABLE_TORCH_LIBRARY_IMPL(nve_ops, CUDA, m) {
     m.impl("embedding_lookup", embedding_lookup_cuda_boxed);
     m.impl("embedding_lookup_with_pooling",
            embedding_lookup_with_pooling_cuda_boxed);
 }
+#endif  // NVE_TORCH_OPS_CPU_ONLY
 
 // ---------------------------------------------------------------------------
 // CPU dispatch — used by LayerType.HostLayer with device='cpu'.
