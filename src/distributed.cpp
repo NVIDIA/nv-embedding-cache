@@ -24,6 +24,7 @@
 #include <iomanip>
 #include <stdexcept>
 #include <sys/syscall.h>
+#include <unistd.h>
 #include <filesystem>
 
 #define ERRNO_CHECK(_expr_) \
