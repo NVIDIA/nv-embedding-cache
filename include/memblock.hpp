@@ -84,6 +84,7 @@ private:
 };
 
 class CUDADistributedBuffer;
+#ifdef NVE_WITH_MPI
 class MPIMemBlock : public MemBlock {
 public:
     MPIMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, const std::vector<size_t> ranks, const std::vector<int> devices);
@@ -94,6 +95,7 @@ public:
 private:
     std::shared_ptr<CUDADistributedBuffer> mpi_buffer_;
 };
+#endif // NVE_WITH_MPI
 
 class DistributedEnv;
 class DistMemBlock : public MemBlock {

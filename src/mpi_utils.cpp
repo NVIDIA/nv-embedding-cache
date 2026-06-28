@@ -15,6 +15,11 @@
  * limitations under the License.
  */
 
+// The entire MPI/distributed environment (MPIEnv) is compiled only when
+// NVE_WITH_MPI is enabled. With it off this translation unit is empty and the
+// build carries no OpenMPI dependency.
+#ifdef NVE_WITH_MPI
+
 #include <vector>
 #include <memory>
 #include <mpi_utils.hpp>
@@ -197,3 +202,5 @@ std::ostream& operator<<(std::ostream& os, const MPIEnv& env) {
 }
 
 } // namespace nve
+
+#endif // NVE_WITH_MPI

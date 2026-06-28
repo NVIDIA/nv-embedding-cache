@@ -19,7 +19,9 @@
 #include "include/common.hpp"
 #include "include/cuda_support.hpp"
 #include "include/default_allocator.hpp"
+#ifdef NVE_WITH_MPI
 #include "include/mpi_utils.hpp"
+#endif
 #include "include/distributed.hpp"
 #include <cstring>
 
@@ -155,6 +157,10 @@ void* NVLMemBlock::get_ptr() const {
     return reinterpret_cast<void*>(ptr_);
 }
 
+// MPIMemBlock is the only memblock that constructs an MPIEnv, so it alone is
+// gated on NVE_WITH_MPI. DistMemBlock / DistHostMemBlock take an injected
+// DistributedEnv and are MPI-free, so they remain unconditionally available.
+#ifdef NVE_WITH_MPI
 MPIMemBlock::MPIMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, const std::vector<size_t> ranks, const std::vector<int> devices) 
     : MPIMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype)), ranks, devices) {}
 
@@ -167,6 +173,7 @@ MPIMemBlock::MPIMemBlock(size_t size_to_alloc, const std::vector<size_t> ranks, 
 void* MPIMemBlock::get_ptr() const {
     return mpi_buffer_->ptr();
 }
+#endif // NVE_WITH_MPI
 
 DistMemBlock::DistMemBlock(std::shared_ptr<DistributedEnv> env, size_t row_size, size_t num_embeddings, nve::DataType_t dtype) 
     : MemBlock(MemBlockType::MPI) {

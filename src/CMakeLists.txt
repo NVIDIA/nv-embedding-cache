@@ -15,7 +15,9 @@
 
 cmake_minimum_required(VERSION 3.18)
 
-find_package(MPI REQUIRED)
+if(NVE_WITH_MPI)
+  find_package(MPI REQUIRED)
+endif()
 
 file(GLOB common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.cpp *.cu)
 add_library(nve-common SHARED ${common_src})
@@ -28,13 +30,13 @@ target_compile_definitions(nve-common PRIVATE
 )
 
 target_include_directories(nve-common PRIVATE
-  ${MPI_INCLUDE_PATH}
+  $<$<BOOL:${NVE_WITH_MPI}>:${MPI_INCLUDE_PATH}>
   ${PROJECT_SOURCE_DIR}/third_party/cuembed
 )
 target_link_libraries(nve-common PUBLIC
   CUDA::cudart
   CUDA::cuda_driver
-  MPI::MPI_CXX
+  $<$<BOOL:${NVE_WITH_MPI}>:MPI::MPI_CXX>
 )
 
 if (${NVE_WITH_LIBHWLOC})
