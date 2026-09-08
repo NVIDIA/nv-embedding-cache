@@ -466,6 +466,15 @@ public:
             insert_heuristic_thresholds.push_back(0.f); // remote PS is typically updated externally instead of by the layer
         }
         typename layer_type::Config layer_cfg = {"ps_layer", std::make_shared<DefaultInsertHeuristic>(insert_heuristic_thresholds)};
+        // Keys absent from every tier (e.g. untrained ids) must read as the zero
+        // embedding. An empty default_embedding leaves such misses UNDEFINED
+        // (the output row keeps whatever was already in the caller's device
+        // buffer), which surfaces as garbage / NaN rows in serving lookups. The
+        // layer's default-fill requires the last tier to be on host, so only set
+        // it when a host-backed tier (host cache or remote PS) is present.
+        if (host_cache_size > 0 || remote) {
+            layer_cfg.default_embedding.assign(this->row_size_in_bytes_, 0);
+        }
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, tables, nullptr /* using default allocator for device 0*/);
     }
 
