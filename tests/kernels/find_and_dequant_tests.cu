@@ -349,23 +349,24 @@ TYPED_TEST_P(FindAndDequantRefTest, DequantAgainstRefCpu) {
 REGISTER_TYPED_TEST_SUITE_P(FindAndDequantRefTest, DequantAgainstRefCpu);
 
 // 4 quant dtypes x {set-associative cache, no-cache} x {load_indices true, false}.
-// QInt8 storage is signed char; QUint8 storage is unsigned char (matching QuantizationHelper::Vec1).
+// QInt8 storage is int8_t (plain char is unsigned on aarch64); QUint8 storage is unsigned char
+// (matching QuantizationHelper::Vec1).
 typedef ::testing::Types<
     // QInt8RowwiseF32 (symmetric, pure float scale, no offset).
-    DequantTestType<DataType_t::QInt8RowwiseF32,  char,          int32_t, /*cache=*/true,  /*load_idx=*/true>,
-    DequantTestType<DataType_t::QInt8RowwiseF32,  char,          int64_t, /*cache=*/true,  /*load_idx=*/false>,
-    DequantTestType<DataType_t::QInt8RowwiseF32,  char,          int32_t, /*cache=*/false, /*load_idx=*/true>,
-    DequantTestType<DataType_t::QInt8RowwiseF32,  char,          int64_t, /*cache=*/false, /*load_idx=*/false>,
+    DequantTestType<DataType_t::QInt8RowwiseF32,  int8_t,        int32_t, /*cache=*/true,  /*load_idx=*/true>,
+    DequantTestType<DataType_t::QInt8RowwiseF32,  int8_t,        int64_t, /*cache=*/true,  /*load_idx=*/false>,
+    DequantTestType<DataType_t::QInt8RowwiseF32,  int8_t,        int32_t, /*cache=*/false, /*load_idx=*/true>,
+    DequantTestType<DataType_t::QInt8RowwiseF32,  int8_t,        int64_t, /*cache=*/false, /*load_idx=*/false>,
     // QUint8RowwiseF32 (min/max affine, float scale + offset).
     DequantTestType<DataType_t::QUint8RowwiseF32, unsigned char, int32_t, /*cache=*/true,  /*load_idx=*/true>,
     DequantTestType<DataType_t::QUint8RowwiseF32, unsigned char, int64_t, /*cache=*/true,  /*load_idx=*/false>,
     DequantTestType<DataType_t::QUint8RowwiseF32, unsigned char, int32_t, /*cache=*/false, /*load_idx=*/true>,
     DequantTestType<DataType_t::QUint8RowwiseF32, unsigned char, int64_t, /*cache=*/false, /*load_idx=*/false>,
     // QInt8RowwiseF16 (symmetric, pure-scale / no offset; __half scale + output).
-    DequantTestType<DataType_t::QInt8RowwiseF16,  char,          int32_t, /*cache=*/true,  /*load_idx=*/true>,
-    DequantTestType<DataType_t::QInt8RowwiseF16,  char,          int64_t, /*cache=*/true,  /*load_idx=*/false>,
-    DequantTestType<DataType_t::QInt8RowwiseF16,  char,          int32_t, /*cache=*/false, /*load_idx=*/true>,
-    DequantTestType<DataType_t::QInt8RowwiseF16,  char,          int64_t, /*cache=*/false, /*load_idx=*/false>,
+    DequantTestType<DataType_t::QInt8RowwiseF16,  int8_t,        int32_t, /*cache=*/true,  /*load_idx=*/true>,
+    DequantTestType<DataType_t::QInt8RowwiseF16,  int8_t,        int64_t, /*cache=*/true,  /*load_idx=*/false>,
+    DequantTestType<DataType_t::QInt8RowwiseF16,  int8_t,        int32_t, /*cache=*/false, /*load_idx=*/true>,
+    DequantTestType<DataType_t::QInt8RowwiseF16,  int8_t,        int64_t, /*cache=*/false, /*load_idx=*/false>,
     // QUint8RowwiseF16 (affine; __half scale + offset + output).
     DequantTestType<DataType_t::QUint8RowwiseF16, unsigned char, int32_t, /*cache=*/true,  /*load_idx=*/true>,
     DequantTestType<DataType_t::QUint8RowwiseF16, unsigned char, int64_t, /*cache=*/true,  /*load_idx=*/false>,
@@ -373,10 +374,10 @@ typedef ::testing::Types<
     DequantTestType<DataType_t::QUint8RowwiseF16, unsigned char, int64_t, /*cache=*/false, /*load_idx=*/false>,
     // Mismatched OUTPUT_TYPE (dequant type != output): exercise the OUTPUT_TYPE template parameter.
     // Trailing arg is the output type. float-dequant storage -> __half output:
-    DequantTestType<DataType_t::QInt8RowwiseF32,  char,          int32_t, /*cache=*/true,  /*load_idx=*/true,  __half>,
+    DequantTestType<DataType_t::QInt8RowwiseF32,  int8_t,        int32_t, /*cache=*/true,  /*load_idx=*/true,  __half>,
     DequantTestType<DataType_t::QUint8RowwiseF32, unsigned char, int64_t, /*cache=*/false, /*load_idx=*/false, __half>,
     // __half-dequant storage -> float output:
-    DequantTestType<DataType_t::QInt8RowwiseF16,  char,          int64_t, /*cache=*/true,  /*load_idx=*/false, float>,
+    DequantTestType<DataType_t::QInt8RowwiseF16,  int8_t,        int64_t, /*cache=*/true,  /*load_idx=*/false, float>,
     DequantTestType<DataType_t::QUint8RowwiseF16, unsigned char, int32_t, /*cache=*/false, /*load_idx=*/true,  float>>
     DequantTypes;
 

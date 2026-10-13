@@ -81,8 +81,8 @@ class HKey final {
   inline HKey(const table_id_t table_id, const int64_t part_idx, const char suffix) {
     const int req_size{std::snprintf(c_str_.data(), c_str_.size(), "nv_nve_table{%ld/%ld}%c",
                                      table_id, part_idx, suffix)};
-    NVE_CHECK_(req_size > 0 && req_size <= static_cast<int64_t>(c_str_.size()));
-    size_ = req_size - 1;
+    NVE_CHECK_(req_size > 0 && req_size < static_cast<int64_t>(c_str_.size()));
+    size_ = req_size;
   }
 
   constexpr const char* c_str() const noexcept { return c_str_.data(); }

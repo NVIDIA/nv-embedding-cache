@@ -150,6 +150,7 @@ class Table {
 
   /**
    * Replaces the value if - and only if - the corresponding key already exists in the table.
+   * @warning Recurring keys in the same update call may have undefined results (depends on the table type).
    *
    * @param ctx Execution context to use if additional resources are needed to run the command.
    * @param n Number of keys in `keys`.
@@ -165,6 +166,7 @@ class Table {
    * Accumulate the value if - and only if - the corresponding key already exists in the table.
    * i.e. the provided value should be added to the value already existing in the table for the
    * given key.
+   * @warning Recurring keys in the same accumulated call may have undefined results (depends on the table type).
    *
    * @param ctx Execution context to use if additional resources are needed to run the command.
    * @param n Number of keys in `keys`.

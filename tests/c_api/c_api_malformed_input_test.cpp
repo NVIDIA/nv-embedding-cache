@@ -95,7 +95,8 @@ TEST(MalformedInput, TableFactoryProduceRejectsJsonNumber) {
 // nve_gpu_table_create with an unsupported nve_key_type_t value must return NVE_ERROR_INVALID_ARGUMENT
 // ---------------------------------------------------------------------------------
 TEST(MalformedInput, GpuTableCreateRejectsUnsupportedKeyType) {
-  auto cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t cfg;
+  ASSERT_EQ(NVE_SUCCESS, nve_gpu_table_config_init(&cfg, sizeof(cfg)));
   cfg.device_id = 0;
   cfg.cache_size = 1 << 20;
   cfg.row_size_in_bytes = 128;

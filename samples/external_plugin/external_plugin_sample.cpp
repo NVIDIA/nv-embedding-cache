@@ -138,7 +138,8 @@ int main() {
   CHECK_NVE(nve_context_destroy(ctx));
 
   /* The same external table drives a hierarchical embedding layer. */
-  nve_hierarchical_layer_config_t layer_cfg = nve_hierarchical_layer_config_default();
+  nve_hierarchical_layer_config_t layer_cfg;
+  CHECK_NVE(nve_hierarchical_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
   layer_cfg.layer_name = "external_plugin_sample";
   nve_layer_t layer = NULL;
   CHECK_NVE(nve_hierarchical_layer_create(&layer, NVE_KEY_INT64, &layer_cfg, &table, 1, NULL));

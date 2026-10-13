@@ -41,8 +41,10 @@ The main operations supported by layers are:
     * Keys/rows given to "insert" are not guaranteed to be resident in the table after the operation.  
 3. Update: given a list of keys and their respective embedding row values, find all occurrences of the keys in the layer's tables and replace their existing row values with the provided ones.  
     Note: this op does not change any table residency (i.e. which key exists in each table), it will only change row values for keys that already exist in the table.
+    Note: recurring keys in the same update call may have undefined results (depends on the table type).
 4. Accumulate: given a list of keys and their respective embedding row gradients, find all occurrences of the keys in the layer's tables and accumulate the given gradients into their existing row values.  
     Note: this op does not change any table residency (i.e. which key exists in each table), it will only change row values for keys that already exist in the table.
+    Note: recurring keys in the same accumulate call may have undefined results (depends on the table type).
 5. Erase: given a list of keys and a table type, remove the given keys from the table. Keys that are not resident in the table are ignored.  
     Note: typically, there's no reason to use "Erase" - rows will be evicted as needed during "Insert".
 6. Create execution context: execution contexts are containers for state variables and memory buffers needed during execution of all the other operations. See: [Execution contexts](advanced.md#execution-contexts) for more details.

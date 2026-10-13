@@ -30,7 +30,7 @@
 
 /* NVE C ABI versions */
 /* Within the same major version, ABI is backwards compatible - otherwise rebuild is needed. */
-#define NVE_C_ABI_VERSION_MAJOR (1)
+#define NVE_C_ABI_VERSION_MAJOR (2)
 #define NVE_C_ABI_VERSION_MINOR (0)
 
 #ifdef __cplusplus
@@ -146,10 +146,25 @@ typedef struct nve_heuristic_s*     nve_heuristic_t;
 typedef struct nve_table_factory_s* nve_table_factory_t;
 
 /* ============================================================================
- * Configuration structs
+ * Size-aware configuration structs
  * ============================================================================ */
 
+/* ABI 2.0: configs begin with an opaque header. Initialize with
+ * nve_*_config_init(&config, sizeof(config)), then pass to the
+ * corresponding creation function. Do not read or modify the header; its
+ * contents are private to the library. Creation validates it and rejects
+ * configs that were not initialized by the matching initializer
+ * with NVE_ERROR_INVALID_ARGUMENT.
+ * Creation clears its output handle on failure.
+ * Smaller prefixes are supported; absent fields retain library defaults.
+ * Sizes cutting through a field are invalid. Sizes larger than this library's
+ * config are rejected with NVE_ERROR_NOT_IMPLEMENTED (no silent option loss).
+ * Future fields must be appended beyond the previous sizeof, including padding;
+ * existing field offsets, types, alignment, and meanings must remain unchanged.
+ */
+
 typedef struct {
+  uint64_t header;                 /* Opaque; written by nve_gpu_table_config_init(), do not modify */
   int32_t  device_id;
   uint64_t cache_size;
   int64_t  row_size_in_bytes;
@@ -169,6 +184,17 @@ typedef struct {
 } nve_gpu_table_config_t;
 
 typedef struct {
+  uint64_t header;                 /* Opaque; written by nve_linear_host_table_config_init(), do not modify */
+  void*    emb_table;              /* Caller-owned, host-accessible row-major table (preferably cudaMallocHost) */
+  int64_t  num_rows;               /* Rows in emb_table; keys outside [0, num_rows) miss */
+  int64_t  row_size_in_bytes;      /* Bytes per row */
+  nve_data_type_t value_dtype;     /* Storage dtype; accumulate requires FLOAT32 */
+  int64_t  max_threads;            /* Positive; upper bound on CPU threads per operation */
+  int64_t  task_size_threshold;    /* Positive; CPU threads used <= ceil(num_keys / threshold) */
+} nve_linear_host_table_config_t;
+
+typedef struct {
+  uint64_t header;                 /* Opaque; written by nve_gpu_embedding_layer_config_init(), do not modify */
   const char* layer_name;
   int32_t     device_id;
   void*       embedding_table;       /* Pointer to linear table in GPU memory */
@@ -182,6 +208,7 @@ typedef struct {
 } nve_gpu_embedding_layer_config_t;
 
 typedef struct {
+  uint64_t header;                 /* Opaque; written by nve_linear_uvm_layer_config_init(), do not modify */
   const char*     layer_name;
   nve_heuristic_t insert_heuristic;  /* NULL uses default heuristic; use nve_heuristic_create_never() to disable */
   int64_t         min_insert_freq_gpu;
@@ -193,6 +220,7 @@ typedef struct {
 } nve_linear_uvm_layer_config_t;
 
 typedef struct {
+  uint64_t header;                 /* Opaque; written by nve_hierarchical_layer_config_init(), do not modify */
   const char*     layer_name;
   nve_heuristic_t insert_heuristic;  /* NULL uses default heuristic; use nve_heuristic_create_never() to disable */
   int64_t         min_insert_freq_gpu;
@@ -207,76 +235,45 @@ typedef struct {
 } nve_hierarchical_layer_config_t;
 
 typedef struct {
+  uint64_t header;                 /* Opaque; written by nve_host_embedding_layer_config_init(), do not modify */
   const char* layer_name;
   /* Default embedding row returned for keys missing from the host table.
    * NULL or default_embedding_size=0 disables the default (misses left undefined).
    * default_embedding_size, when non-zero, must equal the host table row size. */
   const void* default_embedding;
   int64_t     default_embedding_size;
+  int64_t     task_size_threshold;  /* Positive; CPU task count <= ceil(num_keys / threshold) */
+  int         disable_threadpool;   /* bool: run lookups on the caller thread */
 } nve_host_embedding_layer_config_t;
-
-typedef struct {
-  int64_t              overflow_margin;
-  nve_overflow_handler_t handler;
-  double               resolution_margin;
-} nve_overflow_policy_config_t;
-
-typedef struct {
-  int64_t         key_size;
-  int64_t         max_value_size;
-  nve_data_type_t value_dtype;
-  int64_t         invalid_key;       /* Sentinel for invalid entries. Default -1; cast to the table's key type. */
-} nve_host_table_config_t;
 
 /* ============================================================================
  * Config initializers (provide sane defaults matching C++ defaults)
  * ============================================================================ */
 
 /**
- * Return a GPU table config initialized to library defaults
- * (matches nve::GPUTableConfig{} from gpu_table.hpp). Callers should overwrite
- * required fields (e.g. cache_size, row_size_in_bytes) before use.
+ * Initialize a size-aware config in caller-owned storage and write its header.
+ * Writes at most config_size bytes. The minimum size is sizeof(uint64_t).
+ * NULL or a size ending inside a field returns NVE_ERROR_INVALID_ARGUMENT.
+ * A size larger than the library's config returns NVE_ERROR_NOT_IMPLEMENTED.
+ * On failure, the destination is unchanged. Check the status before use.
  */
-NVE_C_API nve_gpu_table_config_t             nve_gpu_table_config_default(void);
+NVE_C_API nve_status_t nve_gpu_table_config_init(
+    nve_gpu_table_config_t* config, size_t config_size);
 
-/**
- * Return a GPU embedding-layer config initialized to library defaults
- * (matches nve::GPUEmbeddingLayerConfig{}). Caller must set layer_name,
- * embedding_table, num_embeddings, embedding_width_in_bytes, and value_dtype before use.
- * value_dtype must be NVE_DTYPE_FLOAT16 or NVE_DTYPE_FLOAT32.
- */
-NVE_C_API nve_gpu_embedding_layer_config_t   nve_gpu_embedding_layer_config_default(void);
+NVE_C_API nve_status_t nve_linear_host_table_config_init(
+    nve_linear_host_table_config_t* config, size_t config_size);
 
-/**
- * Return a Linear-UVM layer config initialized to library defaults
- * (matches nve::LinearUVMEmbeddingLayer::Config{}).
- */
-NVE_C_API nve_linear_uvm_layer_config_t      nve_linear_uvm_layer_config_default(void);
+NVE_C_API nve_status_t nve_gpu_embedding_layer_config_init(
+    nve_gpu_embedding_layer_config_t* config, size_t config_size);
 
-/**
- * Return a hierarchical-layer config initialized to library defaults
- * (matches nve::HierarchicalEmbeddingLayer::Config{}).
- */
-NVE_C_API nve_hierarchical_layer_config_t    nve_hierarchical_layer_config_default(void);
+NVE_C_API nve_status_t nve_linear_uvm_layer_config_init(
+    nve_linear_uvm_layer_config_t* config, size_t config_size);
 
-/**
- * Return a host embedding-layer config initialized to library defaults
- * (matches nve::HostEmbeddingLayer::Config{}).
- */
-NVE_C_API nve_host_embedding_layer_config_t  nve_host_embedding_layer_config_default(void);
+NVE_C_API nve_status_t nve_hierarchical_layer_config_init(
+    nve_hierarchical_layer_config_t* config, size_t config_size);
 
-/**
- * Return an overflow-policy config initialized to library defaults
- * (matches nve::OverflowPolicyConfig{}: EvictRandom, overflow_margin=INT64_MAX-1023
- * which disables overflow checks, resolution_margin=0.8).
- */
-NVE_C_API nve_overflow_policy_config_t       nve_overflow_policy_config_default(void);
-
-/**
- * Return a host-table config initialized to library defaults
- * (matches nve::HostTableConfig{}).
- */
-NVE_C_API nve_host_table_config_t            nve_host_table_config_default(void);
+NVE_C_API nve_status_t nve_host_embedding_layer_config_init(
+    nve_host_embedding_layer_config_t* config, size_t config_size);
 
 /* ============================================================================
  * Version
@@ -413,6 +410,18 @@ NVE_C_API nve_status_t nve_context_get_modify_stream(nve_context_t ctx, void** o
 NVE_C_API nve_status_t nve_gpu_table_create(
     nve_table_t* out, nve_key_type_t key_type,
     const nve_gpu_table_config_t* config, nve_allocator_t allocator);
+
+/**
+ * Create a linear host table over a caller-owned dense row buffer. Key k maps to
+ * row k; keys outside [0, num_rows) miss. Insert, erase, and clear have no effect.
+ * Use it with nve_host_embedding_layer_create().
+ * @param out Output handle.
+ * @param key_type Key type (NVE_KEY_INT32 or NVE_KEY_INT64).
+ * @param config Linear host table configuration. emb_table must outlive the table.
+ */
+NVE_C_API nve_status_t nve_linear_host_table_create(
+    nve_table_t* out, nve_key_type_t key_type,
+    const nve_linear_host_table_config_t* config);
 
 /**
  * Destroy a table handle (GPU or host). All execution contexts created from

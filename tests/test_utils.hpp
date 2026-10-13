@@ -23,6 +23,8 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <utility>
 
 #include <host_table.hpp>
 #include <nlohmann/json.hpp>
@@ -46,6 +48,23 @@ inline std::filesystem::path nve_library_dir() {
 inline std::string plugin_full_path(const std::string& plugin_name) {
   return (nve_library_dir() / plugin_so(plugin_name)).string();
 }
+
+// Removes a temporary file or directory tree when it goes out of scope.
+class TempPathCleanup final {
+ public:
+  explicit TempPathCleanup(std::filesystem::path path) : path_{std::move(path)} {}
+
+  TempPathCleanup(const TempPathCleanup&) = delete;
+  TempPathCleanup& operator=(const TempPathCleanup&) = delete;
+
+  ~TempPathCleanup() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+ private:
+  std::filesystem::path path_;
+};
 
 /* Creates a table factory from an in-tree plugin by short name ("stl-map",
  * "phmap", ...). The stack Plugin dies before the factory is returned, so
@@ -102,4 +121,11 @@ inline nve::table_factory_ptr_t plugin_factory(
   GTEST_SKIP() << "sph plugin is not available (NVE_FEATURE_SPH_PLUGIN not defined)"
 #else
 #define SKIP_IF_SPH_UNAVAILABLE() ((void)0)
+#endif
+
+#ifndef NVE_FEATURE_LINEAR_FILE_PLUGIN
+#define SKIP_IF_LINEAR_FILE_UNAVAILABLE() \
+  GTEST_SKIP() << "linear_file plugin is not available (NVE_FEATURE_LINEAR_FILE_PLUGIN not defined)"
+#else
+#define SKIP_IF_LINEAR_FILE_UNAVAILABLE() ((void)0)
 #endif

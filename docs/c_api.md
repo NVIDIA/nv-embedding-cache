@@ -58,24 +58,73 @@ Each handle has a corresponding `_destroy` function.
 
 ## Configuration
 
-Config structs are initialized using `_default()` functions that provide sensible defaults matching the C++ API:
+Configs begin with an opaque `header` field. Initialize caller-owned
+storage with `_config_init(&cfg, sizeof(cfg))`, check the status, assign fields,
+and pass the config to its existing creation function:
 
 ```c
-nve_gpu_table_config_t cfg = nve_gpu_table_config_default();
-cfg.device_id = 0;
-cfg.cache_size = 1 << 20;
-cfg.row_size_in_bytes = 128;
-cfg.value_dtype = NVE_DTYPE_FLOAT32;
+nve_status_t create_gpu_table(nve_table_t* out) {
+    /* Create config */
+    nve_gpu_table_config_t cfg;
+    /* Init config to defaults */
+    nve_status_t st = nve_gpu_table_config_init(&cfg, sizeof(cfg));
+    if (st != NVE_SUCCESS) {
+        return st;
+    }
+    /* Override config defaults */
+    cfg.device_id = 0;
+    cfg.cache_size = 1 << 20;
+    cfg.row_size_in_bytes = 128;
+    cfg.value_dtype = NVE_DTYPE_FLOAT32;
+    /* Create the gpu table */
+    return nve_gpu_table_create(out, NVE_KEY_INT64, &cfg, NULL);
+}
 ```
 
-Available config initializers:
-- `nve_gpu_table_config_default()`
-- `nve_gpu_embedding_layer_config_default()`
-- `nve_linear_uvm_layer_config_default()`
-- `nve_hierarchical_layer_config_default()`
-- `nve_host_embedding_layer_config_default()`
-- `nve_overflow_policy_config_default()`
-- `nve_host_table_config_default()`
+| Config type | Initializer | Creation function |
+| --- | --- | --- |
+| `nve_gpu_table_config_t` | `nve_gpu_table_config_init` | `nve_gpu_table_create` |
+| `nve_linear_host_table_config_t` | `nve_linear_host_table_config_init` | `nve_linear_host_table_create` |
+| `nve_gpu_embedding_layer_config_t` | `nve_gpu_embedding_layer_config_init` | `nve_gpu_embedding_layer_create` |
+| `nve_linear_uvm_layer_config_t` | `nve_linear_uvm_layer_config_init` | `nve_linear_uvm_layer_create` |
+| `nve_hierarchical_layer_config_t` | `nve_hierarchical_layer_config_init` | `nve_hierarchical_layer_create` |
+| `nve_host_embedding_layer_config_t` | `nve_host_embedding_layer_config_init` | `nve_host_embedding_layer_create` |
+
+The initializer fills fields with the corresponding C++ config defaults and
+writes the `header`, which records the size. The caller should not modify the
+header. Pointers set by the initializer refer to library-owned defaults.
+
+Initialization:
+
+- Writes at most `size` bytes and leaves storage unchanged on failure.
+- Returns `NVE_ERROR_INVALID_ARGUMENT` if `size` is below `sizeof(uint64_t)` or
+  ends inside a field.
+- Returns `NVE_ERROR_NOT_IMPLEMENTED` if `size` exceeds what the library
+  supports, rather than silently dropping newer options.
+- Cannot check the real allocation: `size` bytes must be readable and writable.
+
+Creation:
+
+- Returns `NVE_ERROR_INVALID_ARGUMENT` for configs not set up by the matching
+  initializer (for example uninitialized storage or another config type).
+- Reads only complete fields within the recorded size and uses defaults for the
+  rest, so applications built with an older, smaller config within ABI major 2
+  run on a newer library without recompiling. Required resources must still be
+  supplied.
+- Clears its output handle on failure.
+- Leaves pointer ownership and handle lifetimes unchanged.
+
+### ABI evolution rules
+
+Within the same ABI major version, future config fields must be appended beyond
+the previous struct's full `sizeof`, including trailing padding. Existing
+fields, offsets, types, alignment, and meanings stay fixed. Register new fields
+and map their C++ defaults in the corresponding `nve_config_traits`
+specialization in `src/nve_c_api_config.hpp`, then map them to the C++ config
+in the creation implementation. 
+
+For brevity, the remaining examples omit status handling; application code must
+check every returned status before continuing.
 
 ### Data Types
 
@@ -101,7 +150,8 @@ For rowwise quantized formats, `row_size_in_bytes` / `max_value_size` is the ful
 ### GPU Table
 
 ```c
-nve_gpu_table_config_t cfg = nve_gpu_table_config_default();
+nve_gpu_table_config_t cfg;
+nve_gpu_table_config_init(&cfg, sizeof(cfg));
 cfg.device_id = 0;
 cfg.cache_size = 4 * 1024 * 1024;  // 4 MB
 cfg.row_size_in_bytes = 128;
@@ -110,6 +160,30 @@ cfg.value_dtype = NVE_DTYPE_FLOAT32;
 nve_table_t gpu_table = NULL;
 nve_gpu_table_create(&gpu_table, NVE_KEY_INT64, &cfg, NULL);
 ```
+
+### Linear Host Table
+
+A host table over a caller-owned dense row buffer: key `k` maps to row `k`, and
+keys outside `[0, num_rows)` miss. Use it with a [host embedding layer](#host-embedding-layer).
+
+```c
+float* rows = NULL;  // num_rows * 32 floats, preferably cudaMallocHost'd
+cudaMallocHost((void**)&rows, num_rows * 128);
+
+nve_linear_host_table_config_t cfg;
+nve_linear_host_table_config_init(&cfg, sizeof(cfg));
+cfg.emb_table = rows;
+cfg.num_rows = num_rows;
+cfg.row_size_in_bytes = 128;
+cfg.value_dtype = NVE_DTYPE_FLOAT32;
+
+nve_table_t host_table = NULL;
+nve_linear_host_table_create(&host_table, NVE_KEY_INT64, &cfg);
+```
+
+`max_threads` caps the CPU threads used per operation and `task_size_threshold`
+limits them to `ceil(num_keys / task_size_threshold)` (C++ defaults: unlimited
+and 1024).
 
 ### Host Tables (via plugins)
 
@@ -251,7 +325,8 @@ The C API exposes constructors for GPU, Linear UVM, Hierarchical, and Host embed
 Stores all data in GPU memory. No caching.
 
 ```c
-nve_gpu_embedding_layer_config_t cfg = nve_gpu_embedding_layer_config_default();
+nve_gpu_embedding_layer_config_t cfg;
+nve_gpu_embedding_layer_config_init(&cfg, sizeof(cfg));
 cfg.layer_name = "my_gpu_layer";
 cfg.device_id = 0;
 cfg.embedding_table = d_table_ptr;  // GPU memory pointer
@@ -270,14 +345,16 @@ GPU cache backed by a UVM (Unified Virtual Memory) table in host memory.
 
 ```c
 // GPU table must have uvm_table set
-nve_gpu_table_config_t gpu_cfg = nve_gpu_table_config_default();
+nve_gpu_table_config_t gpu_cfg;
+nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg));
 gpu_cfg.uvm_table = h_pinned_table;  // cudaMallocHost'd memory
 // ... other config ...
 
 nve_table_t gpu_table = NULL;
 nve_gpu_table_create(&gpu_table, NVE_KEY_INT64, &gpu_cfg, NULL);
 
-nve_linear_uvm_layer_config_t cfg = nve_linear_uvm_layer_config_default();
+nve_linear_uvm_layer_config_t cfg;
+nve_linear_uvm_layer_config_init(&cfg, sizeof(cfg));
 cfg.layer_name = "my_uvm_layer";
 cfg.default_row_index = 0;  // optional: row returned for keys outside [0, uvm_num_rows)
 
@@ -292,7 +369,8 @@ Both layers fill the caller-owned row named by `default_row_index` into the outp
 Multi-tier caching with GPU cache, host table, and optional remote storage.
 
 ```c
-nve_hierarchical_layer_config_t cfg = nve_hierarchical_layer_config_default();
+nve_hierarchical_layer_config_t cfg;
+nve_hierarchical_layer_config_init(&cfg, sizeof(cfg));
 cfg.layer_name = "my_hier_layer";
 // cfg.insert_heuristic is NULL by default, which enables the default heuristic
 // To disable auto-inserts: nve_heuristic_create_never(&cfg.insert_heuristic)
@@ -304,7 +382,7 @@ nve_hierarchical_layer_create(&layer, NVE_KEY_INT64, &cfg, tables, 2, NULL);
 
 ### Host Embedding Layer
 
-CPU-only layer wrapping one host table. The table must use the same key type as the layer and must report a host/CPU device.
+CPU-only layer wrapping one host table, either a [linear host table](#linear-host-table) or a plugin table. The table must use the same key type as the layer and must report a host/CPU device.
 
 ```c
 // Create any host table first, for example through a plugin factory.
@@ -322,7 +400,8 @@ nve_table_factory_produce(factory, 0, "{"
 "}", &host_table);
 
 float default_row[32] = {0};  // optional miss fallback
-nve_host_embedding_layer_config_t cfg = nve_host_embedding_layer_config_default();
+nve_host_embedding_layer_config_t cfg;
+nve_host_embedding_layer_config_init(&cfg, sizeof(cfg));
 cfg.layer_name = "my_host_layer";
 cfg.default_embedding = default_row;
 cfg.default_embedding_size = sizeof(default_row);
@@ -332,6 +411,12 @@ nve_host_embedding_layer_create(&layer, NVE_KEY_INT64, &cfg, host_table, NULL);
 ```
 
 Host layers support lookup, insert, update, accumulate, erase, clear, and pooled lookup through the generic `nve_layer_*` APIs. Pooled host lookup supports `NVE_SPARSE_FIXED` and `NVE_SPARSE_CSR` layouts.
+
+The host config exposes `task_size_threshold` and `disable_threadpool`.
+`task_size_threshold` must be positive and limits CPU task count to
+`ceil(num_keys / task_size_threshold)` (C++ default: 1024).
+Setting `disable_threadpool` to a nonzero value runs lookups on the caller
+thread instead of the supplied thread pool (C++ default: false).
 
 ### Layer operations
 

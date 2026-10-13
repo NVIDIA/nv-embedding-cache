@@ -19,11 +19,12 @@
 
 // C++ loader for NVE exported models.
 //
-// Reads metadata.json + per-module .nve weight files from an export directory,
-// creates LinearUVMEmbedding layers, loads weights, and registers them in
-// the NVELayerRegistry so torch custom ops can find them by layer_id.
+// Reads metadata.json + .nve weight files from an export directory, creates
+// the embedding layers, loads weights, and registers them in the
+// NVELayerRegistry so torch custom ops can find them by marker tensor.
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <set>
@@ -61,10 +62,15 @@ inline std::string marker_fqn(const std::string& module_path) {
                                : module_path + ".marker_tensor";
 }
 
+// Accepts "float32"/"float16" (v2) and "torch.float32"/"torch.float16" (v1).
 inline DataType_t parse_dtype(const std::string& s) {
-    if (s.find("float32") != std::string::npos) return DataType_t::Float32;
-    if (s.find("float16") != std::string::npos) return DataType_t::Float16;
-    throw std::runtime_error("nve_loader: unsupported dtype: " + s);
+    constexpr std::string_view torch_prefix = "torch.";
+    std::string_view name = s;
+    if (name.substr(0, torch_prefix.size()) == torch_prefix) name.remove_prefix(torch_prefix.size());
+    for (const DataType_t dt : {DataType_t::Float32, DataType_t::Float16}) {
+        if (name == to_string(dt)) return dt;
+    }
+    NVE_THROW_("nve_loader: unsupported dtype: ", s);
 }
 
 // Build the per-layer EmbedLayerConfig from a metadata layer entry. Uses the
@@ -178,32 +184,34 @@ private:
 // RAII loader for NVE exported (AOTInductor) models.
 //
 // The constructor reads metadata.json, creates embedding layers, loads weights
-// from weights/<module_path>.nve, allocates a per-layer marker tensor, points
-// the AOTI container's marker constant at it (user_managed, both buffers), and
-// registers each layer in the NVELayerRegistry keyed by the marker's data_ptr.
+// from weights/<storage_ref>.nve (v1: weights/<module_path>.nve), allocates a
+// per-layer marker tensor, points the AOTI container's marker constant at it
+// (user_managed, both buffers), and registers each layer in the
+// NVELayerRegistry keyed by the marker's data_ptr.
 //
 // The destructor unregisters all layers from the registry. The LayerDirectory
 // owns the marker tensors and MUST outlive the loader (the container holds only
 // non-owning handles).
 //
 // Usage:
-//   torch::inductor::AOTIModelPackageLoader loader(save_dir + "/model.pt2");
-//   nve::LayerDirectory dir(save_dir, loader, device_index);
+//   torch::inductor::AOTIModelPackageLoader loader(save_path + "/model.pt2");
+//   auto resources = std::make_shared<nve::ResourceDirectory>();
+//   nve::LayerDirectory dir(save_path, loader, device_index, resources);
 //   auto outputs = loader.run({keys});
 //   // destructor unregisters when dir goes out of scope
 class LayerDirectory {
 public:
-    LayerDirectory(const std::string& save_dir,
+    LayerDirectory(const std::string& save_path,
                    torch::inductor::AOTIModelPackageLoader& loader,
                    int device_index,
                    std::shared_ptr<ResourceDirectory> resource_dir,
-                   size_t gpu_cache_size_override = 0,
+                   const LayerConfigOverrides& overrides = {},
                    const TopologyMap& topology = {})
-        : save_dir_(save_dir), resource_dir_(std::move(resource_dir))
+        : save_path_(save_path), resource_dir_(std::move(resource_dir))
     {
-        std::ifstream meta_file(save_dir + "/metadata.json");
+        std::ifstream meta_file(save_path + "/metadata.json");
         NVE_CHECK_(meta_file.is_open(),
-                  "nve_loader: cannot open " + save_dir + "/metadata.json");
+                  "nve_loader: cannot open " + save_path + "/metadata.json");
         auto raw = nlohmann::json::parse(meta_file);
 
         // The marker scheme requires each layer's marker to be a runtime-updatable
@@ -217,8 +225,8 @@ public:
 
         // Detect schema version: array = v1 legacy; object = v2.
         if (raw.is_array()) {
-            load_layers_v1(raw, loader, pkg_fqns, device_index,
-                            gpu_cache_size_override);
+            raw = apply_layer_config_overrides(raw, overrides);
+            load_layers_v1(raw, loader, pkg_fqns, device_index);
         } else {
             const int version = raw.value("version", 1);
             NVE_CHECK_(version <= METADATA_SCHEMA_VERSION,
@@ -226,8 +234,8 @@ public:
                        std::to_string(version) + " but this NVE runtime only supports "
                        "up to version " + std::to_string(METADATA_SCHEMA_VERSION) +
                        ". Upgrade the NVE runtime.");
-            load_layers_v2(raw, loader, pkg_fqns, device_index,
-                            gpu_cache_size_override, topology);
+            raw["layers"] = apply_layer_config_overrides(raw.at("layers"), overrides);
+            load_layers_v2(raw, loader, pkg_fqns, device_index, topology);
         }
     }
 
@@ -396,8 +404,7 @@ private:
     void load_layers_v1(const nlohmann::json& metadata,
                          torch::inductor::AOTIModelPackageLoader& loader,
                          const std::set<std::string>& pkg_fqns,
-                         int device_index,
-                         size_t gpu_cache_size_override) {
+                         int device_index) {
         std::set<std::string> weights_loaded;
         for (const auto& entry : metadata) {
             int64_t layer_id        = entry["id"];
@@ -406,9 +413,7 @@ private:
             size_t emb_size         = entry["embedding_size"];
             std::string dtype_str   = entry["dtype"];
             std::string layer_type  = entry["layer_type"];
-            size_t gpu_cache        = gpu_cache_size_override > 0
-                                          ? gpu_cache_size_override
-                                          : entry["gpu_cache_size"].get<size_t>();
+            size_t gpu_cache        = entry["gpu_cache_size"].get<size_t>();
             bool training           = entry["optimize_for_training"];
             DataType_t nve_dtype    = parse_dtype(dtype_str);
             EmbedLayerConfig cfg    = parse_embed_config(entry);
@@ -425,7 +430,7 @@ private:
 
                 std::string weight_name = module_path;
                 std::replace(weight_name.begin(), weight_name.end(), '.', '_');
-                std::string weight_path = save_dir_ + "/weights/" + weight_name + ".nve";
+                std::string weight_path = save_path_ + "/weights/" + weight_name + ".nve";
                 InputFileStreamWrapper weight_stream(weight_path);
 
                 if (layer_type == "LinearUVM") {
@@ -498,7 +503,6 @@ private:
                          torch::inductor::AOTIModelPackageLoader& loader,
                          const std::set<std::string>& pkg_fqns,
                          int device_index,
-                         size_t gpu_cache_size_override,
                          const TopologyMap& topology) {
         const auto& resources    = doc.value("resources", nlohmann::json::object());
         const auto& ps_resources = resources.value("remote_ps", nlohmann::json::object());
@@ -513,9 +517,7 @@ private:
             size_t emb_size         = entry["embedding_size"];
             std::string dtype_str   = entry["dtype"];
             std::string layer_type  = entry["layer_type"];
-            size_t gpu_cache        = gpu_cache_size_override > 0
-                                          ? gpu_cache_size_override
-                                          : entry["gpu_cache_size"].get<size_t>();
+            size_t gpu_cache        = entry["gpu_cache_size"].get<size_t>();
             size_t host_cache       = entry.value("host_cache_size", size_t{0});
             bool training           = entry["optimize_for_training"];
             DataType_t nve_dtype    = parse_dtype(dtype_str);
@@ -555,7 +557,7 @@ private:
                         emb_size, num_emb, nve_dtype, mem_block,
                         gpu_cache, training, device_index, cfg);
                     if (needs_weight_load && !weights_loaded.count(weight_key)) {
-                        InputFileStreamWrapper ws(save_dir_ + "/weights/" + weight_key + ".nve");
+                        InputFileStreamWrapper ws(save_path_ + "/weights/" + weight_key + ".nve");
                         l->load_tensor_from_stream(ws, layer_id);
                         weights_loaded.insert(std::move(weight_key));
                     }
@@ -564,7 +566,7 @@ private:
                     auto l = std::make_shared<GPUEmbedding<int64_t>>(
                         emb_size, num_emb, nve_dtype, mem_block, device_index, cfg);
                     if (needs_weight_load && !weights_loaded.count(weight_key)) {
-                        InputFileStreamWrapper ws(save_dir_ + "/weights/" + weight_key + ".nve");
+                        InputFileStreamWrapper ws(save_path_ + "/weights/" + weight_key + ".nve");
                         l->load_tensor_from_stream(ws, layer_id);
                         weights_loaded.insert(std::move(weight_key));
                     }
@@ -573,7 +575,7 @@ private:
                     auto l = std::make_shared<HostEmbedding<int64_t>>(
                         emb_size, num_emb, nve_dtype, mem_block, device_index, cfg);
                     if (needs_weight_load && !weights_loaded.count(weight_key)) {
-                        InputFileStreamWrapper ws(save_dir_ + "/weights/" + weight_key + ".nve");
+                        InputFileStreamWrapper ws(save_path_ + "/weights/" + weight_key + ".nve");
                         l->load_tensor_from_stream(ws, layer_id);
                         weights_loaded.insert(std::move(weight_key));
                     }
@@ -605,7 +607,7 @@ private:
         }
     }
 
-    std::string save_dir_;
+    std::string save_path_;
     std::shared_ptr<ResourceDirectory> resource_dir_;
     std::map<int64_t, LoadedLayer> layers_;
 };

@@ -88,7 +88,8 @@ int main() {
   /* -- Step 1: GPU table (L1 cache) ---------------------------------------- */
   printf("[1] Creating GPU table (L1 cache)...\n");
 
-  nve_gpu_table_config_t gpu_cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t gpu_cfg;
+  CHECK_NVE(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
   gpu_cfg.device_id         = device_id;
   gpu_cfg.cache_size        = 4 * 1024 * 1024;  // 4 MB GPU cache
   gpu_cfg.row_size_in_bytes = row_size;
@@ -147,8 +148,8 @@ int main() {
   /* -- Step 4: Build the hierarchical layer -------------------------------- */
   printf("\n[4] Building hierarchical embedding layer...\n");
 
-  nve_hierarchical_layer_config_t layer_cfg =
-      nve_hierarchical_layer_config_default();
+  nve_hierarchical_layer_config_t layer_cfg;
+  CHECK_NVE(nve_hierarchical_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
   layer_cfg.layer_name           = "custom_remote_sample";
   layer_cfg.min_insert_size_gpu  = 16;
   layer_cfg.min_insert_size_host = 16;

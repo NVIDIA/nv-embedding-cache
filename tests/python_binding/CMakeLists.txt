@@ -14,8 +14,11 @@
 # limitations under the License.
 
 if (NOT NVE_DRIVERLESS_BUILD AND NOT NVE_DISABLE_TORCH_BINDINGS AND TORCH_FOUND)
-    add_executable(export_inference_test export_inference_test.cpp)
-    target_link_libraries(export_inference_test PRIVATE gtest_main)
+    add_executable(export_inference_test
+        export_inference_test.cpp
+        layer_config_overrides_test.cpp
+    )
+    target_link_libraries(export_inference_test PRIVATE gtest_main nve-common)
     target_compile_definitions(export_inference_test PRIVATE
         NVE_TEST_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}"
         NVE_TEST_INFERENCE_EXECUTABLE="$<TARGET_FILE:nve_inference>"

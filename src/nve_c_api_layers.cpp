@@ -15,11 +15,70 @@
  * limitations under the License.
  */
 
-#include "nve_c_api_internal.hpp"
+#include "nve_c_api_config.hpp"
 #include <gpu_embedding_layer.hpp>
 #include <linear_embedding_layer.hpp>
 #include <hierarchical_embedding_layer.hpp>
 #include <host_embedding_layer.hpp>
+
+/* ============================================================================
+ * C to C++ layer construction, shared by both key types
+ * ============================================================================ */
+
+namespace {
+
+// NULL or a non-positive size leaves the default embedding empty.
+std::vector<uint8_t> copy_default_embedding(const void* data, int64_t size) {
+  if (!data || size <= 0) {
+    return {};
+  }
+  const auto* p = static_cast<const uint8_t*>(data);
+  return {p, p + size};
+}
+
+template <typename KeyType>
+std::shared_ptr<nve::EmbeddingLayerBase> make_linear_uvm_layer(
+    const nve_linear_uvm_layer_config_t& c, const nve::table_ptr_t& table,
+    const nve::allocator_ptr_t& alloc) {
+  typename nve::LinearUVMEmbeddingLayer<KeyType>::Config cfg;
+  cfg.layer_name = c.layer_name ? c.layer_name : "";
+  cfg.insert_heuristic = unwrap_heuristic(c.insert_heuristic);
+  cfg.min_insert_freq_gpu = c.min_insert_freq_gpu;
+  cfg.min_insert_size_gpu = c.min_insert_size_gpu;
+  cfg.default_row_index = c.default_row_index;
+  auto gpu_table = std::dynamic_pointer_cast<nve::GpuTable<KeyType>>(table);
+  NVE_CHECK_ARG_(gpu_table != nullptr, "gpu_table must be a GPU table");
+  return std::make_shared<nve::LinearUVMEmbeddingLayer<KeyType>>(cfg, gpu_table, alloc);
+}
+
+template <typename KeyType>
+std::shared_ptr<nve::EmbeddingLayerBase> make_hierarchical_layer(
+    const nve_hierarchical_layer_config_t& c, const std::vector<nve::table_ptr_t>& tables,
+    const nve::allocator_ptr_t& alloc) {
+  typename nve::HierarchicalEmbeddingLayer<KeyType>::Config cfg;
+  cfg.layer_name = c.layer_name ? c.layer_name : "";
+  cfg.insert_heuristic = unwrap_heuristic(c.insert_heuristic);
+  cfg.min_insert_freq_gpu = c.min_insert_freq_gpu;
+  cfg.min_insert_freq_host = c.min_insert_freq_host;
+  cfg.min_insert_size_gpu = c.min_insert_size_gpu;
+  cfg.min_insert_size_host = c.min_insert_size_host;
+  cfg.default_embedding = copy_default_embedding(c.default_embedding, c.default_embedding_size);
+  return std::make_shared<nve::HierarchicalEmbeddingLayer<KeyType>>(cfg, tables, alloc);
+}
+
+template <typename KeyType>
+std::shared_ptr<nve::EmbeddingLayerBase> make_host_layer(
+    const nve_host_embedding_layer_config_t& c, const nve::table_ptr_t& table,
+    const nve::allocator_ptr_t& alloc) {
+  typename nve::HostEmbeddingLayer<KeyType>::Config cfg;
+  cfg.layer_name = c.layer_name ? c.layer_name : "";
+  cfg.task_size_threshold = c.task_size_threshold;
+  cfg.disable_threadpool = c.disable_threadpool != 0;
+  cfg.default_embedding = copy_default_embedding(c.default_embedding, c.default_embedding_size);
+  return std::make_shared<nve::HostEmbeddingLayer<KeyType>>(cfg, table, alloc);
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -30,10 +89,18 @@ extern "C" {
 nve_status_t nve_gpu_embedding_layer_create(
     nve_layer_t* out, nve_key_type_t key_type,
     const nve_gpu_embedding_layer_config_t* config, nve_allocator_t allocator) {
-  if (!out || !config) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out and config must not be NULL");
+  if (!out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out must not be NULL");
   }
+  *out = NULL;
   NVE_C_TRY
+    nve_gpu_embedding_layer_config_t normalized;
+    const auto status = nve_read_config(config, normalized);
+    if (status != NVE_SUCCESS) {
+      return status;
+    }
+    config = &normalized;
+
     nve::GPUEmbeddingLayerConfig cfg;
     cfg.layer_name = config->layer_name ? config->layer_name : "";
     cfg.device_id = config->device_id;
@@ -68,39 +135,34 @@ nve_status_t nve_linear_uvm_layer_create(
     nve_layer_t* out, nve_key_type_t key_type,
     const nve_linear_uvm_layer_config_t* config,
     nve_table_t gpu_table, nve_allocator_t allocator) {
-  if (!out || !config || !gpu_table || !gpu_table->ptr) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out, config, and gpu_table must not be NULL");
+  if (!out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out must not be NULL");
   }
-  if (gpu_table->key_type != key_type) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "gpu_table key type must match layer key type");
-  }
+  *out = NULL;
   NVE_C_TRY
+    nve_linear_uvm_layer_config_t normalized;
+    const auto status = nve_read_config(config, normalized);
+    if (status != NVE_SUCCESS) {
+      return status;
+    }
+    config = &normalized;
+
+    if (!gpu_table || !gpu_table->ptr) {
+      return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out, config, and gpu_table must not be NULL");
+    }
+    if (gpu_table->key_type != key_type) {
+      return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "gpu_table key type must match layer key type");
+    }
     auto alloc = unwrap_allocator(allocator);
     std::shared_ptr<nve::EmbeddingLayerBase> layer;
 
     switch (key_type) {
-      case NVE_KEY_INT32: {
-        typename nve::LinearUVMEmbeddingLayer<int32_t>::Config cfg;
-        cfg.layer_name = config->layer_name ? config->layer_name : "";
-        cfg.insert_heuristic = unwrap_heuristic(config->insert_heuristic);
-        cfg.min_insert_freq_gpu = config->min_insert_freq_gpu;
-        cfg.min_insert_size_gpu = config->min_insert_size_gpu;
-        cfg.default_row_index = config->default_row_index;
-        auto gpu_tbl = std::static_pointer_cast<nve::GpuTable<int32_t>>(gpu_table->ptr);
-        layer = std::make_shared<nve::LinearUVMEmbeddingLayer<int32_t>>(cfg, gpu_tbl, alloc);
+      case NVE_KEY_INT32:
+        layer = make_linear_uvm_layer<int32_t>(*config, gpu_table->ptr, alloc);
         break;
-      }
-      case NVE_KEY_INT64: {
-        typename nve::LinearUVMEmbeddingLayer<int64_t>::Config cfg;
-        cfg.layer_name = config->layer_name ? config->layer_name : "";
-        cfg.insert_heuristic = unwrap_heuristic(config->insert_heuristic);
-        cfg.min_insert_freq_gpu = config->min_insert_freq_gpu;
-        cfg.min_insert_size_gpu = config->min_insert_size_gpu;
-        cfg.default_row_index = config->default_row_index;
-        auto gpu_tbl = std::static_pointer_cast<nve::GpuTable<int64_t>>(gpu_table->ptr);
-        layer = std::make_shared<nve::LinearUVMEmbeddingLayer<int64_t>>(cfg, gpu_tbl, alloc);
+      case NVE_KEY_INT64:
+        layer = make_linear_uvm_layer<int64_t>(*config, gpu_table->ptr, alloc);
         break;
-      }
       default:
         return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Unsupported key type");
     }
@@ -117,15 +179,29 @@ nve_status_t nve_hierarchical_layer_create(
     nve_layer_t* out, nve_key_type_t key_type,
     const nve_hierarchical_layer_config_t* config,
     const nve_table_t* tables, int64_t num_tables, nve_allocator_t allocator) {
-  if (!out || !config || !tables || num_tables <= 0) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Invalid arguments");
+  if (!out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out must not be NULL");
   }
+  *out = NULL;
   NVE_C_TRY
+    nve_hierarchical_layer_config_t normalized;
+    const auto status = nve_read_config(config, normalized);
+    if (status != NVE_SUCCESS) {
+      return status;
+    }
+    config = &normalized;
+
+    if (!tables || num_tables <= 0) {
+      return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Invalid arguments");
+    }
     std::vector<nve::table_ptr_t> cpp_tables;
     cpp_tables.reserve(static_cast<size_t>(num_tables));
     for (int64_t i = 0; i < num_tables; ++i) {
       if (!tables[i] || !tables[i]->ptr) {
         return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Table handle at index is NULL");
+      }
+      if (tables[i]->key_type != key_type) {
+        return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "table key type must match layer key type");
       }
       cpp_tables.push_back(tables[i]->ptr);
     }
@@ -134,36 +210,12 @@ nve_status_t nve_hierarchical_layer_create(
     std::shared_ptr<nve::EmbeddingLayerBase> layer;
 
     switch (key_type) {
-      case NVE_KEY_INT32: {
-        typename nve::HierarchicalEmbeddingLayer<int32_t>::Config cfg;
-        cfg.layer_name = config->layer_name ? config->layer_name : "";
-        cfg.insert_heuristic = unwrap_heuristic(config->insert_heuristic);
-        cfg.min_insert_freq_gpu = config->min_insert_freq_gpu;
-        cfg.min_insert_freq_host = config->min_insert_freq_host;
-        cfg.min_insert_size_gpu = config->min_insert_size_gpu;
-        cfg.min_insert_size_host = config->min_insert_size_host;
-        if (config->default_embedding && config->default_embedding_size > 0) {
-          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
-          cfg.default_embedding.assign(p, p + config->default_embedding_size);
-        }
-        layer = std::make_shared<nve::HierarchicalEmbeddingLayer<int32_t>>(cfg, cpp_tables, alloc);
+      case NVE_KEY_INT32:
+        layer = make_hierarchical_layer<int32_t>(*config, cpp_tables, alloc);
         break;
-      }
-      case NVE_KEY_INT64: {
-        typename nve::HierarchicalEmbeddingLayer<int64_t>::Config cfg;
-        cfg.layer_name = config->layer_name ? config->layer_name : "";
-        cfg.insert_heuristic = unwrap_heuristic(config->insert_heuristic);
-        cfg.min_insert_freq_gpu = config->min_insert_freq_gpu;
-        cfg.min_insert_freq_host = config->min_insert_freq_host;
-        cfg.min_insert_size_gpu = config->min_insert_size_gpu;
-        cfg.min_insert_size_host = config->min_insert_size_host;
-        if (config->default_embedding && config->default_embedding_size > 0) {
-          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
-          cfg.default_embedding.assign(p, p + config->default_embedding_size);
-        }
-        layer = std::make_shared<nve::HierarchicalEmbeddingLayer<int64_t>>(cfg, cpp_tables, alloc);
+      case NVE_KEY_INT64:
+        layer = make_hierarchical_layer<int64_t>(*config, cpp_tables, alloc);
         break;
-      }
       default:
         return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Unsupported key type");
     }
@@ -180,37 +232,34 @@ nve_status_t nve_host_embedding_layer_create(
     nve_layer_t* out, nve_key_type_t key_type,
     const nve_host_embedding_layer_config_t* config,
     nve_table_t host_table, nve_allocator_t allocator) {
-  if (!out || !config || !host_table || !host_table->ptr) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out, config, and host_table must not be NULL");
+  if (!out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out must not be NULL");
   }
-  if (host_table->key_type != key_type) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "host_table key type must match layer key type");
-  }
+  *out = NULL;
   NVE_C_TRY
+    nve_host_embedding_layer_config_t normalized;
+    const auto status = nve_read_config(config, normalized);
+    if (status != NVE_SUCCESS) {
+      return status;
+    }
+    config = &normalized;
+
+    if (!host_table || !host_table->ptr) {
+      return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out, config, and host_table must not be NULL");
+    }
+    if (host_table->key_type != key_type) {
+      return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "host_table key type must match layer key type");
+    }
     auto alloc = unwrap_allocator(allocator);
     std::shared_ptr<nve::EmbeddingLayerBase> layer;
 
     switch (key_type) {
-      case NVE_KEY_INT32: {
-        typename nve::HostEmbeddingLayer<int32_t>::Config cfg;
-        cfg.layer_name = config->layer_name ? config->layer_name : "";
-        if (config->default_embedding && config->default_embedding_size > 0) {
-          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
-          cfg.default_embedding.assign(p, p + config->default_embedding_size);
-        }
-        layer = std::make_shared<nve::HostEmbeddingLayer<int32_t>>(cfg, host_table->ptr, alloc);
+      case NVE_KEY_INT32:
+        layer = make_host_layer<int32_t>(*config, host_table->ptr, alloc);
         break;
-      }
-      case NVE_KEY_INT64: {
-        typename nve::HostEmbeddingLayer<int64_t>::Config cfg;
-        cfg.layer_name = config->layer_name ? config->layer_name : "";
-        if (config->default_embedding && config->default_embedding_size > 0) {
-          const auto* p = static_cast<const uint8_t*>(config->default_embedding);
-          cfg.default_embedding.assign(p, p + config->default_embedding_size);
-        }
-        layer = std::make_shared<nve::HostEmbeddingLayer<int64_t>>(cfg, host_table->ptr, alloc);
+      case NVE_KEY_INT64:
+        layer = make_host_layer<int64_t>(*config, host_table->ptr, alloc);
         break;
-      }
       default:
         return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Unsupported key type");
     }

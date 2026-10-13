@@ -384,15 +384,16 @@ TYPED_TEST_P(EmbeddingCacheQuantLookupRefTest, TestPoolingAgainstRefCpu) {
 
 REGISTER_TYPED_TEST_SUITE_P(EmbeddingCacheQuantLookupRefTest, TestPoolingAgainstRefCpu);
 
-// QInt8 storage is signed char; QUint8 storage is unsigned char (matching QuantizationHelper::Vec1).
+// QInt8 storage is int8_t (plain char is unsigned on aarch64); QUint8 storage is unsigned char
+// (matching QuantizationHelper::Vec1).
 typedef ::testing::Types<
     // QInt8RowwiseF32 (symmetric-around-mean), covering the four pooling modes over fixed and CSR.
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, char, int32_t, true,  true,  false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, char, int64_t, false, true,  false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, char, int32_t, true,  false, false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, char, int64_t, false, false, false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, char, int32_t, true,  true,  true>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, char, int64_t, false, false, true>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, int8_t,int32_t, true,  true,  false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, int8_t,int64_t, false, true,  false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, int8_t,int32_t, true,  false, false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, int8_t,int64_t, false, false, false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, int8_t,int32_t, true,  true,  true>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32, int8_t,int64_t, false, false, true>,
     // QUint8RowwiseF32 (min/max affine).
     EmbedTestTypeQuantPoolingCombo<DataType_t::QUint8RowwiseF32, unsigned char, int32_t, true,  true,  false>,
     EmbedTestTypeQuantPoolingCombo<DataType_t::QUint8RowwiseF32, unsigned char, int64_t, false, true,  false>,
@@ -401,17 +402,17 @@ typedef ::testing::Types<
     EmbedTestTypeQuantPoolingCombo<DataType_t::QUint8RowwiseF32, unsigned char, int32_t, true,  true,  true>,
     EmbedTestTypeQuantPoolingCombo<DataType_t::QUint8RowwiseF32, unsigned char, int64_t, false, false, true>,
     // QInt8RowwiseF16 (symmetric, pure-scale / no offset; __half scale + output).
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, char, int32_t, true,  true,  false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, char, int64_t, false, true,  false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, char, int32_t, true,  false, false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, char, int64_t, false, false, false>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, char, int32_t, true,  true,  true>,
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, char, int64_t, false, false, true>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, int8_t,int32_t, true,  true,  false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, int8_t,int64_t, false, true,  false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, int8_t,int32_t, true,  false, false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, int8_t,int64_t, false, false, false>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, int8_t,int32_t, true,  true,  true>,
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16, int8_t,int64_t, false, false, true>,
     // load_indices=true (indirect key-gather) representative subset:
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32,  char,          int32_t, true,  true,  false, /*LOAD_INDICES=*/true>,  // Fixed sum
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32,  char,          int32_t, false, false, false, /*LOAD_INDICES=*/true>,  // CSR mean
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32,  int8_t,        int32_t, true,  true,  false, /*LOAD_INDICES=*/true>,  // Fixed sum
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF32,  int8_t,        int32_t, false, false, false, /*LOAD_INDICES=*/true>,  // CSR mean
     EmbedTestTypeQuantPoolingCombo<DataType_t::QUint8RowwiseF32, unsigned char, int32_t, false, true,  false, /*LOAD_INDICES=*/true>,  // CSR sum
-    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16,  char,          int32_t, true,  false, false, /*LOAD_INDICES=*/true>>  // Fixed mean (F16)
+    EmbedTestTypeQuantPoolingCombo<DataType_t::QInt8RowwiseF16,  int8_t,        int32_t, true,  false, false, /*LOAD_INDICES=*/true>>  // Fixed mean (F16)
     QuantPoolingTypes;
 
 INSTANTIATE_TYPED_TEST_SUITE_P(EmbeddingLookupQuant,

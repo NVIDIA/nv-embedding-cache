@@ -311,7 +311,8 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
       auto* gather_host = static_cast<const int8_t*>(
           gather_bw->access_buffer(cudaMemoryTypeUnregistered, /*copy_content=*/true, lookup_stream));
       pool_gathered_host<KeyType>(ctx, *pool_params, tables_.at(0)->get_value_type(), gather_host,
-                                  gather_stride, row_size, num_keys, output, output_stride);
+                                  gather_stride, row_size, num_keys, output, output_stride,
+                                  ctx->get_thread_pool()->num_workers());
     }
   } else {
     // Direct gather: copy to the caller only if BufferWrapper had to use a different residency.

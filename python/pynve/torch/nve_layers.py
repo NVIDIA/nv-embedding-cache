@@ -105,6 +105,8 @@ def config_to_nve_config(config: dict):
             value = value.detach().to("cpu").contiguous().view(torch.uint8).numpy().tobytes()
         # else: an iterable of byte values (e.g. the export/load json round-trip).
         embed_config.default_embedding = list(value)
+    if "disable_threadpool" in config:
+        embed_config.disable_threadpool = bool(config["disable_threadpool"])
     return embed_config
 
 class LayerType(Enum):
@@ -197,6 +199,10 @@ class NVEmbeddingBase(torch.nn.Module):
             raise ValueError(
                 f"config['default_embedding'] is only supported for HostLayer and "
                 f"Hierarchical layers, got layer_type={layer_type}")
+        if self.config.disable_threadpool and layer_type != LayerType.HostLayer:
+            raise ValueError(
+                f"config['disable_threadpool'] is only supported for HostLayer, "
+                f"got layer_type={layer_type}")
         self.gpu_cache_size = gpu_cache_size
         self.host_cache_size = host_cache_size
         self.optimize_for_training = optimize_for_training

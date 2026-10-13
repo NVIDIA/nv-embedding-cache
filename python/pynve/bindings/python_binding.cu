@@ -187,9 +187,21 @@ PYBIND11_MODULE(nve, m) {
         .def_readwrite("max_modify_size", &EmbedLayerConfig::max_modify_size)
         .def_readwrite("default_row_index", &EmbedLayerConfig::default_row_index)
         .def_readwrite("default_embedding", &EmbedLayerConfig::default_embedding)
+        .def_readwrite("disable_threadpool", &EmbedLayerConfig::disable_threadpool)
         .def("to_json", [](const EmbedLayerConfig& c) {
             return nlohmann::json(c).dump();
         }, "Serialize the config to a JSON string.");
+
+    m.def("_apply_layer_config_overrides", [](const std::string& layers_json,
+                                              const std::string& defaults_json,
+                                              const std::string& per_layer_json) {
+        LayerConfigOverrides overrides;
+        overrides.defaults = nlohmann::json::parse(defaults_json);
+        const auto per_layer = nlohmann::json::parse(per_layer_json);
+        NVE_CHECK_(per_layer.is_object(), "overrides.per_layer must be an object");
+        overrides.per_layer = per_layer.get<decltype(overrides.per_layer)>();
+        return apply_layer_config_overrides(nlohmann::json::parse(layers_json), overrides).dump();
+    });
 
     py::class_<nve::Table, std::shared_ptr<nve::Table>>(m, "Table");
 

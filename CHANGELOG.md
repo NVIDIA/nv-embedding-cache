@@ -4,6 +4,32 @@ Releases will be listed below, latest at the top.
 
 Releases are named/tagged in the format of `vYY.MM[.P]` e.g. `v26.02.3` means release of February 2026 with patch 3.
 
+## NV Embedding Cache 26.10
+### New Features
+- Added the Linear File plugin (`linear_file_plugin` feature, `libnve-plugin-linear-file.so`): a host table over a dense row-major file, with batched reads through io_uring, Linux AIO or pread (see: [plugins.md](docs/plugins.md#bundled-plugins))
+- Model loaders accept per-layer configuration overrides (`LayerConfigOverrides` in Python and C++) to tune layer knobs at load time without re-exporting (see: [python_api.md](docs/python_api.md))
+- Added the `single_layer_bench` C++ benchmark, which drives a single GPU, LinearUVM or hierarchical layer and reports throughput, hit rates and latency (see: [benchmarks.md](docs/benchmarks.md))
+### Improvements
+- Added `task_size_threshold` to `LinearHostTable` and `HostEmbeddingLayer` (C++ and C API): caps CPU task fan-out to `ceil(num_keys / threshold)` so small batches don't dispatch across the whole thread pool (default 1024)
+- Added a `disable_threadpool` option to `HostEmbeddingLayer` (and the Python HostLayer config) to run lookups on the calling thread
+### Bug Fixes
+- Fixed the set-associative GPU cache with lazy decay sizing its sets without the per-set timestamp, so its allocation exceeded the configured cache size
+- Fixed `nve_loader` silently accepting unsupported dtypes (e.g. `bfloat16` matched as `float16`); the C++ loader now requires exactly `float32`/`float16`, with or without the `torch.` prefix.
+- Fixed QInt8Rowwise dequantization producing wrong values on platforms where plain `char` is unsigned (e.g. aarch64)
+- Fixed Redis cluster mode storing values and eviction metadata in the same per-partition hash, which corrupted values with LRU and applied LFU counter updates to value entries
+  - **Breaks compatibility** with existing Redis cluster data: partition hash keys were renamed, so data written by earlier releases will not be found and must be regenerated to the new schema
+### API Changes
+- **Breaking C API change:** bumped the C ABI version to **2.0** and added an opaque `header` to GPU table and embedding layer configs
+  - Applications must rebuild against the updated headers and replace by-value `_config_default()` calls with `_config_init(&cfg, sizeof(cfg))`, checking the returned status. Config type names and creation function names are unchanged.
+  - Future appended config fields within ABI major 2 do not require existing applications to rebuild: newer libraries accept smaller configs and use C++ config defaults for absent fields. Older libraries reject unsupported larger configs instead of silently ignoring options.
+- Added `nve_linear_host_table_create()` and `nve_linear_host_table_config_t` to the C API, so host embedding layers can be backed by a `LinearHostTable`
+- Bumped the shared plugin ABI version to **2.0** after making `ThreadPool::execute` and `execute_n` virtual
+  - Plugins need to be rebuilt and report version 2.0 (no other functional change).
+- **Breaking:** replaced `gpu_cache_size_override` in the model loaders with `LayerConfigOverrides`
+  - The Python keyword argument was removed from `load`, `load_aot` and `load_nve_layers`, and the C++ `nve::LayerDirectory` constructor now takes a `LayerConfigOverrides` in its place
+  - Move a global override to `overrides.defaults` (Python) or `LayerConfigOverrides::defaults` (C++), or to per-layer patches when not every exported layer supports it
+- Removed the unused `nve_host_table_config_t` and `nve_overflow_policy_config_t` types and their `_default()` initializers from the C API
+
 ## NV Embedding Cache 26.09
 ### New Features
 - Published the experimental SPH plugin (`sph_plugin` feature, `libnve-plugin-sph-experimental.so`): a GPU-resident sharded perfect-hash table that slots in as a GPU tier (see: [plugins.md](docs/plugins.md#bundled-plugins))

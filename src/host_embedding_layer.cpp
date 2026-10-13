@@ -33,6 +33,7 @@ HostEmbeddingLayer<KeyType>::HostEmbeddingLayer(const Config& cfg, table_ptr_t t
     : config_(cfg), allocator_(allocator ? std::move(allocator) : GetDefaultAllocator()), table_(std::move(table)) {
   NVE_CHECK_(table_ != nullptr, "Invalid table");
   NVE_CHECK_(table_->get_device_id() < 0, "HostEmbeddingLayer requires a host table (device_id < 0)");
+  NVE_CHECK_(config_.task_size_threshold > 0, "Task size threshold needs to be greater than 0.");
   if (config_.default_embedding.size() > 0) {
     NVE_CHECK_(table_->get_max_row_size() == static_cast<int64_t>(config_.default_embedding.size()),
                "Default embedding row size must match table row size");
@@ -43,9 +44,19 @@ template <typename KeyType>
 HostEmbeddingLayer<KeyType>::~HostEmbeddingLayer() = default;
 
 template <typename KeyType>
+int64_t HostEmbeddingLayer<KeyType>::num_tasks_for(const context_ptr_t& ctx,
+                                                    const int64_t num_keys) const {
+  return select_num_tasks(num_keys, ctx->get_thread_pool()->num_workers(),
+                          config_.task_size_threshold);
+}
+
+template <typename KeyType>
 context_ptr_t HostEmbeddingLayer<KeyType>::create_execution_context(
     cudaStream_t lookup_stream, cudaStream_t modify_stream,
     thread_pool_ptr_t thread_pool, allocator_ptr_t allocator) {
+  if (config_.disable_threadpool) {
+    thread_pool = InlineThreadPool::instance();
+  }
   return table_->create_execution_context(
       lookup_stream, modify_stream, std::move(thread_pool),
       allocator ? std::move(allocator) : allocator_);
@@ -184,9 +195,8 @@ void HostEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t num_k
                                                 /*copy_content=*/true,
                                                 lookup_stream);
     auto thread_pool = ctx->get_thread_pool();
-    const int64_t num_workers = thread_pool->num_workers();
-    const int64_t keys_per_task = std::max<int64_t>(1, ceil_div(num_keys, num_workers));
-    const int64_t num_tasks = ceil_div(num_keys, keys_per_task);
+    const int64_t num_tasks = num_tasks_for(ctx, num_keys);
+    const int64_t keys_per_task = ceil_div(num_keys, num_tasks);
     const uint8_t* default_emb = config_.default_embedding.data();
     auto* gather_bytes = static_cast<uint8_t*>(gather_buf);
 
@@ -211,7 +221,7 @@ void HostEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64_t num_k
         cudaMemoryTypeUnregistered, /*copy_content=*/true, lookup_stream));
     pool_gathered_host<KeyType>(ctx, *pool_params, table_->get_value_type(), gather_host,
                                 gather_stride, static_cast<int64_t>(row_size), num_keys, output,
-                                output_stride);
+                                output_stride, num_tasks_for(ctx, num_keys));
   }
 
   // No-pooling path: copy back to the caller's output buffer if BufferWrapper picked up a

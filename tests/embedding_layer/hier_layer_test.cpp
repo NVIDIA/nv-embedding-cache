@@ -19,6 +19,7 @@
 #include <gtest/gtest-spi.h>
 
 #include <stdio.h>
+#include <unistd.h>
 #include "emb_layer_utils.hpp"
 #include "test_utils.hpp"
 #include <buffer_wrapper.hpp>
@@ -30,7 +31,9 @@
 #include <plugin/plugin_loader.hpp>
 #include <linear_host_table.hpp>
 #include <cmath>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -54,6 +57,7 @@ enum class TestTableType : uint64_t {
   Phmap,
   Redis_String,
   Sph,
+  RocksDB,
 };
 
 enum class TableType : uint64_t {
@@ -100,6 +104,12 @@ static bool is_table_type_available(TestTableType ht) {
 #else
       return false;
 #endif
+    case TestTableType::RocksDB:
+#ifdef NVE_FEATURE_ROCKSDB_PLUGIN
+      return true;
+#else
+      return false;
+#endif
     default:
       return false;
   }
@@ -121,6 +131,7 @@ static const char* test_table_type_name(TestTableType ht) {
     case TestTableType::Phmap: return "Phmap";
     case TestTableType::Redis_String: return "Redis_String";
     case TestTableType::Sph: return "Sph";
+    case TestTableType::RocksDB: return "RocksDB";
     default: return "Unknown";
   }
 }
@@ -153,7 +164,8 @@ static const char* test_table_type_name(TestTableType ht) {
   } while (0)
 
 // Fixture for functional tests. `tables` lists the tiers to build, in order: at most one Gpu, at
-// most one pluggable host backend, at most one Mock (used as the remote PS).
+// most two pluggable host backends, at most one Mock. The remote PS slot is taken by Mock or by
+// the second pluggable backend (e.g. {Gpu, NVHashMap, RocksDB}), never both.
 struct HierTestCase {
   std::vector<TestTableType> tables;
   int64_t row_size;
@@ -166,6 +178,9 @@ class Hierachical : public ::testing::TestWithParam<HierTestCase> {};
 
 template <typename IndexT>
 class HierLayerTest {
+  // Declared first so it is destroyed last, i.e. after the tables below have closed the DB.
+  std::optional<nve_test::TempPathCleanup> rocksdb_cleanup_;
+
  public:
   using layer_type = HierarchicalEmbeddingLayer<IndexT>;
   static constexpr int DEVICE_ID = 0;
@@ -192,10 +207,13 @@ class HierLayerTest {
           init_remote_table(row_size, data_type);
           break;
         default:
-          if (host_tab_) {
-            NVE_THROW_("Invalid HierTestCase: more than one host table tier requested");
+          if (!host_tab_) {
+            host_tab_ = make_host_table(tt, row_size, table_size, data_type);
+          } else if (!remote_tab_) {
+            remote_tab_ = make_host_table(tt, row_size, table_size, data_type);
+          } else {
+            NVE_THROW_("Invalid HierTestCase: more than two host table tiers requested");
           }
-          init_host_table(tt, row_size, table_size, data_type);
           break;
       }
     }
@@ -265,8 +283,8 @@ class HierLayerTest {
     remote_tab_ = std::make_shared<MockHostTable<IndexT>>(remote_cfg, true /*functional_ref*/);
   }
 
-  void init_host_table(TestTableType host_table, int64_t row_size, int64_t table_size,
-                        DataType_t data_type) {
+  table_ptr_t make_host_table(TestTableType host_table, int64_t row_size, int64_t table_size,
+                              DataType_t data_type) {
     switch (host_table) {
       case TestTableType::NVHashMap: {
         nlohmann::json nvhm_conf = {
@@ -282,8 +300,7 @@ class HierLayerTest {
                                     {"handler", "evict_lru"},
                                     {"resolution_margin", 0.5}}}};
         table_factory_ptr_t nvhm_fac{nve_test::plugin_factory("nvhm")};
-        host_tab_ = nvhm_fac->produce(4711, nvhm_conf);
-        break;
+        return nvhm_fac->produce(4711, nvhm_conf);
       }
       case TestTableType::Redis: {
         check_redis_ready(7000);
@@ -297,8 +314,7 @@ class HierLayerTest {
             {
               "address": "localhost:7000"
             })"_json)};
-        host_tab_ = redis_fac->produce(4712, redis_conf);
-        break;
+        return redis_fac->produce(4712, redis_conf);
       }
       case TestTableType::Redis_String: {
         check_redis_ready(6379);
@@ -313,8 +329,7 @@ class HierLayerTest {
               "address": "localhost:6379",
               "single_node": true
             })"_json)};
-        host_tab_ = redis_fac->produce(4715, redis_conf);
-        break;
+        return redis_fac->produce(4715, redis_conf);
       }
       case TestTableType::Abseil: {
         nlohmann::json abseil_conf = {
@@ -329,8 +344,7 @@ class HierLayerTest {
                                     {"handler", "evict_lru"},
                                     {"resolution_margin", 0.5}}}};
         table_factory_ptr_t abseil_fac{nve_test::plugin_factory("abseil")};
-        host_tab_ = abseil_fac->produce(4713, abseil_conf);
-        break;
+        return abseil_fac->produce(4713, abseil_conf);
       }
       case TestTableType::Phmap: {
         nlohmann::json phm_conf = {
@@ -345,8 +359,7 @@ class HierLayerTest {
                                     {"handler", "evict_lru"},
                                     {"resolution_margin", 0.5}}}};
         table_factory_ptr_t phm_fac{nve_test::plugin_factory("phmap")};
-        host_tab_ = phm_fac->produce(4714, phm_conf);
-        break;
+        return phm_fac->produce(4714, phm_conf);
       }
       case TestTableType::Sph: {
         // GPU-resident, so it takes device_id and sizes its capacity from the
@@ -358,8 +371,22 @@ class HierLayerTest {
                                   {"row_size_in_bytes", row_size},
                                   {"value_dtype", to_string(data_type)}};
         table_factory_ptr_t sph_fac{nve_test::plugin_factory("sph-experimental")};
-        host_tab_ = sph_fac->produce(4716, sph_conf);
-        break;
+        return sph_fac->produce(4716, sph_conf);
+      }
+      case TestTableType::RocksDB: {
+        // Persistent on-disk store, so it gets a per-process scratch directory that is removed
+        // once the table has closed the DB. No overflow policy: capacity is bounded by disk.
+        // A small max_batch_size makes the multi-key tests span several MultiGet/WriteBatch rounds.
+        const auto db_path{std::filesystem::temp_directory_path() /
+                           ("nve_hier_layer_test_rocksdb_" + std::to_string(getpid()))};
+        rocksdb_cleanup_.emplace(db_path);
+        nlohmann::json rocksdb_conf = {
+                                  {"key_size", sizeof(IndexT)},
+                                  {"max_value_size", row_size},
+                                  {"value_dtype", to_string(data_type)},
+                                  {"max_batch_size", 1024}};
+        table_factory_ptr_t rocksdb_fac{nve_test::plugin_factory("rocksdb", {{"path", db_path.string()}})};
+        return rocksdb_fac->produce(4717, rocksdb_conf);
       }
       default:
         throw std::runtime_error("Invalid host table type");
@@ -669,7 +696,7 @@ class HierLayerTest {
   const int64_t row_size_;
   table_ptr_t gpu_tab_;
   table_ptr_t host_tab_;
-  host_table_ptr_t remote_tab_;
+  table_ptr_t remote_tab_;
   host_table_ptr_t ref_tab_;
   std::shared_ptr<layer_type> layer_{nullptr};
   context_ptr_t ctx_;
@@ -871,6 +898,7 @@ INSTANTIATE_TEST_SUITE_P(
         HierTestCase({{TestTableType::Gpu}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
         HierTestCase({{TestTableType::NVHashMap}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Sph}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::RocksDB}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1), false, DataType_t::Float32})
         ));
@@ -885,23 +913,29 @@ INSTANTIATE_TEST_SUITE_P(
         HierTestCase({{TestTableType::Abseil}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Phmap}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Sph}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
+        HierTestCase({{TestTableType::RocksDB}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
+        HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::RocksDB}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Abseil, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Phmap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Sph}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Sph, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
+        HierTestCase({{TestTableType::Gpu, TestTableType::RocksDB, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float16}),
         HierTestCase({{TestTableType::Gpu}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::NVHashMap}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Abseil}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Phmap}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Sph}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::RocksDB}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::RocksDB}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Abseil, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Phmap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Sph}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
-        HierTestCase({{TestTableType::Gpu, TestTableType::Sph, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32})));
+        HierTestCase({{TestTableType::Gpu, TestTableType::Sph, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::Gpu, TestTableType::RocksDB, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32})));
 
 INSTANTIATE_TEST_SUITE_P(
     EmbLayer_WithRedis,
@@ -937,12 +971,14 @@ INSTANTIATE_TEST_SUITE_P(
         HierTestCase({{TestTableType::Abseil}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Phmap}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Sph}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::RocksDB}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Abseil, TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Phmap, TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Sph}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
-        HierTestCase({{TestTableType::Gpu, TestTableType::Sph, TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32})));
+        HierTestCase({{TestTableType::Gpu, TestTableType::Sph, TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::Gpu, TestTableType::RocksDB, TestTableType::Mock}, int64_t(1) << 12, int64_t(1) << 30, int64_t(1) << 16, false, DataType_t::Float32})));
 
 // Test context/buffer reuse so that no stale data is consumed from temporary buffers
 class HierachicalContextReuse : public ::testing::TestWithParam<HierTestCase> {};
@@ -1000,6 +1036,7 @@ INSTANTIATE_TEST_SUITE_P(
         HierTestCase({{TestTableType::NVHashMap}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Abseil}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Phmap}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
+        HierTestCase({{TestTableType::RocksDB}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, false, DataType_t::Float32})));
 
 class HierachicalSpecialConfig : public ::testing::TestWithParam<HierTestCase> {};
@@ -1395,9 +1432,11 @@ INSTANTIATE_TEST_SUITE_P(
         HierTestCase({{TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
         HierTestCase({{TestTableType::Abseil, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
         HierTestCase({{TestTableType::Phmap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
+        HierTestCase({{TestTableType::RocksDB, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::NVHashMap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
         HierTestCase({{TestTableType::Gpu, TestTableType::Abseil, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
-        HierTestCase({{TestTableType::Gpu, TestTableType::Phmap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32})));
+        HierTestCase({{TestTableType::Gpu, TestTableType::Phmap, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32}),
+        HierTestCase({{TestTableType::Gpu, TestTableType::RocksDB, TestTableType::Mock}, int64_t(1) << 10, int64_t(1) << 30, int64_t(1) << 11, true, DataType_t::Float32})));
 
 // ---------------------------------------------------------------------------
 // Pooling / rowwise-quant dequant through HierarchicalEmbeddingLayer.

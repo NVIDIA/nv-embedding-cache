@@ -77,6 +77,8 @@ embedding = nve_layers.NVEmbedding(
 
 `default_embedding` (a 1-D tensor of `embedding_size` elements in the layer's dtype) sets the vector returned for keys missing from the table on HostLayer/Hierarchical. It defaults to zeros (note torch.nn.Embedding raises for out-of-range keys instead); pass an empty list (`[]`) to disable the miss fill entirely, leaving missed rows undefined. Other layer types reject a non-empty value.
 
+`disable_threadpool` (HostLayer only, default `False`) runs each lookup on the calling thread instead of handing it to the shared NVE thread pool.
+
 ## Using a Parameter Server
 To use the parameter server API, users are expected to implement the Table Interface defined in [table.hpp](../include/table.hpp) and provide a Python binding to it. See the [custom remote plugin](../samples/common/custom_remote_plugin/src/custom_remote_table.cpp) and [custom remote PS export sample](../samples/pytorch/export_sample/custom_remote_ps_export.py) for examples.
 
@@ -232,12 +234,80 @@ layers and wires their markers into the package. See
 
 ```cpp
 auto loader = std::make_unique<torch::inductor::AOTIModelPackageLoader>(
-    save_dir + "/model.pt2");
+    save_path + "/model.pt2");
 auto resources = std::make_shared<nve::ResourceDirectory>();
-nve::LayerDirectory dir(save_dir, *loader, device_index, resources);
+nve::LayerDirectory dir(save_path, *loader, device_index, resources);
 auto outputs = loader->run({keys});
 loader.reset();  // before dir releases its marker tensors
 ```
+
+### Load-time layer overrides
+
+Pass `LayerConfigOverrides` to tune layers without changing the export. Patches support
+`gpu_cache_size`, `host_cache_size`, `optimize_for_training`, and individual fields inside
+`config` (`logging_interval`, `kernel_mode`, `kernel_mode_value_1`, `kernel_mode_value_2`,
+`max_modify_size`, `default_row_index`, `default_embedding`, and `disable_threadpool`).
+
+Precedence is **exported settings → defaults → per-layer patch**. Per-layer keys must match
+the exported `module_path` exactly; `""` addresses a root embedding. Unspecified fields are
+preserved, nested `config` fields merge individually, and arrays replace whole values.
+Explicit `0`, `false`, and empty arrays are preserved; normal layer validation still applies.
+Unknown paths, unsupported knobs, wrong types, and null values are rejected before resources
+are created. Shape, dtype, layer identity/type, and storage references cannot be overridden.
+Both legacy v1 and v2 exports support overrides.
+
+Each patch is validated against its target layer type. Defaults must be supported by
+every exported layer; use per-layer patches for knobs that apply only to some layers.
+Unsupported knobs are rejected even when their value is `0`, `false`, or an empty array.
+
+| Override | Supported layer types |
+| --- | --- |
+| `gpu_cache_size` | LinearUVM, Hierarchical |
+| `host_cache_size` | Hierarchical |
+| `optimize_for_training`, `config.logging_interval` | All (HostLayer remains inference-only) |
+| `config.kernel_mode`, `config.kernel_mode_value_1`, `config.kernel_mode_value_2` | LinearUVM |
+| `config.max_modify_size` | LinearUVM, Hierarchical |
+| `config.default_row_index` | LinearUVM, GPULayer |
+| `config.default_embedding` | HostLayer, Hierarchical |
+| `config.disable_threadpool` | HostLayer |
+
+```python
+from pynve.torch.nve_export import LayerConfigOverrides, load
+
+overrides = LayerConfigOverrides(
+    defaults={"config": {"logging_interval": 1000}},
+    per_layer={
+        "user_embedding": {"gpu_cache_size": 256 << 20,
+                           "config": {"max_modify_size": 4096}},
+        "item_embedding": {"gpu_cache_size": 1 << 30,
+                           "host_cache_size": 8 << 30,
+                           "config": {"logging_interval": -1}},
+    },
+)
+module, layers = load("save_dir/", overrides=overrides)
+# load_aot and load_nve_layers accept the same overrides argument.
+```
+
+```cpp
+nve::LayerConfigOverrides overrides;
+overrides.defaults = {{"config", {{"logging_interval", 1000}}}};
+overrides.per_layer = {
+    {"user_embedding", {{"gpu_cache_size", 256ULL << 20},
+                        {"config", {{"max_modify_size", 4096}}}}},
+    {"item_embedding", {{"gpu_cache_size", 1ULL << 30},
+                        {"host_cache_size", 8ULL << 30},
+                        {"config", {{"logging_interval", -1}}}}}
+};
+nve::LayerDirectory dir(save_path, *loader, device_index, resources, overrides);
+```
+
+This replaces `gpu_cache_size_override`. To migrate a global cache override, put
+`gpu_cache_size` in `overrides.defaults` (Python) or `LayerConfigOverrides::defaults` (C++)
+if all exported layers support it; otherwise set it only on the applicable per-layer patches.
+Choose knobs appropriate to each layer type: GPU cache sizes apply to LinearUVM/Hierarchical,
+and host cache sizes apply to Hierarchical.
+For HostLayer, `{"config": {"disable_threadpool": true}}` runs lookups on the caller thread;
+set it in a per-layer patch to choose which host layers bypass the thread pool.
 
 ### Shared storage & resources
 
@@ -283,7 +353,7 @@ the map default to: **NVL** → all devices, **Host** → CPU, **everything else
 
 ```cpp
 nve::TopologyMap topo{{"mb-<id>", {0, 1, 2, 3}}};   // pin this NVL block to GPUs 0–3
-nve::LayerDirectory dir(save_dir, *loader, device_index, resources, /*gpu_cache_override=*/0, topo);
+nve::LayerDirectory dir(save_path, *loader, device_index, resources, /*overrides=*/{}, topo);
 ```
 
 ### Notes

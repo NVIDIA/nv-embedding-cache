@@ -51,6 +51,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(NVE_AVAILABLE_FEATURES "")
 list(APPEND NVE_AVAILABLE_FEATURES
   "abseil_plugin"
+  "linear_file_plugin"
   "nvhm_plugin"
   "phmap_plugin"
   "redis_plugin"
@@ -70,6 +71,7 @@ list(APPEND NVE_MINIMAL_FEATURES "ht_kernel_8")
 set(NVE_DEFAULT_FEATURES ${NVE_MINIMAL_FEATURES})
 list(APPEND NVE_DEFAULT_FEATURES
   "abseil_plugin"
+  "linear_file_plugin"
   "nvhm_plugin"
   "phmap_plugin"
   "redis_plugin"
@@ -334,6 +336,7 @@ add_subdirectory(python/pynve/bindings)
 if (NOT NVE_DISABLE_TESTS_AND_SAMPLES)
   message(STATUS "Tests and samples are enabled")
   add_subdirectory(samples)
+  add_subdirectory(benchmarks)
   add_subdirectory(tests)
 else()
   message(STATUS "Tests and samples are disabled (NVE_DISABLE_TESTS_AND_SAMPLES = ${NVE_DISABLE_TESTS_AND_SAMPLES})")

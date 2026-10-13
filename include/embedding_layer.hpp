@@ -121,6 +121,7 @@ class EmbeddingLayerBase {
    * This function will search each table for the given keys and if a key exists its' datavector
    * will be updated (overwritten). Note that this function does not change the residency of tables
    * (which key is stored where).
+   * @warning Recurring keys in the same update call may have undefined results (depends on the table type).
    * @param ctx An execution context to use.
    * @param num_keys Number of keys to consider
    * @param keys Array of keys
@@ -143,6 +144,7 @@ class EmbeddingLayerBase {
    * This function will search all tables for the given keys and if a key exists its'
    * datavector will be increased with the given value (gradient). Note that this function does not
    * change the residency of tables (which key is stored where).
+   * @warning Recurring keys in the same accumulate call may have undefined results (depends on the table type).
    * @param ctx An execution context to use.
    * @param num_keys Number of keys to consider
    * @param keys Array of keys

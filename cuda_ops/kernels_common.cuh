@@ -39,7 +39,7 @@ typedef struct __align__(8) {
 half4;
 
 inline uint32_t nextPow2(uint32_t x) 
-{ 	
+{
     return x == 1 ? 1 : 1<<(32-__builtin_clz(x) - 1); 
 }
 
@@ -74,7 +74,7 @@ struct QuantizationHelper<DataType_t::QInt8RowwiseF32>
 {
     using Vec4 = char4;
     using Vec2 = char2;
-    using Vec1 = char;
+    using Vec1 = signed char; // on aarch64 char is by default unsigned
     using ParamType = float;
     constexpr static const bool has_scale = true;
     constexpr static const bool has_offset = false;
@@ -122,7 +122,7 @@ struct QuantizationHelper<DataType_t::QInt8RowwiseF16>
 {
     using Vec4 = char4;
     using Vec2 = char2;
-    using Vec1 = char;
+    using Vec1 = signed char;
     using ParamType = __half;
     constexpr static const bool has_scale = true;
     constexpr static const bool has_offset = false;
@@ -193,7 +193,7 @@ inline float2 __device__ dequantize<QuantizationHelper<DataType_t::QInt8RowwiseF
 }
 
 template<>
-inline float __device__ dequantize<QuantizationHelper<DataType_t::QInt8RowwiseF32>, float, char>(const char& el_quantized, const float& scale, const float& offset) {
+inline float __device__ dequantize<QuantizationHelper<DataType_t::QInt8RowwiseF32>, float, signed char>(const signed char& el_quantized, const float& scale, const float& offset) {
   return float(el_quantized) * scale + offset;
 }
 
@@ -269,7 +269,7 @@ inline half2 __device__ dequantize<QuantizationHelper<DataType_t::QInt8RowwiseF1
 }
 
 template<>
-inline __half __device__ dequantize<QuantizationHelper<DataType_t::QInt8RowwiseF16>, __half, char>(const char& el_quantized, const __half& scale, const __half& offset) {
+inline __half __device__ dequantize<QuantizationHelper<DataType_t::QInt8RowwiseF16>, __half, signed char>(const signed char& el_quantized, const __half& scale, const __half& offset) {
   return __float2half(float(el_quantized) * __half2float(scale));
 }
 

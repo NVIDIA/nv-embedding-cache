@@ -995,7 +995,9 @@ def test_embed_config_roundtrip():
               "default_row_index": 3,
               # non-empty values are HostLayer/Hierarchical-only (covered by
               # test_host_cpu.py); empty is legal everywhere and round-trips
-              "default_embedding": []}
+              "default_embedding": [],
+              # True is HostLayer-only (covered by test_host_cpu.py)
+              "disable_threadpool": False}
 
     # Cover both NVEmbedding and the bag path (which forwards config separately).
     emb = nve_layers.NVEmbedding(

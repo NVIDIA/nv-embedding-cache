@@ -379,6 +379,7 @@ int64_t get_lookup_output_rows(
  * rowwise-quantization metadata, without conversion or reduction.
  *
  * @tparam KeyType key/offset element type (int32_t or int64_t).
+ * @param max_tasks Upper bound on the number of thread pool tasks used (see select_num_tasks).
  */
 template <typename KeyType>
 void pool_gathered_host(context_ptr_t& ctx,
@@ -386,7 +387,7 @@ void pool_gathered_host(context_ptr_t& ctx,
                         DataType_t value_dtype,
                         const int8_t* gather_host, int64_t gather_stride,
                         int64_t row_size, int64_t num_keys,
-                        void* output, int64_t output_stride);
+                        void* output, int64_t output_stride, int64_t max_tasks);
 
 // Check if the pooling can be resolved with only copying (equivalent to lookup)
 bool is_pooling_raw_concat(const EmbeddingLayerBase::PoolingParams* pool_params, DataType_t value_dtype);

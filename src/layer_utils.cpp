@@ -333,8 +333,9 @@ void pool_gathered_host(context_ptr_t& ctx,
                         DataType_t value_dtype,
                         const int8_t* gather_host, int64_t gather_stride,
                         int64_t row_size, int64_t num_keys,
-                        void* output, int64_t output_stride) {
+                        void* output, int64_t output_stride, int64_t max_tasks) {
   const cudaStream_t lookup_stream = ctx->get_lookup_stream();
+  NVE_CHECK_ARG_(max_tasks > 0, "Invalid number of tasks");
 
   // Concatenate means no arithmetic reduction: each key yields one output row, only
   // converting/dequantizing the raw gathered data to the output type. The sparse layout and
@@ -391,8 +392,7 @@ void pool_gathered_host(context_ptr_t& ctx,
         cudaMemoryTypeUnregistered, /*copy_content=*/false, lookup_stream));
 
     auto thread_pool = ctx->get_thread_pool();
-    const int64_t workers = std::max<int64_t>(1, thread_pool->num_workers());
-    const int64_t rows_per_task = std::max<int64_t>(1, ceil_div(num_keys, workers));
+    const int64_t rows_per_task = std::max<int64_t>(1, ceil_div(num_keys, max_tasks));
     const int64_t num_tasks = ceil_div(num_keys, rows_per_task);
     const auto copy_rows = [=](const int64_t task_idx) {
       const int64_t row_start = task_idx * rows_per_task;
@@ -422,11 +422,9 @@ void pool_gathered_host(context_ptr_t& ctx,
     auto* output_host = static_cast<int8_t*>(output_bw->access_buffer(
         cudaMemoryTypeUnregistered, /*copy_content=*/false, lookup_stream));
 
-    auto thread_pool = ctx->get_thread_pool();
-    const int64_t num_workers = thread_pool->num_workers();
-    cpu_kernel_concatenate_dispatch(std::move(thread_pool), num_keys, row_width, gather_host,
+    cpu_kernel_concatenate_dispatch(ctx->get_thread_pool(), num_keys, row_width, gather_host,
                                     gather_stride, output_host, output_stride, in_dtype, out_dtype,
-                                    num_workers);
+                                    max_tasks);
 
     auto* final_output = output_bw->get_buffer(cudaMemoryTypeUnregistered);
     if (final_output != nullptr && final_output != output) {
@@ -499,12 +497,10 @@ void pool_gathered_host(context_ptr_t& ctx,
   auto* output_host = static_cast<int8_t*>(
       output_bw->access_buffer(cudaMemoryTypeUnregistered, /*copy_content=*/false, lookup_stream));
 
-  auto thread_pool = ctx->get_thread_pool();
-  const int64_t num_workers = thread_pool->num_workers();
-  cpu_kernel_pooling_dispatch<KeyType>(std::move(thread_pool), num_bags, row_width, gather_host, gather_stride,
+  cpu_kernel_pooling_dispatch<KeyType>(ctx->get_thread_pool(), num_bags, row_width, gather_host, gather_stride,
                                        output_host, output_stride, effective_sparse, fixed_hotness,
                                        offsets_host, pool_params.pooling_type, weights,
-                                       pool_params.weight_type, in_dtype, out_dtype, num_workers);
+                                       pool_params.weight_type, in_dtype, out_dtype, max_tasks);
 
   // Push the host result back to the user buffer if it lives on device/managed memory.
   auto* final_output = output_bw->get_buffer(cudaMemoryTypeUnregistered);
@@ -517,11 +513,11 @@ void pool_gathered_host(context_ptr_t& ctx,
 template void pool_gathered_host<int32_t>(context_ptr_t&,
                                           const EmbeddingLayerBase::PoolingParams&, DataType_t,
                                           const int8_t*, int64_t, int64_t, int64_t, void*,
-                                          int64_t);
+                                          int64_t, int64_t);
 template void pool_gathered_host<int64_t>(context_ptr_t&,
                                           const EmbeddingLayerBase::PoolingParams&, DataType_t,
                                           const int8_t*, int64_t, int64_t, int64_t, void*,
-                                          int64_t);
+                                          int64_t, int64_t);
 
 bool is_pooling_raw_concat(const EmbeddingLayerBase::PoolingParams* pool_params, DataType_t value_dtype) {
   return (pool_params &&

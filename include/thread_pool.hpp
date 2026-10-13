@@ -33,6 +33,43 @@ void configure_default_thread_pool(const nlohmann::json& json);
 
 thread_pool_ptr_t default_thread_pool();
 
+/**
+ * A thread pool that runs every task synchronously on the calling thread. There are no worker
+ * threads; `submit` returns an already-completed future. Use it to avoid thread hand-offs when the
+ * caller is itself a worker thread, or for small lookups where the hand-off dominates.
+ */
+class InlineThreadPool final : public ThreadPool {
+ public:
+  using base_type = ThreadPool;
+
+  NVE_PREVENT_COPY_AND_MOVE_(InlineThreadPool);
+
+  /**
+   * @return The process-wide singleton instance.
+   */
+  static thread_pool_ptr_t instance();
+
+  int64_t num_workers() const noexcept override { return 1; }
+
+  int64_t num_workgroups() const noexcept override { return 1; }
+
+  // Tasks run on the caller thread, so `workgroup` is accepted but ignored. The submit variants
+  // still work but log a warning: the returned futures are already complete, prefer execute*.
+  result_type submit(task_type task, int64_t workgroup) override;
+
+  int64_t submit_n(int64_t task_idx, int64_t num_tasks, const indexed_task_type& task,
+                   result_type* results, int64_t workgroup) override;
+
+  // Blocking variants call the task directly: no packaged task or future involved.
+  void execute(task_type task, int64_t workgroup) override;
+
+  int64_t execute_n(int64_t task_idx, int64_t num_tasks, const indexed_task_type& task,
+                    int64_t workgroup) override;
+
+ private:
+  InlineThreadPool();
+};
+
 struct SimpleThreadPoolConfig : public ThreadPoolConfig {
   using base_type = ThreadPoolConfig;
 

@@ -213,12 +213,64 @@ def test_host_layer_cpu_default_embedding_export_load():
     model = make_host_layer_model(num_embeddings, embed_size, weight, torch.device("cpu"),
                                   config={"default_embedding": default})
 
-    save_dir = tempfile.mkdtemp()
-    nve_export.save_nve(model, save_dir)
-    layers = nve_export.load_nve_layers(save_dir, device=torch.device("cpu"))
-    out = layers[0](torch.tensor([3, num_embeddings + 5], dtype=torch.int64))
-    assert torch.equal(out[0], weight[3])
-    assert torch.equal(out[1], default)
+    with tempfile.TemporaryDirectory() as save_dir:
+        nve_export.save_nve(model, save_dir)
+        layers = nve_export.load_nve_layers(save_dir, device=torch.device("cpu"))
+        out = layers[0](torch.tensor([3, num_embeddings + 5], dtype=torch.int64))
+        assert torch.equal(out[0], weight[3])
+        assert torch.equal(out[1], default)
+
+
+def test_host_layer_cpu_disable_threadpool_lookup():
+    # Inline execution returns the same rows as the threaded default.
+    num_embeddings = 256
+    embed_size = 8
+    weight = torch.randn(num_embeddings, embed_size, dtype=torch.float32)
+    keys = torch.randint(0, num_embeddings, (1000,), dtype=torch.int64)
+    threaded = _make_layer(num_embeddings, embed_size, weight, storage_kind="memblock")
+    inline = _make_layer(num_embeddings, embed_size, weight, storage_kind="memblock",
+                         config={"disable_threadpool": True})
+    assert threaded.config.disable_threadpool is False
+    assert inline.config.disable_threadpool is True
+    assert torch.equal(inline(keys), threaded(keys))
+    assert torch.equal(inline(keys), weight[keys])
+
+
+def test_disable_threadpool_rejected_for_unsupported_layer_types():
+    if not torch.cuda.is_available():
+        pytest.skip("GPULayer requires CUDA")
+    weight = torch.randn(16, 4, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError, match="disable_threadpool"):
+        make_layer(16, 4, torch.float32, nve_layers.LayerType.GPULayer, torch.device("cuda"),
+                   storage=nve.UserMemBlock(weight.data_ptr(), weight.nbytes),
+                   config={"disable_threadpool": True})
+
+
+def test_host_layer_cpu_disable_threadpool_aot_config_override():
+    # Override the host layer's thread pool setting without changing its export.
+    import json
+    import os
+    num_embeddings = 64
+    embed_size = 4
+    weight = torch.randn(num_embeddings, embed_size, dtype=torch.float32)
+    model = make_host_layer_model(num_embeddings, embed_size, weight, torch.device("cpu"))
+
+    keys = torch.tensor([3, 5, 63], dtype=torch.int64)
+    with tempfile.TemporaryDirectory() as save_dir:
+        nve_export.export_aot(model, (keys,), save_dir)
+        meta_path = os.path.join(save_dir, "metadata.json")
+        with open(meta_path) as f:
+            doc = json.load(f)
+        assert doc["layers"][0]["config"]["disable_threadpool"] is False
+        overrides = nve_export.LayerConfigOverrides(
+            per_layer={"emb": {"config": {"disable_threadpool": True}}})
+        loader, layers = nve_export.load_aot(save_dir, device=torch.device("cpu"),
+                                            overrides=overrides)
+        assert layers[0].config.disable_threadpool is True
+        out = loader.run([keys])[0]
+        assert torch.equal(out, weight[keys])
+        with open(meta_path) as f:
+            assert json.load(f) == doc
 
 
 def test_host_layer_cpu_export_load_roundtrip():
@@ -229,14 +281,14 @@ def test_host_layer_cpu_export_load_roundtrip():
               .unsqueeze(1).expand(num_embeddings, embed_size).contiguous())
     model = make_host_layer_model(num_embeddings, embed_size, weight, torch.device("cpu"))
 
-    save_dir = tempfile.mkdtemp()
-    nve_export.save_nve(model, save_dir)
-    layers = nve_export.load_nve_layers(save_dir, device=torch.device("cpu"))
-    assert len(layers) == 1
-    keys = torch.tensor([0, 5, 17, 256, 511], dtype=torch.int64)
-    out = layers[0](keys)
-    assert out.device.type == "cpu"
-    assert torch.equal(out, weight[keys])
+    with tempfile.TemporaryDirectory() as save_dir:
+        nve_export.save_nve(model, save_dir)
+        layers = nve_export.load_nve_layers(save_dir, device=torch.device("cpu"))
+        assert len(layers) == 1
+        keys = torch.tensor([0, 5, 17, 256, 511], dtype=torch.int64)
+        out = layers[0](keys)
+        assert out.device.type == "cpu"
+        assert torch.equal(out, weight[keys])
 
 
 def test_host_layer_cpu_aot_export_load_roundtrip():

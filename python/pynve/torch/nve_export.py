@@ -35,20 +35,45 @@ Saved layout::
 
     save_dir/
     ├── model.pt2          # torch.export-ed or AOT-compiled graph
-    ├── metadata.json      # per-layer: id, module_path, num_emb, emb_size, dtype, …
-    └── embeddings.nve     # LinearUVM weights via nve.TensorFileFormat
+    ├── metadata.json      # schema v2: {version, resources, layers}
+    └── weights/<storage_ref>.nve  # one per MemBlock resource via nve.TensorFileFormat
+                                   # (none for Hierarchical layers)
 """
 
 import builtins
 import os
 import json
 import warnings
+from dataclasses import dataclass, field
 import torch
 import pynve.nve as _nve_mod
 from pynve.torch import HAS_TORCH_OPS
 from pynve.torch.nve_layers import NVEmbeddingBase, NVEmbedding, NVEmbeddingBag, LayerType, torch_type_to_nve_type
 
 METADATA_SCHEMA_VERSION = 2
+
+
+@dataclass
+class LayerConfigOverrides:
+    """Partial load-time patches: exported settings < defaults < per_layer.
+
+    Patches support gpu_cache_size, host_cache_size, optimize_for_training,
+    and individual fields in the nested config object. per_layer keys are exact
+    exported module paths; use "" for a root embedding. Arrays replace whole
+    values; omitted fields are preserved, including when a patch sets 0 or False.
+    Each knob must be supported by its target layer type; defaults must be
+    supported by every exported layer. Use per_layer for type-specific knobs.
+    """
+
+    defaults: dict = field(default_factory=dict)
+    per_layer: dict[str, dict] = field(default_factory=dict)
+
+
+def _apply_layer_config_overrides(layers: list, overrides: LayerConfigOverrides | None) -> list:
+    if overrides is None:
+        return layers
+    return json.loads(_nve_mod._apply_layer_config_overrides(
+        json.dumps(layers), json.dumps(overrides.defaults), json.dumps(overrides.per_layer)))
 
 
 def _require_torch_ops(func_name: str):
@@ -415,7 +440,7 @@ def _build_memblock_from_descriptor(mb_cfg: dict, device_index: int,
         f"serialize their topology and cannot be reloaded from metadata.")
 
 
-def load_nve_layers(save_dir: str, *, gpu_cache_size_override: int = None,
+def load_nve_layers(save_dir: str, *, overrides: LayerConfigOverrides | None = None,
                     device: torch.device | None = None,
                     registry: dict | None = None,
                     resource_remap: dict[str, str] | None = None,
@@ -430,8 +455,8 @@ def load_nve_layers(save_dir: str, *, gpu_cache_size_override: int = None,
 
     Args:
         save_dir: Directory containing metadata.json and weights/.
-        gpu_cache_size_override: If set, replaces ``gpu_cache_size`` from
-            metadata for all layers.
+        overrides: Partial defaults and per-module-path patches. See
+            :class:`LayerConfigOverrides`. Validated before resources are built.
         device: Device to place the loaded layers on. Defaults to the current
             CUDA device when available, otherwise ``cpu``.
         registry: Optional dict shared across ``load_nve_layers`` calls.
@@ -464,8 +489,8 @@ def load_nve_layers(save_dir: str, *, gpu_cache_size_override: int = None,
 
     # Detect schema version: top-level list = v1 legacy; object = v2.
     if isinstance(raw, list):
-        return _load_nve_layers_v1(raw, save_dir, device, device_index,
-                                   gpu_cache_size_override)
+        raw = _apply_layer_config_overrides(raw, overrides)
+        return _load_nve_layers_v1(raw, save_dir, device, device_index)
 
     version = raw.get("version", 1)
     if version > METADATA_SCHEMA_VERSION:
@@ -474,14 +499,13 @@ def load_nve_layers(save_dir: str, *, gpu_cache_size_override: int = None,
             f"NVE runtime only supports up to version {METADATA_SCHEMA_VERSION}. "
             "Upgrade the NVE runtime.")
 
-    return _load_nve_layers_v2(raw, save_dir, device, device_index,
-                               gpu_cache_size_override, registry,
+    raw["layers"] = _apply_layer_config_overrides(raw["layers"], overrides)
+    return _load_nve_layers_v2(raw, save_dir, device, device_index, registry,
                                resource_remap, nvl_devices_override)
 
 
 def _load_nve_layers_v1(metadata: list, save_dir: str,
-                         device, device_index: int,
-                         gpu_cache_size_override: int | None) -> list:
+                         device, device_index: int) -> list:
     """Load from legacy v1 flat-array metadata.json."""
     layers = []
     weights_dir = os.path.join(save_dir, "weights")
@@ -495,7 +519,7 @@ def _load_nve_layers_v1(metadata: list, save_dir: str,
         layer_type = LayerType[entry["layer_type"]]
         is_bag = entry.get("is_bag", False)
         mode = entry.get("mode", None)
-        gpu_cache_size = entry["gpu_cache_size"] if gpu_cache_size_override is None else gpu_cache_size_override
+        gpu_cache_size = entry["gpu_cache_size"]
         optimize_for_training = entry["optimize_for_training"]
         config = entry.get("config")
 
@@ -544,7 +568,6 @@ def _load_nve_layers_v1(metadata: list, save_dir: str,
 
 def _load_nve_layers_v2(doc: dict, save_dir: str,
                          device, device_index: int,
-                         gpu_cache_size_override: int | None,
                          registry: dict | None,
                          resource_remap: dict[str, str] | None,
                          nvl_devices_override: list[int] | None) -> list:
@@ -620,7 +643,7 @@ def _load_nve_layers_v2(doc: dict, save_dir: str,
         layer_type = LayerType[entry["layer_type"]]
         is_bag = entry.get("is_bag", False)
         mode = entry.get("mode", None)
-        gpu_cache_size = entry["gpu_cache_size"] if gpu_cache_size_override is None else gpu_cache_size_override
+        gpu_cache_size = entry["gpu_cache_size"]
         host_cache_size = entry.get("host_cache_size", 0)
         optimize_for_training = entry["optimize_for_training"]
         storage_ref = entry.get("storage_ref")
@@ -697,7 +720,7 @@ def _marker_fqn(module_path: str) -> str:
     return f"{module_path}.marker_tensor" if module_path else "marker_tensor"
 
 
-def load(save_dir: str, *, gpu_cache_size_override: int = None,
+def load(save_dir: str, *, overrides: LayerConfigOverrides | None = None,
          device: torch.device | None = None):
     """Load a non-AOT model previously saved with :func:`export`.
 
@@ -709,8 +732,8 @@ def load(save_dir: str, *, gpu_cache_size_override: int = None,
 
     Args:
         save_dir: Directory containing model.pt2, metadata.json and weights/.
-        gpu_cache_size_override: If set, replaces ``gpu_cache_size`` from
-            metadata for all layers.
+        overrides: Partial defaults and per-module-path patches. See
+            :class:`LayerConfigOverrides`.
         device: CUDA device to place loaded layers on. Defaults to the current
             CUDA device.
 
@@ -722,7 +745,7 @@ def load(save_dir: str, *, gpu_cache_size_override: int = None,
         registry.
     """
     layers = load_nve_layers(save_dir,
-                             gpu_cache_size_override=gpu_cache_size_override,
+                             overrides=overrides,
                              device=device)
 
     ep = torch.export.load(os.path.join(save_dir, "model.pt2"))
@@ -738,7 +761,7 @@ def load(save_dir: str, *, gpu_cache_size_override: int = None,
     return module, layers
 
 
-def load_aot(save_dir: str, *, gpu_cache_size_override: int = None,
+def load_aot(save_dir: str, *, overrides: LayerConfigOverrides | None = None,
              device: torch.device | None = None):
     """Load an AOTInductor model previously saved with :func:`export_aot`.
 
@@ -750,6 +773,12 @@ def load_aot(save_dir: str, *, gpu_cache_size_override: int = None,
 
     Requires ``export_aot`` to have set ``use_runtime_constant_folding=True``
     (the default) — otherwise the marker is baked inline and not updatable.
+
+    Args:
+        save_dir: Directory containing model.pt2, metadata.json and weights/.
+        overrides: Partial defaults and per-module-path patches. See
+            :class:`LayerConfigOverrides`.
+        device: Device to place the loaded layers on.
 
     Returns:
         (AOTIModelPackageLoader, list[NVEmbeddingBase]): the loader (call
@@ -769,7 +798,7 @@ def load_aot(save_dir: str, *, gpu_cache_size_override: int = None,
     device_index = device.index if device.type == "cuda" else -1
 
     layers = load_nve_layers(save_dir,
-                             gpu_cache_size_override=gpu_cache_size_override,
+                             overrides=overrides,
                              device=device)
 
     loader = AOTIModelPackageLoader(

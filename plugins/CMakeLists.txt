@@ -20,6 +20,12 @@ set(FETCHCONTENT_QUIET FALSE)
 # Always built: replaces the former built-in STL map registry aliases.
 add_subdirectory(stl_map)
 
+list(FIND NVE_FEATURES "linear_file_plugin" NVE_FEATURE_ENABLED)
+if (${NVE_FEATURE_ENABLED} GREATER -1)
+  add_subdirectory(linear_file)
+endif()
+unset(NVE_FEATURE_ENABLED)
+
 list(FIND NVE_FEATURES "nvhm_plugin" NVE_FEATURE_ENABLED)
 if (${NVE_FEATURE_ENABLED} GREATER -1)
   add_subdirectory(nvhm)

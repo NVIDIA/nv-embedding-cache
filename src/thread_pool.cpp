@@ -88,6 +88,48 @@ thread_pool_ptr_t default_thread_pool() {
   return default_tp;
 }
 
+InlineThreadPool::InlineThreadPool() : base_type(ThreadPoolConfig{"nve_inline_tp"}) {}
+
+thread_pool_ptr_t InlineThreadPool::instance() {
+  // The constructor is private, so `make_shared` is not available; the singleton lives for the
+  // process lifetime.
+  static const thread_pool_ptr_t inline_tp{new InlineThreadPool()};
+  return inline_tp;
+}
+
+ThreadPool::result_type InlineThreadPool::submit(task_type task, const int64_t /*workgroup*/) {
+  NVE_LOG_WARNING_("Thread pool '", name, "' runs tasks synchronously; prefer `execute` over `submit`.");
+  // Running through a packaged task captures exceptions into the future like the other pools do.
+  packaged_task_type packaged{std::move(task)};
+  result_type res{packaged.get_future()};
+  packaged();
+  return res;
+}
+
+int64_t InlineThreadPool::submit_n(int64_t task_idx, const int64_t num_tasks,
+                                   const indexed_task_type& task, result_type* results,
+                                   const int64_t /*workgroup*/) {
+  NVE_LOG_WARNING_("Thread pool '", name, "' runs tasks synchronously; prefer `execute_n` over `submit_n`.");
+  for (int64_t i{}; i < num_tasks; ++i, ++task_idx) {
+    packaged_task_type packaged{std::bind(task, task_idx)};
+    if (results) {
+      results[i] = packaged.get_future();
+    }
+    packaged();
+  }
+  return task_idx;
+}
+
+void InlineThreadPool::execute(task_type task, const int64_t /*workgroup*/) { task(); }
+
+int64_t InlineThreadPool::execute_n(int64_t task_idx, const int64_t num_tasks,
+                                    const indexed_task_type& task, const int64_t /*workgroup*/) {
+  for (int64_t i{}; i < num_tasks; ++i, ++task_idx) {
+    task(task_idx);
+  }
+  return task_idx;
+}
+
 void SimpleThreadPoolConfig::check() const {
   base_type::check();
 

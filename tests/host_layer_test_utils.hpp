@@ -24,14 +24,65 @@
 #include "include/host_embedding_layer.hpp"
 #include "include/linear_host_table.hpp"
 #include "include/nve_types.hpp"
+#include "include/thread_pool.hpp"
 
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace nve_test {
+
+// Thread pool wrapper that records the task count of every submit/submit_n call, so tests can
+// check how CPU work was split (e.g. the task_size_threshold bound).
+class TaskCountingThreadPool final : public nve::ThreadPool {
+ public:
+  explicit TaskCountingThreadPool(int64_t num_workers)
+      : nve::ThreadPool(nve::ThreadPoolConfig{}), inner_(make_inner(num_workers)) {}
+
+  int64_t num_workers() const noexcept override { return inner_->num_workers(); }
+  int64_t num_workgroups() const noexcept override { return inner_->num_workgroups(); }
+
+  result_type submit(task_type task, int64_t workgroup) override {
+    record(1);
+    return inner_->submit(std::move(task), workgroup);
+  }
+
+  int64_t submit_n(int64_t task_idx, int64_t num_tasks, const indexed_task_type& task,
+                   result_type* results, int64_t workgroup) override {
+    record(num_tasks);
+    return inner_->submit_n(task_idx, num_tasks, task, results, workgroup);
+  }
+
+  // Task counts of all submissions so far, in call order.
+  std::vector<int64_t> task_counts() const {
+    std::lock_guard<std::mutex> lock(guard_);
+    return task_counts_;
+  }
+
+  void reset() {
+    std::lock_guard<std::mutex> lock(guard_);
+    task_counts_.clear();
+  }
+
+ private:
+  static std::shared_ptr<nve::SimpleThreadPool> make_inner(int64_t num_workers) {
+    nve::SimpleThreadPoolConfig cfg;
+    cfg.num_workers = num_workers;
+    return std::make_shared<nve::SimpleThreadPool>(cfg);
+  }
+
+  void record(int64_t num_tasks) {
+    std::lock_guard<std::mutex> lock(guard_);
+    task_counts_.push_back(num_tasks);
+  }
+
+  std::shared_ptr<nve::SimpleThreadPool> inner_;
+  mutable std::mutex guard_;
+  std::vector<int64_t> task_counts_;
+};
 
 template <typename KeyType>
 std::vector<KeyType> make_keys(std::initializer_list<int64_t> ids) {

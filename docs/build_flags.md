@@ -57,7 +57,7 @@ The supported `NVE_FEATURES` values are:
 
 | Category | Values |
 |---|---|
-| Plugins | `abseil_plugin`, `nvhm_plugin`, `phmap_plugin`, `redis_plugin`, `rocksdb_plugin` |
+| Plugins | `abseil_plugin`, `linear_file_plugin`, `nvhm_plugin`, `phmap_plugin`, `redis_plugin`, `rocksdb_plugin` |
 | Host tables key sizes | `ht_key_8`, `ht_key_16`, `ht_key_32`, `ht_key_64` |
 | Host tables kernel sizes | `ht_kernel_1`, `ht_kernel_2`, `ht_kernel_4`, `ht_kernel_8`, `ht_kernel_16`, `ht_kernel_32`, `ht_kernel_64`, `ht_kernel_128`, `ht_kernel_256`, `ht_kernel_512` |
 | Host tables partitioners | `ht_part_fnv1a`, `ht_part_murmur3`, `ht_part_rrxmrrxmsx0`, `ht_part_std_hash` |
@@ -65,7 +65,7 @@ The supported `NVE_FEATURES` values are:
 The standard default set contains:
 
 ```text
-abseil_plugin;nvhm_plugin;phmap_plugin;redis_plugin;rocksdb_plugin;
+abseil_plugin;linear_file_plugin;nvhm_plugin;phmap_plugin;redis_plugin;rocksdb_plugin;
 ht_key_32;ht_key_64;ht_kernel_8;ht_kernel_16;ht_part_fnv1a
 ```
 

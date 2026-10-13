@@ -68,7 +68,8 @@ int main() {
   // ── Step 1: Create GPU table (cache layer) ────────────────────────────
   printf("\n[1] Creating GPU table (cache)...\n");
 
-  auto gpu_cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t gpu_cfg;
+  CHECK_NVE(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
   gpu_cfg.device_id = device_id;
   gpu_cfg.cache_size = 4 * 1024 * 1024;  // 4 MB GPU cache
   gpu_cfg.row_size_in_bytes = row_size;
@@ -102,7 +103,8 @@ int main() {
   // ── Step 3: Create hierarchical layer (GPU cache → host table) ────────
   printf("\n[3] Creating hierarchical embedding layer...\n");
 
-  auto hier_cfg = nve_hierarchical_layer_config_default();
+  nve_hierarchical_layer_config_t hier_cfg;
+  CHECK_NVE(nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
   hier_cfg.layer_name = "sample_hier_layer";
   hier_cfg.min_insert_size_gpu = 16;
   hier_cfg.min_insert_size_host = 16;

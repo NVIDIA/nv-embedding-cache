@@ -28,6 +28,7 @@
 #include "include/host_embedding_layer.hpp"
 #include "include/linear_host_table.hpp"
 #include "include/nve_types.hpp"
+#include "include/thread_pool.hpp"
 #include "tests/host_layer_test_utils.hpp"
 
 #include <cmath>
@@ -1110,6 +1111,55 @@ TEST(HostLayerWeightedMeanInt64, zero_weight_sum_quint8) {
   test_weighted_mean_zero_weight_sum<int64_t>(DataType_t::QUint8RowwiseF32);
 }
 
+// Config::disable_threadpool swaps the context's thread pool for the inline singleton; otherwise
+// the thread pool handed to create_execution_context is used as-is.
+template <typename KeyType>
+void test_disable_threadpool() {
+  constexpr int64_t row_bytes = 16;
+  constexpr int64_t num_rows = 64;
+  constexpr size_t elements = row_bytes / sizeof(float);
+  std::vector<float> backing(static_cast<size_t>(num_rows) * elements);
+  std::iota(backing.begin(), backing.end(), 0.f);
+
+  LinearHostTableConfig tab_cfg;
+  tab_cfg.value_dtype = DataType_t::Float32;
+  tab_cfg.max_value_size = row_bytes;
+  tab_cfg.num_rows = num_rows;
+  tab_cfg.emb_table = backing.data();
+  auto table = std::make_shared<LinearHostTable<KeyType>>(tab_cfg);
+
+  thread_pool_ptr_t given_tp{create_thread_pool(R"({"name": "host_layer_tp", "num_workers": 2})"_json)};
+
+  typename HostEmbeddingLayer<KeyType>::Config cfg;
+  cfg.layer_name = "disable_threadpool_test";
+  EXPECT_FALSE(cfg.disable_threadpool);  // default
+  cfg.disable_threadpool = true;
+  auto inline_layer = std::make_shared<HostEmbeddingLayer<KeyType>>(cfg, table);
+  auto inline_ctx = inline_layer->create_execution_context(0, 0, given_tp, nullptr);
+  EXPECT_EQ(InlineThreadPool::instance(), inline_ctx->get_thread_pool());
+  auto inline_ctx_default_tp = inline_layer->create_execution_context(0, 0, nullptr, nullptr);
+  EXPECT_EQ(InlineThreadPool::instance(), inline_ctx_default_tp->get_thread_pool());
+
+  cfg.disable_threadpool = false;
+  auto pooled_layer = std::make_shared<HostEmbeddingLayer<KeyType>>(cfg, table);
+  auto pooled_ctx = pooled_layer->create_execution_context(0, 0, given_tp, nullptr);
+  EXPECT_EQ(given_tp, pooled_ctx->get_thread_pool());
+
+  // Lookups still produce the same rows when running inline.
+  const std::vector<KeyType> keys{3, 7, 42};
+  std::vector<float> out(keys.size() * elements, -1.f);
+  inline_layer->lookup(inline_ctx, static_cast<int64_t>(keys.size()), keys.data(), out.data(),
+                       row_bytes, nullptr, nullptr, nullptr);
+  for (size_t k = 0; k < keys.size(); k++) {
+    for (size_t e = 0; e < elements; e++) {
+      EXPECT_EQ(backing[static_cast<size_t>(keys[k]) * elements + e], out[k * elements + e]);
+    }
+  }
+}
+
+TEST(HostLayerConfigInt32, disable_threadpool) { test_disable_threadpool<int32_t>(); }
+TEST(HostLayerConfigInt64, disable_threadpool) { test_disable_threadpool<int64_t>(); }
+
 // -------------------------- test instantiation --------------------------------
 
 const HostLayerTestParams kHostLayerParams[] = {
@@ -1142,5 +1192,110 @@ HOST_LAYER_TEST(pooling_output_stride_too_small, test_pooling_output_stride_too_
 
 INSTANTIATE_TEST_SUITE_P(HostLayerInt32, HostLayerFixture_INT32, testing::ValuesIn(kHostLayerParams));
 INSTANTIATE_TEST_SUITE_P(HostLayerInt64, HostLayerFixture_INT64, testing::ValuesIn(kHostLayerParams));
+
+// task_size_threshold bounds the thread pool tasks used by the layer's own CPU work (default fill
+// and pooling) to min(pool workers, ceil(num_keys / task_size_threshold)). The table has its own
+// knob, so each lookup records the table's task count first, then the layer's.
+class HostLayerTaskSizeTest : public testing::Test {
+ protected:
+  static constexpr int64_t kNumValues = 16;
+  static constexpr int64_t kRowBytes = kNumValues * static_cast<int64_t>(sizeof(float));
+  static constexpr int64_t kNumRows = 4096;
+  static constexpr int64_t kWorkers = 8;
+  static constexpr int64_t kTableThreshold = 512;
+
+  void SetUp() override {
+    ASSERT_EQ(cudaMallocHost(&h_table_, static_cast<size_t>(kRowBytes * kNumRows)), cudaSuccess);
+    std::memset(h_table_, 0, static_cast<size_t>(kRowBytes * kNumRows));
+    pool_ = std::make_shared<nve_test::TaskCountingThreadPool>(kWorkers);
+  }
+
+  void TearDown() override {
+    ctx_.reset();
+    layer_.reset();
+    table_.reset();
+    EXPECT_EQ(cudaFreeHost(h_table_), cudaSuccess);
+  }
+
+  void make_layer(int64_t layer_threshold) {
+    LinearHostTableConfig cfg;
+    cfg.value_dtype = DataType_t::Float32;
+    cfg.task_size_threshold = kTableThreshold;
+    cfg.max_value_size = kRowBytes;
+    cfg.num_rows = kNumRows;
+    cfg.emb_table = h_table_;
+    table_ = std::make_shared<LinearHostTable<int64_t>>(cfg);
+
+    HostEmbeddingLayer<int64_t>::Config lcfg;
+    lcfg.layer_name = "host_layer_task_size";
+    lcfg.default_embedding.assign(static_cast<size_t>(kRowBytes), 0);  // enables the miss fill
+    lcfg.task_size_threshold = layer_threshold;
+    layer_ = std::make_shared<HostEmbeddingLayer<int64_t>>(lcfg, table_);
+    ctx_ = layer_->create_execution_context(0, 0, pool_, nullptr);
+  }
+
+  // Looks up num_keys keys that all miss the table (so the default fill runs) and returns the
+  // task count of every pool submission. Fixed-hotness Sum pooling is applied when hotness > 0.
+  std::vector<int64_t> run_lookup(int64_t num_keys, int64_t hotness = 0) {
+    std::vector<int64_t> keys(static_cast<size_t>(num_keys), kNumRows + 1);  // out of range
+    const int64_t out_rows = hotness > 0 ? num_keys / hotness : num_keys;
+    std::vector<float> out(static_cast<size_t>(out_rows * kNumValues), 0.f);
+
+    EmbeddingLayerBase::PoolingParams pp;
+    pp.pooling_type = PoolingType_t::Sum;
+    pp.sparse_type = SparseType_t::Fixed;
+    pp.output_type = DataType_t::Float32;
+    pp.fixed_hotness = hotness;
+
+    pool_->reset();
+    layer_->lookup(ctx_, num_keys, keys.data(), out.data(), kRowBytes, /*hitmask=*/nullptr,
+                   hotness > 0 ? &pp : nullptr, /*hitrates=*/nullptr);
+    return pool_->task_counts();
+  }
+
+  std::shared_ptr<nve_test::TaskCountingThreadPool> pool_;
+  std::shared_ptr<LinearHostTable<int64_t>> table_;
+  std::shared_ptr<HostEmbeddingLayer<int64_t>> layer_;
+  context_ptr_t ctx_;
+  float* h_table_ = nullptr;
+};
+
+TEST_F(HostLayerTaskSizeTest, default_fill_tasks_follow_layer_threshold) {
+  make_layer(/*layer_threshold=*/1024);
+  // {table find, default fill}
+  EXPECT_EQ(run_lookup(1), (std::vector<int64_t>{1, 1}));
+  EXPECT_EQ(run_lookup(1024), (std::vector<int64_t>{2, 1}));
+  EXPECT_EQ(run_lookup(1025), (std::vector<int64_t>{3, 2}));
+  EXPECT_EQ(run_lookup(kNumRows), (std::vector<int64_t>{8, 4}));
+}
+
+TEST_F(HostLayerTaskSizeTest, pooling_tasks_follow_layer_threshold) {
+  make_layer(/*layer_threshold=*/256);
+  // {table find, default fill, pooling}
+  EXPECT_EQ(run_lookup(8, /*hotness=*/4), (std::vector<int64_t>{1, 1, 1}));
+  EXPECT_EQ(run_lookup(1024, /*hotness=*/4), (std::vector<int64_t>{2, 4, 4}));
+  EXPECT_EQ(run_lookup(kNumRows, /*hotness=*/4), (std::vector<int64_t>{8, 8, 8}));
+}
+
+TEST_F(HostLayerTaskSizeTest, threshold_one_restores_full_fanout) {
+  make_layer(/*layer_threshold=*/1);
+  EXPECT_EQ(run_lookup(3), (std::vector<int64_t>{1, 3}));
+  EXPECT_EQ(run_lookup(kWorkers + 1), (std::vector<int64_t>{1, kWorkers}));
+}
+
+TEST(HostLayerConfigTest, rejects_non_positive_task_size_threshold) {
+  float row[4] = {};
+  LinearHostTableConfig cfg;
+  cfg.value_dtype = DataType_t::Float32;
+  cfg.max_value_size = sizeof(row);
+  cfg.num_rows = 1;
+  cfg.emb_table = row;
+  auto table = std::make_shared<LinearHostTable<int64_t>>(cfg);
+
+  HostEmbeddingLayer<int64_t>::Config lcfg;
+  lcfg.layer_name = "host_layer_bad_threshold";
+  lcfg.task_size_threshold = 0;
+  EXPECT_THROW(std::make_shared<HostEmbeddingLayer<int64_t>>(lcfg, table), std::exception);
+}
 
 }  // namespace nve

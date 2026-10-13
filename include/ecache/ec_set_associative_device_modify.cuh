@@ -470,7 +470,7 @@ private:
     }
 
     virtual size_t get_counter_size_per_set() const override {
-        return CACHE_ALIGN(sizeof(CounterT) * NUM_WAYS, 16);
+        return CACHE_ALIGN(sizeof(CounterT) * NUM_WAYS, 16) + sizeof(int64_t); // counters + lazy-decay timestamp
     }
 
     mutable std::mutex modify_mutex_;

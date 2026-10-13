@@ -17,8 +17,12 @@
 
 #include <gtest/gtest.h>
 #include <nve_c_api.h>
-
-#include <limits>
+#include <gpu_embedding_layer.hpp>
+#include <gpu_table.hpp>
+#include <hierarchical_embedding_layer.hpp>
+#include <host_embedding_layer.hpp>
+#include <linear_embedding_layer.hpp>
+#include <plugin/external_plugin_table.hpp>
 
 #include "test_utils.hpp"
 
@@ -61,46 +65,49 @@ TEST(NveCApiBasic, GetLastErrorEmpty) {
 }
 
 TEST(NveCApiBasic, ConfigDefaults) {
-  auto gpu_cfg = nve_gpu_table_config_default();
-  EXPECT_EQ(0, gpu_cfg.device_id);
-  EXPECT_EQ(1, gpu_cfg.count_misses);
-  EXPECT_EQ(1 << 20, gpu_cfg.max_modify_size);
-  EXPECT_EQ(1, gpu_cfg.uvm_cpu_accumulate);
-  EXPECT_EQ(1, gpu_cfg.modify_on_gpu);
-  EXPECT_EQ(NVE_DTYPE_UNKNOWN, gpu_cfg.value_dtype);
-  EXPECT_EQ(-1, gpu_cfg.invalid_key);
+  nve_gpu_table_config_t gpu_cfg;
+  const nve::GPUTableConfig gpu_defaults{};
+  ASSERT_EQ(NVE_SUCCESS, nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
+  EXPECT_EQ(gpu_defaults.device_id, gpu_cfg.device_id);
+  EXPECT_EQ(gpu_defaults.count_misses, gpu_cfg.count_misses);
+  EXPECT_EQ(gpu_defaults.max_modify_size, gpu_cfg.max_modify_size);
+  EXPECT_EQ(gpu_defaults.uvm_cpu_accumulate, gpu_cfg.uvm_cpu_accumulate);
+  EXPECT_EQ(gpu_defaults.modify_on_gpu, gpu_cfg.modify_on_gpu);
+  EXPECT_EQ(gpu_defaults.value_dtype, nve::convert_external_dtype(gpu_cfg.value_dtype));
+  EXPECT_EQ(gpu_defaults.invalid_key, gpu_cfg.invalid_key);
 
-  auto emb_cfg = nve_gpu_embedding_layer_config_default();
-  EXPECT_EQ(0, emb_cfg.device_id);
-  EXPECT_EQ(NVE_DTYPE_UNKNOWN, emb_cfg.value_dtype);
-  EXPECT_EQ(-1, emb_cfg.default_row_index);
+  nve_gpu_embedding_layer_config_t emb_cfg;
+  const nve::GPUEmbeddingLayerConfig emb_defaults{};
+  ASSERT_EQ(NVE_SUCCESS, nve_gpu_embedding_layer_config_init(&emb_cfg, sizeof(emb_cfg)));
+  EXPECT_EQ(emb_defaults.device_id, emb_cfg.device_id);
+  EXPECT_EQ(emb_defaults.value_dtype, nve::convert_external_dtype(emb_cfg.value_dtype));
+  EXPECT_EQ(emb_defaults.default_row_index, emb_cfg.default_row_index);
 
-  auto uvm_cfg = nve_linear_uvm_layer_config_default();
-  EXPECT_EQ(0, uvm_cfg.min_insert_freq_gpu);
-  EXPECT_EQ(1 << 16, uvm_cfg.min_insert_size_gpu);
+  nve_linear_uvm_layer_config_t uvm_cfg;
+  const nve::LinearUVMEmbeddingLayer<int64_t>::Config uvm_defaults{};
+  ASSERT_EQ(NVE_SUCCESS, nve_linear_uvm_layer_config_init(&uvm_cfg, sizeof(uvm_cfg)));
+  EXPECT_EQ(uvm_defaults.min_insert_freq_gpu, uvm_cfg.min_insert_freq_gpu);
+  EXPECT_EQ(uvm_defaults.min_insert_size_gpu, uvm_cfg.min_insert_size_gpu);
   EXPECT_EQ(nullptr, uvm_cfg.insert_heuristic);
-  EXPECT_EQ(-1, uvm_cfg.default_row_index);
+  EXPECT_EQ(uvm_defaults.default_row_index, uvm_cfg.default_row_index);
 
-  auto hier_cfg = nve_hierarchical_layer_config_default();
-  EXPECT_EQ(0, hier_cfg.min_insert_freq_gpu);
-  EXPECT_EQ(0, hier_cfg.min_insert_freq_host);
-  EXPECT_EQ(1 << 16, hier_cfg.min_insert_size_gpu);
-  EXPECT_EQ(0, hier_cfg.min_insert_size_host);
+  nve_hierarchical_layer_config_t hier_cfg;
+  const nve::HierarchicalEmbeddingLayer<int64_t>::Config hier_defaults{};
+  ASSERT_EQ(NVE_SUCCESS, nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
+  EXPECT_EQ(hier_defaults.min_insert_freq_gpu, hier_cfg.min_insert_freq_gpu);
+  EXPECT_EQ(hier_defaults.min_insert_freq_host, hier_cfg.min_insert_freq_host);
+  EXPECT_EQ(hier_defaults.min_insert_size_gpu, hier_cfg.min_insert_size_gpu);
+  EXPECT_EQ(hier_defaults.min_insert_size_host, hier_cfg.min_insert_size_host);
 
-  auto host_layer_cfg = nve_host_embedding_layer_config_default();
-  EXPECT_STREQ("", host_layer_cfg.layer_name);
-  EXPECT_EQ(nullptr, host_layer_cfg.default_embedding);
-  EXPECT_EQ(0, host_layer_cfg.default_embedding_size);
-
-  auto overflow_cfg = nve_overflow_policy_config_default();
-  EXPECT_EQ(std::numeric_limits<int64_t>::max() - 1023, overflow_cfg.overflow_margin);
-  EXPECT_EQ(NVE_OVERFLOW_EVICT_RANDOM, overflow_cfg.handler);
-  EXPECT_DOUBLE_EQ(0.8, overflow_cfg.resolution_margin);
-
-  auto host_cfg = nve_host_table_config_default();
-  EXPECT_EQ(8, host_cfg.max_value_size);
-  EXPECT_EQ(NVE_DTYPE_UNKNOWN, host_cfg.value_dtype);
-  EXPECT_EQ(-1, host_cfg.invalid_key);
+  nve_host_embedding_layer_config_t host_layer_cfg;
+  const nve::HostEmbeddingLayer<int64_t>::Config host_defaults{};
+  ASSERT_EQ(NVE_SUCCESS, nve_host_embedding_layer_config_init(&host_layer_cfg, sizeof(host_layer_cfg)));
+  EXPECT_STREQ(host_defaults.layer_name.c_str(), host_layer_cfg.layer_name);
+  EXPECT_EQ(host_defaults.default_embedding.empty(), host_layer_cfg.default_embedding == nullptr);
+  EXPECT_EQ(static_cast<int64_t>(host_defaults.default_embedding.size()),
+            host_layer_cfg.default_embedding_size);
+  EXPECT_EQ(host_defaults.task_size_threshold, host_layer_cfg.task_size_threshold);
+  EXPECT_EQ(host_defaults.disable_threadpool, host_layer_cfg.disable_threadpool);
 }
 
 TEST(NveCApiBasic, DestroyNull) {

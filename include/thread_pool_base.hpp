@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <bit_ops.hpp>
 #include <common.hpp>
 #include <future>
 #include <string>
@@ -61,6 +63,18 @@ template <typename It>
 inline void await_n(It first, const int64_t n) {
   NVE_ASSERT_(n >= 0);
   await(first, first + n);
+}
+
+/**
+ * Number of tasks to split `num_items` of CPU work into: at most `max_tasks`, and no more than one
+ * task per `task_size_threshold` items (rounded up), so small batches don't fan out across the
+ * whole pool. Always at least 1.
+ */
+inline int64_t select_num_tasks(const int64_t num_items, const int64_t max_tasks,
+                                const int64_t task_size_threshold) {
+  NVE_ASSERT_(task_size_threshold > 0);
+  const int64_t by_size{ceil_div(std::max<int64_t>(num_items, 1), task_size_threshold)};
+  return std::max<int64_t>(1, std::min(max_tasks, by_size));
 }
 
 struct ThreadPoolConfig {
@@ -118,7 +132,7 @@ class ThreadPool {
    * @param task The task.
    * @param workgroup Workgroup to submit the task to.
    */
-  inline void execute(task_type task, int64_t workgroup = 0) {
+  virtual void execute(task_type task, int64_t workgroup = 0) {
     result_type res{submit(std::move(task), workgroup)};
     await(res);
   }
@@ -146,8 +160,8 @@ class ThreadPool {
    * @param workgroup Workgroup to submit the tasks to.
    * @return Next `task_idx`.
    */
-  inline int64_t execute_n(int64_t task_idx, const int64_t num_tasks, const indexed_task_type& task,
-                           const int64_t workgroup = 0) {
+  virtual int64_t execute_n(int64_t task_idx, const int64_t num_tasks,
+                            const indexed_task_type& task, const int64_t workgroup = 0) {
     if (num_tasks <= 0) return task_idx;
 
     static constexpr int64_t N{1024 / sizeof(result_type)};
@@ -217,6 +231,8 @@ class ThreadPool {
                            const It& first_workgroup, const It& last_workgroup,
                            int64_t tasks_per_workgroup) {
     if (num_tasks <= 0) return task_idx;
+    // With a single workgroup there is nothing to distribute; use the (virtual) direct path.
+    if (num_workgroups() == 1) return execute_n(task_idx, num_tasks, task, 0);
 
     static constexpr int64_t N{1024 / sizeof(result_type)};
     static_assert(N > 0);

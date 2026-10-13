@@ -21,12 +21,13 @@
 #include <cstring>
 #include <linear_host_table.hpp>
 #include <default_allocator.hpp>
+#include <numeric>
 #include <vector>
+#include "tests/host_layer_test_utils.hpp"
 
 namespace nve {
 
 #define TEST_KEY (1337)
-#define TEST_ROW_SIZE (128)
 
 struct LinearHostTableTestParams {
     int64_t row_size_bytes;
@@ -342,5 +343,112 @@ INSTANTIATE_TEST_SUITE_P(
     LinearHostTableTestInt64,
     LHTFixture_INT64_T,
     testing::ValuesIn(test_params));
+
+// task_size_threshold bounds the threads used by find/update/update_accumulate to
+// min(pool workers, max_threads, ceil(num_keys / task_size_threshold)).
+class LinearHostTableTaskSizeTest : public testing::Test {
+ protected:
+  static constexpr int64_t kRowBytes = 64;
+  static constexpr int64_t kNumRows = 8192;
+  static constexpr int64_t kWorkers = 8;
+
+  void SetUp() override {
+    NVE_CHECK_(cudaMallocHost(&h_table_, static_cast<size_t>(kRowBytes * kNumRows)));
+    std::memset(h_table_, 0, static_cast<size_t>(kRowBytes * kNumRows));
+    pool_ = std::make_shared<nve_test::TaskCountingThreadPool>(kWorkers);
+  }
+
+  void TearDown() override {
+    ctx_.reset();
+    table_.reset();
+    NVE_CHECK_(cudaFreeHost(h_table_));
+  }
+
+  void make_table(int64_t task_size_threshold, int64_t max_threads = 64) {
+    LinearHostTableConfig cfg;
+    cfg.value_dtype = DataType_t::Float32;
+    cfg.max_threads = max_threads;
+    cfg.task_size_threshold = task_size_threshold;
+    cfg.max_value_size = kRowBytes;
+    cfg.num_rows = kNumRows;
+    cfg.emb_table = h_table_;
+    table_ = std::make_shared<LinearHostTable<int64_t>>(cfg);
+    ctx_ = table_->create_execution_context(0, 0, pool_, nullptr);
+  }
+
+  // Runs find, update and update_accumulate on num_keys keys and returns the task count of each.
+  std::vector<int64_t> run_ops(int64_t num_keys) {
+    std::vector<int64_t> keys(static_cast<size_t>(num_keys));
+    std::iota(keys.begin(), keys.end(), 0);
+    std::vector<float> data(static_cast<size_t>(num_keys * kRowBytes) / sizeof(float), 1.f);
+    std::vector<bitmask64_t> hit_mask(to_uint(ceil_div(num_keys, bitmask64::num_bits)), 0);
+    const size_t keys_bytes = static_cast<size_t>(num_keys) * sizeof(int64_t);
+    const size_t data_bytes = static_cast<size_t>(num_keys * kRowBytes);
+
+    pool_->reset();
+    {
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "keys", keys.data(), keys_bytes);
+      auto mask_bw = std::make_shared<BufferWrapper<bitmask64_t>>(
+          ctx_, "hit_mask", hit_mask.data(), hit_mask.size() * sizeof(bitmask64_t));
+      auto values_bw = std::make_shared<BufferWrapper<void>>(ctx_, "values", data.data(), data_bytes);
+      table_->find(ctx_, num_keys, keys_bw, mask_bw, kRowBytes, values_bw, nullptr);
+    }
+    {
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "keys", keys.data(), keys_bytes);
+      auto values_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "values", data.data(), data_bytes);
+      table_->update(ctx_, num_keys, keys_bw, kRowBytes, kRowBytes, values_bw);
+    }
+    {
+      auto keys_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "keys", keys.data(), keys_bytes);
+      auto updates_bw = std::make_shared<BufferWrapper<const void>>(ctx_, "updates", data.data(), data_bytes);
+      table_->update_accumulate(ctx_, num_keys, keys_bw, kRowBytes, kRowBytes, updates_bw,
+                                DataType_t::Float32);
+    }
+    return pool_->task_counts();
+  }
+
+  std::shared_ptr<nve_test::TaskCountingThreadPool> pool_;
+  std::shared_ptr<LinearHostTable<int64_t>> table_;
+  context_ptr_t ctx_;
+  float* h_table_ = nullptr;
+};
+
+TEST_F(LinearHostTableTaskSizeTest, small_batches_use_few_threads) {
+  make_table(/*task_size_threshold=*/1024);
+  EXPECT_EQ(run_ops(1), (std::vector<int64_t>{1, 1, 1}));
+  EXPECT_EQ(run_ops(1024), (std::vector<int64_t>{1, 1, 1}));
+  EXPECT_EQ(run_ops(1025), (std::vector<int64_t>{2, 2, 2}));
+  EXPECT_EQ(run_ops(5000), (std::vector<int64_t>{5, 5, 5}));
+}
+
+TEST_F(LinearHostTableTaskSizeTest, large_batches_are_capped_by_pool_and_max_threads) {
+  make_table(/*task_size_threshold=*/16);
+  // ceil(8192 / 16) = 512 exceeds the 8 pool workers.
+  EXPECT_EQ(run_ops(kNumRows), (std::vector<int64_t>{kWorkers, kWorkers, kWorkers}));
+
+  make_table(/*task_size_threshold=*/16, /*max_threads=*/3);
+  EXPECT_EQ(run_ops(kNumRows), (std::vector<int64_t>{3, 3, 3}));
+}
+
+TEST_F(LinearHostTableTaskSizeTest, threshold_one_restores_full_fanout) {
+  make_table(/*task_size_threshold=*/1);
+  EXPECT_EQ(run_ops(kWorkers + 1), (std::vector<int64_t>{kWorkers, kWorkers, kWorkers}));
+  EXPECT_EQ(run_ops(3), (std::vector<int64_t>{3, 3, 3}));
+}
+
+TEST(LinearHostTableConfigTest, rejects_non_positive_task_size_threshold) {
+  float dummy = 0.f;
+  LinearHostTableConfig cfg;
+  cfg.value_dtype = DataType_t::Float32;
+  cfg.max_value_size = sizeof(float);
+  cfg.num_rows = 1;
+  cfg.emb_table = &dummy;
+  cfg.task_size_threshold = 0;
+  EXPECT_THROW(cfg.check(), std::exception);
+  cfg.task_size_threshold = -5;
+  EXPECT_THROW(cfg.check(), std::exception);
+  cfg.task_size_threshold = 1;
+  EXPECT_NO_THROW(cfg.check());
+}
 
 }  // namespace nve

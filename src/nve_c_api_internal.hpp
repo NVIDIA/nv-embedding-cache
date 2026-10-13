@@ -65,8 +65,8 @@ nve_status_t nve_set_error(nve_status_t status, const std::string& message);
     /* round-trip the external plugin's validated status category */\
     return nve_set_error(e.status(), e.what());                     \
   }                                                                 \
-  catch (const std::bad_alloc&) {                                   \
-    return nve_set_error(NVE_ERROR_OUT_OF_MEMORY, "Out of memory"); \
+  catch (const std::bad_alloc& e) {                                 \
+    return nve_set_error(NVE_ERROR_OUT_OF_MEMORY, e.what());        \
   }                                                                 \
   catch (const nve::InvalidArgumentError& e) {                      \
     return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, e.what());     \

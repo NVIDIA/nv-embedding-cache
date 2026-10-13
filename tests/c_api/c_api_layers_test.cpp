@@ -81,7 +81,8 @@ class GpuEmbeddingLayerTest : public ::testing::Test {
     CUDA_CHECK(cudaMemcpy(d_table_, h_table_, table_bytes, cudaMemcpyHostToDevice));
 
     // Create layer
-    auto cfg = nve_gpu_embedding_layer_config_default();
+    nve_gpu_embedding_layer_config_t cfg;
+    NVE_CHECK(nve_gpu_embedding_layer_config_init(&cfg, sizeof(cfg)));
     cfg.device_id = DEVICE_ID;
     cfg.layer_name = "test_gpu_layer";
     cfg.embedding_table = d_table_;
@@ -229,7 +230,8 @@ class GpuTableTest : public ::testing::Test {
     CUDA_CHECK(cudaMallocHost(&h_uvm_table_, uvm_bytes));
     memset(h_uvm_table_, 0, uvm_bytes);
 
-    auto cfg = nve_gpu_table_config_default();
+    nve_gpu_table_config_t cfg;
+    NVE_CHECK(nve_gpu_table_config_init(&cfg, sizeof(cfg)));
     cfg.device_id = DEVICE_ID;
     cfg.cache_size = 1 << 20;  // 1MB cache
     cfg.row_size_in_bytes = ROW_SIZE;
@@ -449,7 +451,8 @@ TEST(GpuTableInt32, InsertAndFind) {
   CUDA_CHECK(cudaMallocHost(&h_uvm, 256 * ROW_SIZE));
   memset(h_uvm, 0, 256 * ROW_SIZE);
 
-  auto cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t cfg;
+  NVE_CHECK(nve_gpu_table_config_init(&cfg, sizeof(cfg)));
   cfg.device_id = DEVICE_ID;
   cfg.cache_size = 1 << 20;
   cfg.row_size_in_bytes = ROW_SIZE;
@@ -533,7 +536,8 @@ class LinearUvmLayerTest : public ::testing::Test {
     fill_host_data(static_cast<float*>(h_uvm_table_), num_rows_, NUM_FLOATS, 0.0f);
 
     // Create GPU table with UVM backing
-    auto gpu_cfg = nve_gpu_table_config_default();
+    nve_gpu_table_config_t gpu_cfg;
+    NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
     gpu_cfg.device_id = DEVICE_ID;
     gpu_cfg.cache_size = 1 << 20;  // 1MB GPU cache
     gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -545,7 +549,8 @@ class LinearUvmLayerTest : public ::testing::Test {
     NVE_CHECK(nve_gpu_table_create(&gpu_table_, NVE_KEY_INT64, &gpu_cfg, nullptr));
 
     // Create Linear UVM layer wrapping the GPU table
-    auto layer_cfg = nve_linear_uvm_layer_config_default();
+    nve_linear_uvm_layer_config_t layer_cfg;
+    NVE_CHECK(nve_linear_uvm_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
     layer_cfg.layer_name = "test_uvm_layer";
 
     NVE_CHECK(nve_linear_uvm_layer_create(&layer_, NVE_KEY_INT64, &layer_cfg, gpu_table_, nullptr));
@@ -610,7 +615,8 @@ TEST(CApiOutOfRangeKeys, GpuEmbeddingLayerLookupReturnsDefaultRow) {
   CUDA_CHECK(cudaMalloc(&d_table, table_bytes));
   CUDA_CHECK(cudaMemcpy(d_table, h_table.data(), table_bytes, cudaMemcpyHostToDevice));
 
-  auto cfg = nve_gpu_embedding_layer_config_default();
+  nve_gpu_embedding_layer_config_t cfg;
+  NVE_CHECK(nve_gpu_embedding_layer_config_init(&cfg, sizeof(cfg)));
   cfg.device_id = DEVICE_ID;
   cfg.layer_name = "default_row_gpu_layer";
   cfg.embedding_table = d_table;
@@ -655,7 +661,8 @@ TEST(CApiOutOfRangeKeys, LinearUvmLayerLookupReturnsDefaultRow) {
   CUDA_CHECK(cudaMallocHost(&h_uvm_table, table_bytes));
   fill_host_data(static_cast<float*>(h_uvm_table), num_rows, NUM_FLOATS, 0.0f);
 
-  auto gpu_cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t gpu_cfg;
+  NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
   gpu_cfg.device_id = DEVICE_ID;
   gpu_cfg.cache_size = 1 << 20;
   gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -666,7 +673,8 @@ TEST(CApiOutOfRangeKeys, LinearUvmLayerLookupReturnsDefaultRow) {
   nve_table_t gpu_table = nullptr;
   NVE_CHECK(nve_gpu_table_create(&gpu_table, NVE_KEY_INT64, &gpu_cfg, nullptr));
 
-  auto layer_cfg = nve_linear_uvm_layer_config_default();
+  nve_linear_uvm_layer_config_t layer_cfg;
+  NVE_CHECK(nve_linear_uvm_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
   layer_cfg.layer_name = "default_row_uvm_layer";
   layer_cfg.default_row_index = default_row_index;
 
@@ -821,7 +829,8 @@ class HierarchicalLayerTest : public ::testing::Test {
     CUDA_CHECK(cudaMallocHost(&h_uvm_table_, uvm_bytes));
     fill_host_data(static_cast<float*>(h_uvm_table_), 512, NUM_FLOATS, 100.0f);
 
-    auto gpu_cfg = nve_gpu_table_config_default();
+    nve_gpu_table_config_t gpu_cfg;
+    NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
     gpu_cfg.device_id = DEVICE_ID;
     gpu_cfg.cache_size = 1 << 20;
     gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -833,7 +842,8 @@ class HierarchicalLayerTest : public ::testing::Test {
     NVE_CHECK(nve_gpu_table_create(&gpu_table_, NVE_KEY_INT64, &gpu_cfg, nullptr));
 
     // Create hierarchical layer with single GPU table
-    auto hier_cfg = nve_hierarchical_layer_config_default();
+    nve_hierarchical_layer_config_t hier_cfg;
+    NVE_CHECK(nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
     hier_cfg.layer_name = "test_hier_layer";
 
     nve_table_t tables[] = {gpu_table_};
@@ -981,7 +991,8 @@ TEST(LayerWithHeuristic, LinearUvmWithDefaultHeuristic) {
   CUDA_CHECK(cudaMallocHost(&h_uvm, num_rows * ROW_SIZE));
   fill_host_data(static_cast<float*>(h_uvm), num_rows, NUM_FLOATS, 0.0f);
 
-  auto gpu_cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t gpu_cfg;
+  NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
   gpu_cfg.device_id = DEVICE_ID;
   gpu_cfg.cache_size = 1 << 20;
   gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -998,7 +1009,8 @@ TEST(LayerWithHeuristic, LinearUvmWithDefaultHeuristic) {
   nve_heuristic_t heuristic = nullptr;
   NVE_CHECK(nve_heuristic_create_default(&heuristic, thresholds, 1));
 
-  auto layer_cfg = nve_linear_uvm_layer_config_default();
+  nve_linear_uvm_layer_config_t layer_cfg;
+  NVE_CHECK(nve_linear_uvm_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
   layer_cfg.layer_name = "uvm_with_heuristic";
   layer_cfg.insert_heuristic = heuristic;
   layer_cfg.min_insert_size_gpu = 2;
@@ -1049,7 +1061,8 @@ class HierarchicalNvhmLayerTest : public ::testing::Test {
     }
 
     // GPU table without UVM backing — misses go to host table
-    auto gpu_cfg = nve_gpu_table_config_default();
+    nve_gpu_table_config_t gpu_cfg;
+    NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
     gpu_cfg.device_id = DEVICE_ID;
     gpu_cfg.cache_size = 1 << 20;
     gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -1069,7 +1082,8 @@ class HierarchicalNvhmLayerTest : public ::testing::Test {
     NVE_CHECK(nve_table_factory_produce(nvhm_factory_, 0, table_config, &nvhm_table_));
 
     // Hierarchical layer: GPU cache + NVHM host table
-    auto hier_cfg = nve_hierarchical_layer_config_default();
+    nve_hierarchical_layer_config_t hier_cfg;
+    NVE_CHECK(nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
     hier_cfg.layer_name = "test_hier_nvhm";
 
     nve_table_t tables[] = {gpu_table_, nvhm_table_};
@@ -1222,7 +1236,8 @@ TEST(HierarchicalDefaultEmbedding, FillsMissesViaCApi) {
   // Default embedding row: 32 floats all set to 7.5f.
   std::vector<float> default_emb(NUM_FLOATS, 7.5f);
 
-  auto hier_cfg = nve_hierarchical_layer_config_default();
+  nve_hierarchical_layer_config_t hier_cfg;
+  NVE_CHECK(nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
   hier_cfg.layer_name = "test_default_embedding";
   hier_cfg.default_embedding = default_emb.data();
   hier_cfg.default_embedding_size = static_cast<int64_t>(default_emb.size() * sizeof(float));
@@ -1311,7 +1326,8 @@ TEST(HostEmbeddingLayer, LookupAndDefaultEmbeddingViaCApi) {
 
   const size_t num_floats = static_cast<size_t>(NUM_FLOATS);
   std::vector<float> default_emb(num_floats, 7.5f);
-  auto layer_cfg = nve_host_embedding_layer_config_default();
+  nve_host_embedding_layer_config_t layer_cfg;
+  NVE_CHECK(nve_host_embedding_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
   layer_cfg.layer_name = "test_host_layer";
   layer_cfg.default_embedding = default_emb.data();
   layer_cfg.default_embedding_size = static_cast<int64_t>(default_emb.size() * sizeof(float));
@@ -1462,6 +1478,100 @@ TEST(HostEmbeddingLayer, LookupAndDefaultEmbeddingViaCApi) {
 }
 
 /* ============================================================================
+ * Host-only Layer over a Linear Host Table
+ * ============================================================================ */
+
+template <typename KeyT>
+static void RunLinearHostLayer(nve_key_type_t key_type) {
+  const int64_t num_rows = 8;
+  const size_t num_floats = static_cast<size_t>(NUM_FLOATS);
+  std::vector<float> rows(static_cast<size_t>(num_rows) * num_floats);
+  fill_host_data(rows.data(), num_rows, NUM_FLOATS, 10.0f);
+
+  nve_linear_host_table_config_t table_cfg;
+  NVE_CHECK(nve_linear_host_table_config_init(&table_cfg, sizeof(table_cfg)));
+  table_cfg.emb_table = rows.data();
+  table_cfg.num_rows = num_rows;
+  table_cfg.row_size_in_bytes = ROW_SIZE;
+  table_cfg.value_dtype = NVE_DTYPE_FLOAT32;
+  nve_table_t host_table = nullptr;
+  NVE_CHECK(nve_linear_host_table_create(&host_table, key_type, &table_cfg));
+  ASSERT_NE(nullptr, host_table);
+
+  std::vector<float> default_emb(num_floats, 7.5f);
+  nve_host_embedding_layer_config_t layer_cfg;
+  NVE_CHECK(nve_host_embedding_layer_config_init(&layer_cfg, sizeof(layer_cfg)));
+  layer_cfg.layer_name = "linear_host_layer";
+  layer_cfg.default_embedding = default_emb.data();
+  layer_cfg.default_embedding_size = static_cast<int64_t>(default_emb.size() * sizeof(float));
+  nve_layer_t layer = nullptr;
+  NVE_CHECK(nve_host_embedding_layer_create(&layer, key_type, &layer_cfg, host_table, nullptr));
+  ASSERT_NE(nullptr, layer);
+
+  nve_context_t ctx = nullptr;
+  NVE_CHECK(nve_layer_create_execution_context(layer, &ctx, nullptr, nullptr, nullptr, nullptr));
+
+  // Keys index rows directly; keys past num_rows miss and get the default embedding.
+  const std::vector<KeyT> keys = {0, 5, static_cast<KeyT>(num_rows), static_cast<KeyT>(num_rows + 3)};
+  const auto lookup = [&](std::vector<float>& output, uint64_t& hitmask) {
+    output.assign(keys.size() * num_floats, 0.0f);
+    hitmask = 0;
+    NVE_CHECK(nve_layer_lookup(layer, ctx, static_cast<int64_t>(keys.size()), keys.data(),
+                               output.data(), ROW_SIZE, &hitmask, nullptr));
+    NVE_CHECK(nve_context_wait(ctx));
+  };
+  std::vector<float> output;
+  uint64_t hitmask = 0;
+  lookup(output, hitmask);
+  EXPECT_EQ(0x3u, hitmask & 0xFu);
+  const float expected[] = {10.0f, 15.0f, 7.5f, 7.5f};
+  for (size_t k = 0; k < keys.size(); ++k) {
+    for (size_t c = 0; c < num_floats; ++c) {
+      EXPECT_FLOAT_EQ(expected[k], output[k * num_floats + c]) << "key " << keys[k] << " comp " << c;
+    }
+  }
+
+  // Update and accumulate write through to the caller's buffer.
+  const KeyT update_key = 5;
+  const std::vector<float> update_row(num_floats, 50.0f);
+  NVE_CHECK(nve_layer_update(layer, ctx, 1, &update_key, ROW_SIZE, ROW_SIZE, update_row.data(), 0));
+  NVE_CHECK(nve_context_wait(ctx));
+  const KeyT accumulate_key = 0;
+  const std::vector<float> delta(num_floats, 1.0f);
+  NVE_CHECK(nve_layer_accumulate(layer, ctx, 1, &accumulate_key, ROW_SIZE, ROW_SIZE, delta.data(),
+                                 NVE_DTYPE_FLOAT32, 0));
+  NVE_CHECK(nve_context_wait(ctx));
+  EXPECT_FLOAT_EQ(50.0f, rows[5 * num_floats]);
+  EXPECT_FLOAT_EQ(11.0f, rows[0]);
+
+  lookup(output, hitmask);
+  EXPECT_FLOAT_EQ(11.0f, output[0]);
+  EXPECT_FLOAT_EQ(50.0f, output[num_floats]);
+
+  nve_context_destroy(ctx);
+  nve_layer_destroy(layer);
+  nve_table_destroy(host_table);
+}
+
+TEST(LinearHostTable, HostLayerViaCApiInt32) {
+  RunLinearHostLayer<int32_t>(NVE_KEY_INT32);
+}
+
+TEST(LinearHostTable, HostLayerViaCApiInt64) {
+  RunLinearHostLayer<int64_t>(NVE_KEY_INT64);
+}
+
+TEST(LinearHostTable, MissingBufferIsRejected) {
+  nve_linear_host_table_config_t cfg;
+  NVE_CHECK(nve_linear_host_table_config_init(&cfg, sizeof(cfg)));
+  cfg.num_rows = 8;
+  cfg.row_size_in_bytes = ROW_SIZE;
+  nve_table_t table = reinterpret_cast<nve_table_t>(uintptr_t{1});
+  EXPECT_NE(NVE_SUCCESS, nve_linear_host_table_create(&table, NVE_KEY_INT64, &cfg));
+  EXPECT_EQ(nullptr, table);
+}
+
+/* ============================================================================
  * Hierarchical Layer with GPU + Redis table
  * ============================================================================ */
 
@@ -1492,7 +1602,8 @@ class HierarchicalRedisLayerTest : public ::testing::Test {
     }
 
     // GPU table without UVM backing — misses go to host table
-    auto gpu_cfg = nve_gpu_table_config_default();
+    nve_gpu_table_config_t gpu_cfg;
+    NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
     gpu_cfg.device_id = DEVICE_ID;
     gpu_cfg.cache_size = 1 << 20;
     gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -1509,7 +1620,8 @@ class HierarchicalRedisLayerTest : public ::testing::Test {
     NVE_CHECK(nve_table_factory_produce(redis_factory_, 0, table_config, &redis_table_));
 
     // Hierarchical layer: GPU + Redis
-    auto hier_cfg = nve_hierarchical_layer_config_default();
+    nve_hierarchical_layer_config_t hier_cfg;
+    NVE_CHECK(nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
     hier_cfg.layer_name = "test_hier_redis";
 
     nve_table_t tables[] = {gpu_table_, redis_table_};
@@ -1605,7 +1717,8 @@ class HierarchicalSphLayerTest : public ::testing::Test {
     }
 
     // GPU cache tier without UVM backing — misses fall through to the SPH tier.
-    auto gpu_cfg = nve_gpu_table_config_default();
+    nve_gpu_table_config_t gpu_cfg;
+    NVE_CHECK(nve_gpu_table_config_init(&gpu_cfg, sizeof(gpu_cfg)));
     gpu_cfg.device_id = DEVICE_ID;
     gpu_cfg.cache_size = 1 << 20;
     gpu_cfg.row_size_in_bytes = ROW_SIZE;
@@ -1623,7 +1736,8 @@ class HierarchicalSphLayerTest : public ::testing::Test {
     })";
     NVE_CHECK(nve_table_factory_produce(sph_factory_, 0, table_config, &sph_table_));
 
-    auto hier_cfg = nve_hierarchical_layer_config_default();
+    nve_hierarchical_layer_config_t hier_cfg;
+    NVE_CHECK(nve_hierarchical_layer_config_init(&hier_cfg, sizeof(hier_cfg)));
     hier_cfg.layer_name = "test_hier_sph";
 
     nve_table_t tables[] = {gpu_table_, sph_table_};

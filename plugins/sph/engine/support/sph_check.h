@@ -20,7 +20,6 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <cstdio>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -94,19 +93,17 @@ inline std::string sph_compose(const char* expr, const char* status_text,
 }
 
 // ---- failure handlers: one overload per status type ------------------------
-// Each logs to stderr before throwing, so the failure is still attributable if
-// the exception later crosses a noexcept boundary.
+// Each exception carries the full failure detail so API boundaries can retain
+// the status text, failed expression, and source location.
 [[noreturn]] inline void sph_fail(bool, const char* file, int line, const char* expr,
                                   const std::string& message) {
     std::string what = sph_compose(expr, nullptr, message, file, line);
-    std::fprintf(stderr, "%s\n", what.c_str());
     throw SphInvalidArgument(std::move(what), file, line, expr);
 }
 
 [[noreturn]] inline void sph_fail(cudaError_t code, const char* file, int line, const char* expr,
                                   const std::string& message) {
     std::string what = sph_compose(expr, cudaGetErrorString(code), message, file, line);
-    std::fprintf(stderr, "%s\n", what.c_str());
     if (code == cudaErrorMemoryAllocation) {
         throw SphOutOfMemory(std::move(what), file, line, expr);
     }
@@ -119,7 +116,6 @@ inline std::string sph_compose(const char* expr, const char* status_text,
     cuGetErrorString(code, &status_text);
     std::string what = sph_compose(expr, status_text ? status_text : "(unknown driver error)",
                                    message, file, line);
-    std::fprintf(stderr, "%s\n", what.c_str());
     if (code == CUDA_ERROR_OUT_OF_MEMORY) {
         throw SphOutOfMemory(std::move(what), file, line, expr);
     }
@@ -137,7 +133,6 @@ inline std::string sph_compose(const char* expr, const char* status_text,
            << " bucket_offset_overflow=" << r.failures.bucket_offset_overflow
            << " page_index_overflow=" << r.failures.page_index_overflow << ")";
     std::string what = sph_compose(expr, status.str().c_str(), message, file, line);
-    std::fprintf(stderr, "%s\n", what.c_str());
     throw SphInsertFailed(std::move(what), file, line, expr, r);
 }
 

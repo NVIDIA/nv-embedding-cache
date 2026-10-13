@@ -35,6 +35,10 @@ class HostEmbeddingLayer : public EmbeddingLayerBase {
   struct Config {
     std::string layer_name;
     std::vector<uint8_t> default_embedding = {}; // optional default vector for keys missing from the table
+    int64_t task_size_threshold = 1024; // CPU tasks used by the layer (default fill, pooling) never exceed
+                                        // ceil(num_keys / task_size_threshold)
+    bool disable_threadpool = false; // run lookups on the caller thread (InlineThreadPool) instead of
+                                     // the thread pool passed to create_execution_context
   };
 
   NVE_PREVENT_COPY_AND_MOVE_(HostEmbeddingLayer);
@@ -77,6 +81,9 @@ class HostEmbeddingLayer : public EmbeddingLayerBase {
   const Config config_;
   allocator_ptr_t allocator_;
   table_ptr_t table_;
+
+  // Thread pool tasks for a batch: bounded by the pool size and one task per task_size_threshold keys.
+  int64_t num_tasks_for(const context_ptr_t& ctx, const int64_t num_keys) const;
 };
 
 }  // namespace nve

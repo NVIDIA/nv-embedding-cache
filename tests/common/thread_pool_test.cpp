@@ -345,3 +345,71 @@ TEST(NumaThreadPool, MassiveQueuing) {
     EXPECT_EQ(acc[j], j * num_waves * num_feeders);
   }
 }
+
+TEST(InlineThreadPool, Singleton) {
+  thread_pool_ptr_t tp{InlineThreadPool::instance()};
+  ASSERT_NE(nullptr, tp);
+  EXPECT_EQ(tp, InlineThreadPool::instance());
+  EXPECT_EQ(1, tp->num_workers());
+  EXPECT_EQ(1, tp->num_workgroups());
+}
+
+TEST(InlineThreadPool, RunsOnCallerThread) {
+  thread_pool_ptr_t tp{InlineThreadPool::instance()};
+
+  std::thread::id task_thread;
+  auto res = tp->submit([&task_thread]() { task_thread = std::this_thread::get_id(); });
+  ASSERT_TRUE(res.valid());
+  // Already complete when submit returns: no wait needed.
+  EXPECT_EQ(std::future_status::ready, res.wait_for(0s));
+  res.get();
+  EXPECT_EQ(std::this_thread::get_id(), task_thread);
+}
+
+TEST(InlineThreadPool, ManyTasksInOrder) {
+  thread_pool_ptr_t tp{InlineThreadPool::instance()};
+
+  constexpr int64_t NUM_TASKS = 1000;
+  std::vector<int64_t> order;
+  order.reserve(NUM_TASKS);
+  // Ignored workgroup argument must not be rejected.
+  const int64_t next = tp->execute_n(5, NUM_TASKS, [&order](int64_t i) { order.push_back(i); }, 3);
+  EXPECT_EQ(5 + NUM_TASKS, next);
+  ASSERT_EQ(static_cast<size_t>(NUM_TASKS), order.size());
+  for (int64_t i = 0; i < NUM_TASKS; i++) {
+    EXPECT_EQ(5 + i, order[static_cast<size_t>(i)]);
+  }
+}
+
+TEST(InlineThreadPool, ExecuteRunsDirectly) {
+  thread_pool_ptr_t tp{InlineThreadPool::instance()};
+
+  std::thread::id task_thread;
+  tp->execute([&task_thread]() { task_thread = std::this_thread::get_id(); });
+  EXPECT_EQ(std::this_thread::get_id(), task_thread);
+  EXPECT_THROW(tp->execute([]() { throw std::runtime_error("boom"); }), std::runtime_error);
+
+  // Workgroup-collection overload (used by partitioned host tables) with a bogus workgroup list.
+  const std::vector<int64_t> workgroups{4, 9};
+  std::vector<int64_t> order;
+  const int64_t next = tp->execute_n(0, 7, [&order](int64_t i) { order.push_back(i); }, workgroups, 2);
+  EXPECT_EQ(7, next);
+  EXPECT_EQ((std::vector<int64_t>{0, 1, 2, 3, 4, 5, 6}), order);
+}
+
+TEST(InlineThreadPool, SubmitNWithoutResults) {
+  thread_pool_ptr_t tp{InlineThreadPool::instance()};
+
+  int64_t sum = 0;
+  tp->submit_n(0, 10, [&sum](int64_t i) { sum += i; }, /*results=*/nullptr, 0);
+  EXPECT_EQ(45, sum);
+}
+
+TEST(InlineThreadPool, ExceptionCapturedInFuture) {
+  thread_pool_ptr_t tp{InlineThreadPool::instance()};
+
+  auto res = tp->submit([]() { throw std::runtime_error("boom"); });
+  EXPECT_THROW(res.get(), std::runtime_error);
+  EXPECT_THROW(tp->execute_n(0, 3, [](int64_t i) { if (i == 1) throw std::runtime_error("boom"); }),
+               std::runtime_error);
+}

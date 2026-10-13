@@ -18,19 +18,7 @@
 #pragma once
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <cstdio>
 #include <cuda_support.hpp>
-
-#ifndef EC_CHECK
-#define EC_CHECK(ans) { ECAssert_((ans), __FILE__, __LINE__); }
-template<typename ErrType>
-inline void ECAssert_(ErrType code, const char* file, int line, bool abort=true) {
-    if (code != ErrType(0)) {
-        fprintf(stderr, "EC_CHECK: %d %s %d\n", code, file, line);
-        if (abort) exit(code);
-    }
-}
-#endif
 
 // helper class to store and recover device when use multi gpu
 // this class assumes single context and always restore to the default context

@@ -14,6 +14,7 @@ it (see `docs/build_flags.md`).
 |---|---|---|---|
 | stl_map | `libnve-plugin-stl-map.so` | *(always built)* | Host table over `std::unordered_map`. The reference/fallback backend and the smallest example of the plugin API. |
 | abseil | `libnve-plugin-abseil.so` | `abseil_plugin` | Host table over Abseil's `flat_hash_map`, as an open-addressing alternative to `stl_map`'s node-based map. |
+| linear_file | `libnve-plugin-linear-file.so` | `linear_file_plugin` | Host table over a dense row-major file. |
 | phmap | `libnve-plugin-phmap.so` | `phmap_plugin` | Host table over the parallel-hashmap flat map — same shape as `abseil`, different implementation and size/speed trade-offs. |
 | nvhm | `libnve-plugin-nvhm.so` | `nvhm_plugin` | Host table over NVIDIA's nvHashMap. |
 | redis | `libnve-plugin-redis.so` | `redis_plugin` | Remote table backed by a Redis cluster or a single node. Needs a reachable server; capacity is the server's, not the process's. |

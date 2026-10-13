@@ -39,6 +39,7 @@
 #include "cuda_ops/gradient_calculator.cuh"
 #include "include/memblock.hpp"
 #include "binding_tables.hpp"
+#include "binding_layer_config.hpp"
 #include "include/serialization.hpp"
 #include "cuda_ops/pipeline_gather.cuh"
 
@@ -46,23 +47,6 @@
 #include <mutex>
 
 namespace nve {
-
-struct EmbedLayerConfig {
-    int64_t logging_interval = -1;
-    int64_t kernel_mode = 0;
-    int64_t kernel_mode_value_1 = 0;
-    int64_t kernel_mode_value_2 = 0;
-    int64_t max_modify_size = 0; // means tables default
-    int64_t default_row_index = -1; // Row returned for keys outside the table, negative disables the check
-    std::vector<uint8_t> default_embedding = {}; // Raw row bytes returned for keys missing from the
-                                                 // table (Host/Hierarchical layers). Empty implies
-                                                 // no default (misses undefined).
-};
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
-    EmbedLayerConfig,
-    logging_interval, kernel_mode, kernel_mode_value_1, kernel_mode_value_2, max_modify_size,
-    default_row_index, default_embedding)
 
 template<typename IndexT>
 class NVEmbedBinding
@@ -760,6 +744,7 @@ public:
         typename layer_type::Config layer_cfg;
         layer_cfg.layer_name = "host_layer";
         layer_cfg.default_embedding = config.default_embedding;
+        layer_cfg.disable_threadpool = config.disable_threadpool;
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, linear_host_tab,
                                                             /*allocator=*/nullptr);
     }

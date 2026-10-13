@@ -13,5 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(c_api_tests c_api_basic_test.cpp c_api_layers_test.cpp c_api_handle_lifecycle_test.cpp c_api_malformed_input_test.cpp c_api_boundary_test.cpp c_api_threadpool_test.cpp)
+add_executable(c_api_tests c_api_basic_test.cpp c_api_sized_config_test.cpp c_api_layers_test.cpp c_api_handle_lifecycle_test.cpp c_api_malformed_input_test.cpp c_api_boundary_test.cpp c_api_threadpool_test.cpp c_api_abi_test.c)
 target_link_libraries(c_api_tests nve-common gtest gtest_main CUDA::cudart)

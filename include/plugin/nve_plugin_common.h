@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define NVE_PLUGIN_ABI_VERSION_MAJOR 1u
+#define NVE_PLUGIN_ABI_VERSION_MAJOR 2u
 #define NVE_PLUGIN_ABI_VERSION_MINOR 0u
 
 typedef int32_t nve_plugin_mode_t;

@@ -79,7 +79,8 @@ class HostTableTest : public ::testing::Test {
 
 // A CUDA runtime failure must surface as NVE_ERROR_CUDA, not as a generic runtime error.
 TEST(StatusMapping, CudaFailureIsReportedAsCudaError) {
-  auto cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t cfg;
+  ASSERT_EQ(NVE_SUCCESS, nve_gpu_table_config_init(&cfg, sizeof(cfg)));
   cfg.device_id = 1000;  // no such device: the first cudaSetDevice on it fails
   cfg.cache_size = 1 << 20;
   cfg.row_size_in_bytes = 64;
@@ -106,7 +107,8 @@ TEST(StatusMapping, NotImplementedIsReportedAsNotImplemented) {
   void* h_uvm = nullptr;
   ASSERT_EQ(cudaSuccess, cudaMallocHost(&h_uvm, static_cast<size_t>(rows * row_size)));
   nve::HostPtr<void> uvm_owner(h_uvm);
-  auto cfg = nve_gpu_table_config_default();
+  nve_gpu_table_config_t cfg;
+  ASSERT_EQ(NVE_SUCCESS, nve_gpu_table_config_init(&cfg, sizeof(cfg)));
   cfg.device_id = 0;
   cfg.cache_size = 1 << 20;
   cfg.row_size_in_bytes = row_size;

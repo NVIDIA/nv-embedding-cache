@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#include "nve_c_api_internal.hpp"
+#include "nve_c_api_config.hpp"
 #include <buffer_wrapper.hpp>
 #include <json_support.hpp>
 #include <plugin/plugin_loader.hpp>
@@ -45,6 +45,19 @@ static nve::GPUTableConfig convert_gpu_table_config(const nve_gpu_table_config_t
   return cfg;
 }
 
+static nve::LinearHostTableConfig convert_linear_host_table_config(
+    const nve_linear_host_table_config_t* c, int64_t key_size) {
+  nve::LinearHostTableConfig cfg;
+  cfg.key_size = key_size;
+  cfg.max_value_size = c->row_size_in_bytes;
+  cfg.value_dtype = convert_dtype(c->value_dtype);
+  cfg.emb_table = c->emb_table;
+  cfg.num_rows = c->num_rows;
+  cfg.max_threads = c->max_threads;
+  cfg.task_size_threshold = c->task_size_threshold;
+  return cfg;
+}
+
 extern "C" {
 
 /* ============================================================================
@@ -54,10 +67,18 @@ extern "C" {
 nve_status_t nve_gpu_table_create(
     nve_table_t* out, nve_key_type_t key_type,
     const nve_gpu_table_config_t* config, nve_allocator_t allocator) {
-  if (!out || !config) {
-    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out and config must not be NULL");
+  if (!out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out must not be NULL");
   }
+  *out = NULL;
   NVE_C_TRY
+    nve_gpu_table_config_t normalized;
+    const auto status = nve_read_config(config, normalized);
+    if (status != NVE_SUCCESS) {
+      return status;
+    }
+    config = &normalized;
+
     auto cpp_config = convert_gpu_table_config(config);
     auto alloc = unwrap_allocator(allocator);
     nve::table_ptr_t table;
@@ -67,6 +88,42 @@ nve_status_t nve_gpu_table_create(
         break;
       case NVE_KEY_INT64:
         table = std::make_shared<nve::GpuTable<int64_t>>(cpp_config, alloc);
+        break;
+      default:
+        return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Unsupported key type");
+    }
+    *out = new nve_table_s{std::move(table), key_type};
+    return NVE_SUCCESS;
+  NVE_C_CATCH
+}
+
+/* ============================================================================
+ * Linear Host Table creation
+ * ============================================================================ */
+
+nve_status_t nve_linear_host_table_create(
+    nve_table_t* out, nve_key_type_t key_type,
+    const nve_linear_host_table_config_t* config) {
+  if (!out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "out must not be NULL");
+  }
+  *out = NULL;
+  NVE_C_TRY
+    nve_linear_host_table_config_t normalized;
+    const auto status = nve_read_config(config, normalized);
+    if (status != NVE_SUCCESS) {
+      return status;
+    }
+
+    nve::table_ptr_t table;
+    switch (key_type) {
+      case NVE_KEY_INT32:
+        table = std::make_shared<nve::LinearHostTable<int32_t>>(
+            convert_linear_host_table_config(&normalized, sizeof(int32_t)));
+        break;
+      case NVE_KEY_INT64:
+        table = std::make_shared<nve::LinearHostTable<int64_t>>(
+            convert_linear_host_table_config(&normalized, sizeof(int64_t)));
         break;
       default:
         return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Unsupported key type");

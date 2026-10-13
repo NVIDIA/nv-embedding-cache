@@ -34,7 +34,6 @@ namespace nve {
 
 #define GT_TEST_DEVICE (0)
 #define GT_TEST_KEY (1337)
-#define GT_TEST_HITMASK_SIZE_BYTES (sizeof(bitmask64_t))
 #define GT_TEST_SORT_GATHER_THRESHOLD (4096)
 #define GT_TEST_KERNEL_MODE_INDEX_THERSHOLD (0)
 

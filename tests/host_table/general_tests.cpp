@@ -34,23 +34,6 @@
 using namespace nve;
 using namespace nlohmann::literals;
 
-namespace {
-
-class TempFileCleanup final {
- public:
-  explicit TempFileCleanup(std::filesystem::path path) : path_{std::move(path)} {}
-
-  ~TempFileCleanup() {
-    std::error_code ec;
-    std::filesystem::remove(path_, ec);
-  }
-
- private:
-  std::filesystem::path path_;
-};
-
-}  // namespace
-
 TEST(general_tests, load_dlls) {
   try {
     std::vector<std::string> plugin_names{};
@@ -197,7 +180,7 @@ TEST(create_and_clear, arbitrary_so_path) {
       ("nve-host-table-plugin-any-name-" + std::to_string(getpid()) + ".so")};
   std::filesystem::copy_file(source_path, target_path,
                              std::filesystem::copy_options::overwrite_existing);
-  const TempFileCleanup cleanup{target_path};
+  const nve_test::TempPathCleanup cleanup{target_path};
   Plugin plugin{target_path.string()};
 
   table_factory_ptr_t fac{plugin.create_table_factory(nlohmann::json::object())};

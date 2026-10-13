@@ -26,7 +26,7 @@ namespace nve {
  * This allows the GPU kernel to resolve all indices without returning to the host during lookup.
  */
 
- struct GPUEmbeddingLayerConfig {
+struct GPUEmbeddingLayerConfig {
   std::string layer_name;
   int device_id{0};                  // Device id of the GPU used
   void* embedding_table;             // Pointer to linear table in GPU memory.

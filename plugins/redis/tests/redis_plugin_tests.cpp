@@ -413,3 +413,82 @@ TEST(redis_plugin, single_node_string_parallel_crud) {
   tab->clear(ctx);
   ASSERT_EQ(tab->size(ctx, true), 0);
 }
+
+// Cluster (hash) mode stores values and metadata in separate per-partition hashes. Repeated finds
+// must return the original payloads for every overflow handler, i.e., metadata updates must never
+// touch the value hash. Skips gracefully when no Redis cluster is reachable.
+TEST(redis_plugin, cluster_meta_does_not_clobber_values) {
+  using key_type = int64_t;
+
+  RedisClusterTableFactoryConfig fac_conf;
+  fac_conf.address = "localhost:7000";
+  RedisClusterTableFactory fac{fac_conf};
+
+  const int64_t max_value_size{16};
+  const int64_t value_stride{max_value_size};
+  const int64_t n{1000};
+
+  std::vector<key_type> keys(to_uint(n));
+  std::iota(keys.begin(), keys.end(), key_type{1});
+
+  std::vector<char> values(to_uint(n * value_stride));
+  for (int64_t i{}; i != n; ++i) {
+    for (int64_t j{}; j != max_value_size; ++j) {
+      values[to_uint(i * value_stride + j)] = static_cast<char>((i * 31 + j) & 0xff);
+    }
+  }
+
+  table_id_t table_id{21};
+  for (const char* handler : {"evict_random", "evict_lru", "evict_lfu"}) {
+    SCOPED_TRACE(handler);
+
+    nlohmann::json table_conf{{"key_size", sizeof(key_type)},
+                              {"max_value_size", max_value_size},
+                              {"value_dtype", "float32"},
+                              {"num_partitions", 2},
+                              {"overflow_policy", {{"handler", handler}}}};
+    host_table_ptr_t tab{
+        std::dynamic_pointer_cast<HostTableLike>(fac.produce(table_id++, table_conf))};
+    auto ctx = tab->create_execution_context(0, 0, nullptr, nullptr);
+
+    try {
+      tab->clear(ctx);
+    } catch (const std::exception& e) {
+      GTEST_SKIP() << "No Redis cluster reachable at localhost:7000: " << e.what();
+    }
+
+    auto keys_bw{std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys.data(),
+                                                             keys.size() * sizeof(key_type))};
+    tab->insert(ctx, n, keys_bw, value_stride, max_value_size,
+                std::make_shared<BufferWrapper<const void>>(ctx, "values_in", values.data(),
+                                                            values.size()));
+    ASSERT_EQ(tab->size(ctx, true), n);
+
+    // The first find updates metadata; the second one would observe any value corruption.
+    for (int pass{}; pass != 2; ++pass) {
+      std::vector<bitmask64_t> hit_mask(to_uint(ceil_div(n, bitmask64::num_bits)));
+      std::vector<char> out_values(values.size());
+      std::vector<int64_t> out_value_sizes(to_uint(n));
+
+      int64_t cnt{};
+      tab->reset_lookup_counter(ctx);
+      tab->find(ctx, n, keys_bw,
+                std::make_shared<BufferWrapper<bitmask64_t>>(
+                    ctx, "hit_mask", hit_mask.data(), hit_mask.size() * sizeof(bitmask64_t)),
+                value_stride,
+                std::make_shared<BufferWrapper<void>>(ctx, "values_out", out_values.data(),
+                                                      out_values.size()),
+                std::make_shared<BufferWrapper<int64_t>>(
+                    ctx, "value_sizes", out_value_sizes.data(), out_value_sizes.size() * sizeof(int64_t)));
+      tab->get_lookup_counter(ctx, &cnt);
+      ASSERT_EQ(cnt, n) << "pass=" << pass;
+      for (int64_t i{}; i != n; ++i) {
+        ASSERT_EQ(out_value_sizes[to_uint(i)], max_value_size) << "pass=" << pass << " i=" << i;
+      }
+      ASSERT_EQ(out_values, values) << "pass=" << pass;
+    }
+
+    tab->clear(ctx);
+    ASSERT_EQ(tab->size(ctx, true), 0);
+  }
+}

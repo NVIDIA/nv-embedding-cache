@@ -23,7 +23,7 @@ Three modes are supported via ``--mode``:
       output_dir/
       ├── model.pt2
       ├── metadata.json
-      └── weights/<module_path>.nve
+      └── weights/<storage_ref>.nve
 
 * ``hierarchical`` — a single ``NVEmbedding(Hierarchical)`` layer whose
   remote PS is backed by the ``custom_remote`` host-table plugin
@@ -31,11 +31,11 @@ Three modes are supported via ``--mode``:
 
       output_dir/
       ├── model.pt2
-      ├── metadata.json     # includes remote_ps_config + remote_ps_data
+      ├── metadata.json     # resources.remote_ps (incl. remote_ps_data)
       ├── keys.npy
       └── values.npy
 
-* ``gpu`` — a single ``NVEmbedding(NoCache)`` layer whose weights live
+* ``gpu`` — a single ``NVEmbedding(GPULayer)`` layer whose weights live
   entirely in GPU memory (no host cache, no remote PS). Output layout
   matches the linearuvm mode (model.pt2 + metadata.json + weights/).
 
@@ -48,7 +48,7 @@ import torch
 import numpy as np
 import pynve.torch.nve_layers as nve_layers
 import pynve.torch.nve_ps as nve_ps
-from pynve.torch.nve_export import export_aot
+from pynve.torch.nve_export import export_aot, load_aot
 
 DEVICE = torch.device("cuda")
 NUM_EMB = 1024
@@ -220,9 +220,10 @@ def main():
 
     # Quick validation: load AOT model in Python and verify
     print("Validating in Python...")
-    loader = torch._inductor.aoti_load_package(os.path.join(output_dir, "model.pt2"))
+    # load_aot binds the NVE layers to the model; keep `layers` alive while using `loader`
+    loader, layers = load_aot(output_dir)
     with torch.no_grad():
-        out2 = loader(keys)
+        out2 = loader.run([keys])[0]
     print(f"AOT output matches: {torch.allclose(out, out2, atol=1e-5)}")
     print("Done!")
 
