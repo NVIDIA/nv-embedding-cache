@@ -53,32 +53,30 @@ class NVEmbedBinding
 {
 public:
     // Accessors used by torch custom ops for shape inference and output allocation.
-    int64_t get_embedding_dim() const {
-        switch (data_type_) {
-            case nve::DataType_t::Float32:
-                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(float));
-            case nve::DataType_t::Float16:
-                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(__half));
-            default:
-                NVE_CHECK_(false, "Invalid data type");
-                return 0;
-        }
-    }
+    int64_t get_embedding_dim() const { return embedding_dim_; }
 
-    nve::DataType_t get_data_type() const { return data_type_; }
+    // Type of the looked-up rows: the stored type, or the dequantized type for rowwise-quantized
+    // storage.
+    nve::DataType_t get_data_type() const { return output_type_; }
 
     void lookup(size_t num_keys, uintptr_t keys, uintptr_t output, uint64_t stream_)
     {
         float hitrates[3] = {0};
         auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
-        
+
+        // Quantized rows are dequantized through a Concatenate pass instead of being returned raw.
+        EmbeddingLayerBase::PoolingParams dequant_params;
+        dequant_params.pooling_type = PoolingType_t::Concatenate;
+        dequant_params.output_type = output_type_;
+        const bool dequant = is_quant_rowwise(data_type_);
+
         emb_layer_ptr_->lookup(ctx,
                             num_keys,
                             reinterpret_cast<const void*>(keys),
                             reinterpret_cast<void*>(output),
-                            row_size_in_bytes_,
+                            output_row_bytes_,
                             nullptr, /* hitmask */
-                            nullptr, /* pool_params*/
+                            dequant ? &dequant_params : nullptr, /* pool_params*/
                             hitrates);
 
         log_hit_rates(hitrates, sizeof(hitrates) / sizeof(hitrates[0]));
@@ -98,13 +96,13 @@ public:
         pool_params.num_csr_offsets = num_offsets;
         pool_params.weights = reinterpret_cast<const void*>(weights);
         pool_params.weight_type = DataType_t(weight_data_type);
-        pool_params.output_type = DataType_t(data_type_);
+        pool_params.output_type = output_type_;
 
         emb_layer_ptr_->lookup(ctx,
                             num_keys,
                             reinterpret_cast<const void*>(keys),
                             reinterpret_cast<void*>(output),
-                            row_size_in_bytes_,
+                            output_row_bytes_,
                             nullptr, /* hitmask */
                             &pool_params, /* pool_params*/
                             hitrates);
@@ -115,6 +113,7 @@ public:
     size_t concat_backprop(size_t num_keys, uintptr_t keys, uintptr_t grads,
                            uint64_t unique_keys, uintptr_t output_grads, uint64_t stream_)
     {
+        check_not_quantized("concat_backprop");
         NVE_CHECK_(device_id_ >= 0,
                    "concat_backprop is not supported on a host-only layer (device_id < 0). "
                    "Gradient computation requires a CUDA device; HostLayer is inference-only.");
@@ -177,6 +176,7 @@ public:
                             uint32_t pooling_type, uint32_t num_offsets, uintptr_t offsets,
                             uint64_t /*data_type*/, uintptr_t weights, uint64_t stream_)
     {
+        check_not_quantized("pooling_backprop");
         NVE_CHECK_(device_id_ >= 0,
                    "pooling_backprop is not supported on a host-only layer (device_id < 0). "
                    "Gradient computation requires a CUDA device; HostLayer is inference-only.");
@@ -236,6 +236,7 @@ public:
 
     void accumulate(size_t num_keys, uintptr_t keys, uintptr_t updates, uint64_t stream_)
     {
+        check_not_quantized("accumulate");
         auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
         emb_layer_ptr_->accumulate(ctx, num_keys, 
                             reinterpret_cast<const void*>(keys),
@@ -248,6 +249,7 @@ public:
 
     void update(size_t num_keys, uintptr_t keys, uintptr_t updates, uint64_t stream_)
     {
+        check_not_quantized("update");
         auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
         emb_layer_ptr_->update(ctx, num_keys, 
                             reinterpret_cast<const void*>(keys),
@@ -287,12 +289,14 @@ public:
                         device_id_(device_id),
                         data_type_(dtype)
     {
+        embedding_dim_ = static_cast<int64_t>(row_size);
+        row_size_in_bytes_ = stored_row_bytes(row_size, dtype);
+        output_type_ = is_quant_rowwise(dtype) ? quant_rowwise_output_dtype(dtype) : dtype;
+        output_row_bytes_ = row_size * static_cast<uint64_t>(dtype_size(output_type_));
+
         // allocate two entries - one for number of unique runs, and one for
         // the number of chunks after splitting the runs to avoid exceeding
         // max run size limit
-        auto element_size = (dtype == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
-        row_size_in_bytes_ = (row_size * element_size);
-        
         ScopedDevice scope_device(device_id_);
         if (device_id_ >= 0) {
             // Backprop machinery and CUDA streams only make sense when a real GPU is in play.
@@ -349,7 +353,22 @@ protected:
 
         return stream_ctx_map_[stream];
     }
-    
+
+    // Rowwise-quantized storage is inference-only: rows can be looked up and inserted as raw
+    // stored bytes, but not trained.
+    void check_not_quantized(const char* op) const
+    {
+        NVE_CHECK_(!is_quant_rowwise(data_type_), op,
+                   " is not supported for rowwise-quantized storage");
+    }
+
+    // Layers that size their own storage from (row_size, dtype) do not support quantized rows.
+    void check_quant_supported(const char* layer) const
+    {
+        NVE_CHECK_(!is_quant_rowwise(data_type_), layer,
+                   " does not support rowwise-quantized storage, use HierarchicalEmbedding");
+    }
+
 private:
     void log_hit_rates(const float* hit_rates, size_t n)
     {
@@ -374,7 +393,10 @@ protected:
     static constexpr int32_t MAX_RUN_SIZE = 1024;
 
     std::shared_ptr<nve::EmbeddingLayerBase> emb_layer_ptr_;
-    uint64_t row_size_in_bytes_ = 0;
+    uint64_t row_size_in_bytes_ = 0;  // stored row, including any quantization metadata
+    int64_t embedding_dim_ = 0;
+    nve::DataType_t output_type_ = nve::DataType_t::Unknown;
+    uint64_t output_row_bytes_ = 0;
     std::shared_ptr<GradientCalculator<IndexT, MAX_RUN_SIZE>> backprop_runner_;
     allocator_ptr_t allocator_;
     IndexT* h_num_runs_out_ = nullptr;
@@ -527,6 +549,7 @@ private:
                         use_private_stream_(use_private_stream),
                         mem_block_(std::move(mem_block))
     {
+        this->check_quant_supported("LinearUVMEmbedding");
         ScopedDevice scope_device(this->device_id_);
         auto element_size = (dtype == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
 
@@ -656,6 +679,7 @@ private:
                 num_embeddings_(num_embeddings),
                 mem_block_(std::move(mem_block))
     {
+        this->check_quant_supported("GPUEmbedding");
         ScopedDevice scope_device(this->device_id_);
 
         gpu_table_.data = mem_block_->get_ptr();
@@ -726,6 +750,7 @@ public:
                   num_embeddings_(num_embeddings),
                   mem_block_(std::move(mem_block))
     {
+        this->check_quant_supported("HostEmbedding");
         ScopedDevice scope_device(this->device_id_);
 
         host_table_.data = mem_block_->get_ptr();

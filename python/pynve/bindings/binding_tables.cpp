@@ -35,7 +35,7 @@ ParameterServerTable::ParameterServerTable(
   : PyNVETable({}),
     num_rows_(num_rows),
     row_elements_(row_elements),
-    row_bytes_(row_elements * static_cast<uint64_t>(dtype_size(data_type))),
+    row_bytes_(stored_row_bytes(row_elements, data_type)),
     data_type_(data_type)
 {
     table_id_t table_id =
@@ -135,7 +135,7 @@ ParameterServerTable::ParameterServerTable(
   : PyNVETable({}),
     num_rows_(num_rows),
     row_elements_(row_elements),
-    row_bytes_(row_elements * static_cast<uint64_t>(dtype_size(data_type))),
+    row_bytes_(stored_row_bytes(row_elements, data_type)),
     data_type_(data_type),
     plugin_name_(std::move(plugin_name)),
     factory_config_(std::move(factory_config)),

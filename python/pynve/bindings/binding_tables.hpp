@@ -29,6 +29,15 @@ namespace nve {
 class StreamWrapperBase;
 class TensorFileFormatBase;
 
+// Bytes of one stored row: row_elements values, plus the trailing scale [+ offset] for the
+// rowwise-quantized types.
+inline uint64_t stored_row_bytes(uint64_t row_elements, DataType_t data_type) {
+    const uint64_t value_bytes = row_elements * static_cast<uint64_t>(dtype_size(data_type));
+    return is_quant_rowwise(data_type)
+        ? value_bytes + static_cast<uint64_t>(quant_rowwise_meta_bytes(data_type))
+        : value_bytes;
+}
+
 // wrapper class for nve::Table to allow for late binding of the "real" parameter server.
 //
 class PyNVETable : public Table {
