@@ -229,6 +229,10 @@ PYBIND11_MODULE(nve, m) {
         .value("E4M3", DataType_t::E4M3)
         .value("E5M2", DataType_t::E5M2)
         .value("Float64", DataType_t::Float64)
+        .value("QInt8RowwiseF32", DataType_t::QInt8RowwiseF32)
+        .value("QInt8RowwiseF16", DataType_t::QInt8RowwiseF16)
+        .value("QUint8RowwiseF32", DataType_t::QUint8RowwiseF32)
+        .value("QUint8RowwiseF16", DataType_t::QUint8RowwiseF16)
         .export_values();
 
     py::enum_<MemBlockType>(m, "MemBlockType")
