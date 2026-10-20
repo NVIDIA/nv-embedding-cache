@@ -220,6 +220,61 @@ TEST_P(SingleLayerBenchRun, KeepAndReuseStorage) {
       << reused.output;
 }
 
+// The "<verb> <n> rows ... table <t>" line of a dump / load run, or an empty string.
+std::string table_rows_line(const std::string& output, const std::string& verb, size_t table) {
+  const std::string suffix = " table " + std::to_string(table) + " (";
+  size_t pos = 0;
+  while ((pos = output.find(verb + " ", pos)) != std::string::npos) {
+    const auto end = output.find('\n', pos);
+    const auto line = output.substr(pos, end - pos);
+    if (line.find(suffix) != std::string::npos) return line.substr(0, line.find(" rows"));
+    pos = end;
+  }
+  return "";
+}
+
+// --dump_hier writes one file per cache table after warmup; --load_hier feeds them back instead of warming up.
+TEST_P(SingleLayerBenchRun, DumpAndLoadHierarchicalTables) {
+  const auto& scenario = GetParam();
+  const bool hierarchical = std::string(scenario.layer) == "hierarchical";
+  const size_t num_cache_tables = hierarchical ? (std::string(scenario.remote_table) == "none" ? 1 : 2) : 0;
+
+  TempDir dir;
+  auto dump_args = small_run_args(scenario, dir);
+  // The short warmup never reaches the auto-insert threshold; insert mode fills the caches regardless.
+  dump_args.insert(dump_args.end(), {"--warmup_mode", "insert", "--dump_hier", dir.path + "/dump"});
+  const auto dumped = run_benchmark(dump_args);
+  ASSERT_TRUE(WIFEXITED(dumped.status)) << dumped.output;
+  ASSERT_EQ(WEXITSTATUS(dumped.status), 0) << dumped.output;
+  if (!hierarchical) {
+    EXPECT_NE(dumped.output.find("--dump_hier ignored"), std::string::npos) << dumped.output;
+    EXPECT_TRUE(std::filesystem::is_empty(dir.path)) << dumped.output;
+    return;
+  }
+  EXPECT_NE(dumped.output.find("Dump: "), std::string::npos) << dumped.output;
+  for (size_t t = 0; t < num_cache_tables; ++t) {
+    const auto path = dir.path + "/dump." + std::to_string(t);
+    ASSERT_TRUE(std::filesystem::exists(path)) << dumped.output;
+    EXPECT_GT(std::filesystem::file_size(path), 4 * sizeof(int64_t)) << dumped.output;  // header plus rows
+  }
+  EXPECT_FALSE(std::filesystem::exists(dir.path + "/dump." + std::to_string(num_cache_tables))) << dumped.output;
+
+  auto load_args = small_run_args(scenario, dir);
+  load_args.insert(load_args.end(), {"--load_hier", dir.path + "/dump"});
+  const auto loaded = run_benchmark(load_args);
+  ASSERT_TRUE(WIFEXITED(loaded.status)) << loaded.output;
+  ASSERT_EQ(WEXITSTATUS(loaded.status), 0) << loaded.output;
+  EXPECT_NE(loaded.output.find("instead of warming up"), std::string::npos) << loaded.output;
+  EXPECT_NE(loaded.output.find("Load: "), std::string::npos) << loaded.output;
+  EXPECT_NE(loaded.output.find("Time:"), std::string::npos) << loaded.output;
+  for (size_t t = 0; t < num_cache_tables; ++t) {
+    const auto dumped_rows = table_rows_line(dumped.output, "Dumped", t);
+    const auto loaded_rows = table_rows_line(loaded.output, "Loaded", t);
+    EXPECT_FALSE(dumped_rows.empty()) << dumped.output;
+    EXPECT_EQ(dumped_rows.substr(dumped_rows.find(' ')), loaded_rows.substr(loaded_rows.find(' '))) << loaded.output;
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(LayersAndTables, SingleLayerBenchRun, ::testing::ValuesIn(scenarios()),
                          [](const ::testing::TestParamInfo<Scenario>& info) { return info.param.name; });
 

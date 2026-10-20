@@ -33,6 +33,9 @@
  * Keys stay in [0, num_table_rows) for every configuration. Table files and RocksDB directories
  * use default names under --file_dir; layers past the first add an _l<idx> suffix.
  * Storage created by this run is removed at teardown unless --keep_temp_files is set.
+ * --dump_hier / --load_hier save and restore the contents of a hierarchical layer's cache tables (every
+ * table but the last) to <filename>.<table_idx> through the table API alone, so no layer bookkeeping or
+ * auto-insert is triggered. A dump happens right after warmup; a load replaces the warmup phase.
  */
 
 #include <cuda_runtime.h>
@@ -40,6 +43,8 @@
 #include <argparse/argparse.hpp>
 #include <nlohmann/json.hpp>
 
+#include <bit_ops.hpp>
+#include <buffer_wrapper.hpp>
 #include <common.hpp>
 #include <embedding_layer.hpp>
 #include <gpu_embedding_layer.hpp>
@@ -84,6 +89,9 @@ constexpr int64_t kPrefillBatch = 1 << 16;   // rows per insert() while populati
 constexpr int64_t kWarmupChunk = 100;        // warmup steps generated at a time
 constexpr int64_t kDefaultMinInsertSize = 1 << 16;  // HierarchicalEmbeddingLayer::Config::min_insert_size_gpu
 constexpr size_t kMaxTiers = 3;              // device, host, remote
+constexpr int64_t kDumpBatchBytes = 256 << 20;  // row bytes per find() / insert() while dumping / loading tables
+constexpr int64_t kDumpMaxBatch = 1 << 20;      // keys per batch cap (GPUTableConfig::max_modify_size above)
+constexpr uint64_t kDumpMagic = 0x3150'4D55'4445'564EULL;  // "NVEDUMP1"
 
 // ---------------------------------------------------------------------------------------------
 // Configuration
@@ -124,6 +132,10 @@ struct RunConfig {
   std::string tag;
   std::string csv_filename;
   bool verbose;
+  int64_t nvhm_partitions;   // nvhm host tier partitions (power of 2)
+  int64_t nvhm_insert_queue; // nvhm insert prefetch queue length (0 | 1 | 2 | 4 | 8)
+  std::string dump_hier;     // hierarchical: dump the cache tables to <dump_hier>.<table_idx> after warmup
+  std::string load_hier;     // hierarchical: load the cache tables from <load_hier>.<table_idx> instead of warming up
   // storage
   std::string file_dir;
   std::string file_path;
@@ -154,6 +166,8 @@ struct RunConfig {
   bool uses_linear_file() const { return layer == "hierarchical" && (host_table == "linear_file" || remote_table == "linear_file"); }
   // A hierarchical layer without a GPU cache runs entirely on host tables.
   bool has_gpu_tier() const { return layer != "hierarchical" || load_factor > 0.0; }
+  bool dumps_tables() const { return layer == "hierarchical" && !dump_hier.empty(); }
+  bool loads_tables() const { return layer == "hierarchical" && !load_hier.empty(); }
   std::string table_file() const {
     if (!file_path.empty()) return per_layer_path(file_path);
     return per_layer_path(file_dir + "/nve_table_" + std::to_string(num_rows) + "x" + std::to_string(embedding_dim) +
@@ -165,7 +179,8 @@ struct RunConfig {
                           std::to_string(embedding_dim) + "_" + data_type);
   }
   // Layers past the first get their own file / directory: <stem>_l<idx><ext>.
-  std::string per_layer_path(const std::string& path) const {
+  std::string per_layer_path(const std::string& path) const { return per_layer_path(path, layer_idx); }
+  static std::string per_layer_path(const std::string& path, int64_t layer_idx) {
     if (layer_idx == 0) return path;
     std::filesystem::path p(path);
     if (!p.has_filename()) p = p.parent_path();
@@ -419,6 +434,7 @@ double ensure_table_file(const std::string& path, int64_t num_rows, int64_t row_
 struct LayerBundle {
   std::shared_ptr<nve::EmbeddingLayerBase> layer;
   std::shared_ptr<nve::MemBlock> table_block;  // gpu / linear_uvm: the dense table
+  std::vector<nve::table_ptr_t> tables;        // hierarchical: the layer's tables, for direct table access
   std::vector<std::string> tier_names;         // one per layer table, e.g. {"gpu", "nvhm", "rocksdb"}
   std::vector<int64_t> prefill_tables;         // table ids that hold the whole table and need rows
   // Cache tiers that auto-insert would warm up; --warmup_mode insert feeds them directly.
@@ -446,12 +462,17 @@ nlohmann::json base_table_conf(const RunConfig& cfg) {
 // nvhm holds `capacity_rows` rows: as a cache it evicts at that margin, as the full store it just grows.
 nve::table_ptr_t make_nvhm_table(const RunConfig& cfg, int64_t capacity_rows, bool is_cache) {
   auto conf = base_table_conf(cfg);
-  conf["num_partitions"] = 1;  // single partition is better for inference
+  conf["num_partitions"] = cfg.nvhm_partitions;  // a single partition is usually best for inference
   conf["value_alignment"] = 32;
-  conf["initial_capacity"] = std::max<int64_t>(capacity_rows, 1024);
+  conf["insert_fetch_queue_length"] = cfg.nvhm_insert_queue;
+  // Capacity and overflow margin are per partition.
+  const int64_t partition_rows = nve::ceil_div(capacity_rows, cfg.nvhm_partitions);
+  conf["initial_capacity"] = std::max<int64_t>(partition_rows, 1024);
   if (is_cache) {
     NVE_CHECK_(capacity_rows > 0, "--host_load_factor must be positive for an nvhm cache");
-    conf["overflow_policy"] = {{"handler", "evict_random"}, {"overflow_margin", capacity_rows}, {"resolution_margin", 0.9}};
+    NVE_CHECK_(partition_rows >= 8, "nvhm partitions must contain at least 8 rows");
+    const int64_t overflow_margin = partition_rows / 8 * 7;  // overflow at 7/8 capacity to avoid growing
+    conf["overflow_policy"] = {{"handler", "evict_random"}, {"overflow_margin", overflow_margin}, {"resolution_margin", 0.9}};
   }
   return make_plugin_table("libnve-plugin-nvhm.so", nlohmann::json::object(), conf, cfg.layer_table_id(100), cfg.verbose);
 }
@@ -604,6 +625,7 @@ LayerBundle build_hierarchical_layer(const RunConfig& cfg, TempStorage& storage)
   layer_cfg.insert_heuristic = std::make_shared<nve::DefaultInsertHeuristic>(thresholds);
   layer_cfg.default_embedding.assign(static_cast<size_t>(cfg.row_size()), 0);  // misses read as zeros
   b.layer = std::make_shared<nve::HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
+  b.tables = tables;
   b.description = std::string("hierarchical layer, ") + (cfg.has_gpu_tier() ? "GPU cache + " : "") + cfg.host_table +
                   (cfg.has_remote() ? " cache + " + cfg.remote_table : "");
   return b;
@@ -697,6 +719,158 @@ double prefill(const RunConfig& cfg, LayerBundle& b, nve::context_ptr_t& ctx) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Table dump / load (hierarchical layer): table API only, so no layer bookkeeping or auto-insert runs.
+// File layout: DumpHeader, then num_rows records of (IndexT key, row_size bytes).
+// ---------------------------------------------------------------------------------------------
+struct DumpHeader {
+  uint64_t magic{kDumpMagic};
+  int64_t key_size{sizeof(IndexT)};
+  int64_t row_size{0};
+  int64_t num_rows{0};  // patched once the dump is complete
+};
+
+int64_t dump_batch_rows(const RunConfig& cfg) {
+  return std::clamp<int64_t>(kDumpBatchBytes / cfg.row_size(), 1, kDumpMaxBatch);
+}
+
+// <dump_hier>.<table_idx>; layers past the first use <dump_hier>_l<layer_idx>.<table_idx>.
+std::string dump_file_name(const std::string& base, int64_t layer_idx, size_t table_idx) {
+  return RunConfig::per_layer_path(base, layer_idx) + "." + std::to_string(table_idx);
+}
+
+// Wraps a host buffer so a table of any location can consume it; GPU tables copy through the context.
+template <typename T>
+std::shared_ptr<nve::BufferWrapper<T>> wrap(nve::context_ptr_t& ctx, const char* name, void* ptr, size_t bytes) {
+  return std::make_shared<nve::BufferWrapper<T>>(ctx, name, static_cast<T*>(ptr), bytes);
+}
+
+// find() over every valid key in batches; the hit mask selects the (key, row) records written to `path`.
+int64_t dump_table(const RunConfig& cfg, nve::Table& table, const std::string& path) {
+  const int64_t row_size = cfg.row_size();
+  const int64_t batch = dump_batch_rows(cfg);
+  const size_t mask_words = static_cast<size_t>(nve::ceil_div(batch, nve::bitmask64::num_bits));
+  const size_t record_size = sizeof(IndexT) + static_cast<size_t>(row_size);
+  PinnedBuffer keys(static_cast<size_t>(batch) * sizeof(IndexT));
+  PinnedBuffer mask(mask_words * sizeof(nve::bitmask64_t));
+  PinnedBuffer values(static_cast<size_t>(batch * row_size));
+  std::vector<uint8_t> records(record_size * static_cast<size_t>(batch));
+
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  NVE_CHECK_(out.good(), "Cannot create dump file ", path);
+  DumpHeader header;
+  header.row_size = row_size;
+  out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+  auto ctx = table.create_execution_context(0, 0, nullptr, nullptr);
+  const cudaStream_t stream = ctx->get_lookup_stream();
+  auto* key_ptr = static_cast<IndexT*>(keys.ptr);
+  int64_t total = 0;
+  for (int64_t start = 0; start < cfg.num_rows; start += batch) {
+    const int64_t n = std::min(batch, cfg.num_rows - start);
+    const size_t n_words = static_cast<size_t>(nve::ceil_div(n, nve::bitmask64::num_bits));
+    std::iota(key_ptr, key_ptr + n, start);
+    std::memset(mask.ptr, 0, n_words * sizeof(nve::bitmask64_t));  // set bits are skipped as already resolved
+    auto keys_bw = wrap<const void>(ctx, "keys", keys.ptr, static_cast<size_t>(n) * sizeof(IndexT));
+    auto mask_bw = wrap<nve::bitmask64_t>(ctx, "hitmask", mask.ptr, n_words * sizeof(nve::bitmask64_t));
+    auto values_bw = wrap<void>(ctx, "values", values.ptr, static_cast<size_t>(n * row_size));
+    table.find(ctx, n, keys_bw, mask_bw, row_size, values_bw, nullptr);
+    // A GPU table resolves into device copies; this pulls the results back into the pinned buffers.
+    const auto* h_mask = mask_bw->access_buffer(cudaMemoryTypeHost, true /*copy_content*/, stream);
+    const auto* h_values = static_cast<const uint8_t*>(values_bw->access_buffer(cudaMemoryTypeHost, true /*copy_content*/, stream));
+    ctx->wait();
+
+    size_t packed = 0;
+    for (size_t w = 0; w < n_words; ++w) {
+      const int64_t base = static_cast<int64_t>(w) * nve::bitmask64::num_bits;
+      for (auto m = nve::bitmask64::clip(h_mask[w], n - base); m != nve::bitmask64::empty; m = nve::bitmask64::skip(m)) {
+        const int64_t i = base + nve::bitmask64::next(m);
+        const IndexT key = start + i;
+        std::memcpy(records.data() + packed, &key, sizeof(key));
+        std::memcpy(records.data() + packed + sizeof(key), h_values + i * row_size, static_cast<size_t>(row_size));
+        packed += record_size;
+      }
+    }
+    out.write(reinterpret_cast<const char*>(records.data()), static_cast<std::streamsize>(packed));
+    NVE_CHECK_(out.good(), "Failed writing dump file ", path);
+    total += static_cast<int64_t>(packed / record_size);
+  }
+  header.num_rows = total;
+  out.seekp(0);
+  out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+  NVE_CHECK_(out.good(), "Failed writing dump file ", path);
+  return total;
+}
+
+// insert() the records of `path` in batches; `insert_s` receives the time spent in insert() alone.
+int64_t load_table(const RunConfig& cfg, nve::Table& table, const std::string& path, double& insert_s) {
+  const int64_t row_size = cfg.row_size();
+  std::ifstream in(path, std::ios::binary);
+  NVE_CHECK_(in.good(), "Cannot open dump file ", path);
+  DumpHeader header;
+  in.read(reinterpret_cast<char*>(&header), sizeof(header));
+  NVE_CHECK_(in.good() && header.magic == kDumpMagic, "Not a table dump: ", path);
+  NVE_CHECK_(header.key_size == static_cast<int64_t>(sizeof(IndexT)) && header.row_size == row_size,
+             "Dump ", path, " holds ", header.row_size, " byte rows, the layer uses ", row_size);
+
+  const int64_t batch = dump_batch_rows(cfg);
+  const size_t record_size = sizeof(IndexT) + static_cast<size_t>(row_size);
+  PinnedBuffer keys(static_cast<size_t>(batch) * sizeof(IndexT));
+  PinnedBuffer values(static_cast<size_t>(batch * row_size));
+  std::vector<uint8_t> records(record_size * static_cast<size_t>(batch));
+  auto* key_ptr = static_cast<IndexT*>(keys.ptr);
+  auto* value_ptr = static_cast<uint8_t*>(values.ptr);
+
+  auto ctx = table.create_execution_context(0, 0, nullptr, nullptr);
+  for (int64_t done = 0; done < header.num_rows; done += batch) {
+    const int64_t n = std::min(batch, header.num_rows - done);
+    in.read(reinterpret_cast<char*>(records.data()), static_cast<std::streamsize>(record_size * static_cast<size_t>(n)));
+    NVE_CHECK_(in.good(), "Truncated dump file ", path);
+    for (int64_t i = 0; i < n; ++i) {
+      const uint8_t* rec = records.data() + static_cast<size_t>(i) * record_size;
+      std::memcpy(key_ptr + i, rec, sizeof(IndexT));
+      std::memcpy(value_ptr + i * row_size, rec + sizeof(IndexT), static_cast<size_t>(row_size));
+    }
+    auto keys_bw = wrap<const void>(ctx, "keys", keys.ptr, static_cast<size_t>(n) * sizeof(IndexT));
+    auto values_bw = wrap<const void>(ctx, "values", values.ptr, static_cast<size_t>(n * row_size));
+    const auto t_insert = clock_type::now();
+    table.insert(ctx, n, keys_bw, row_size, row_size, values_bw);
+    ctx->wait();  // a GPU table copies from the pinned buffers asynchronously
+    insert_s += seconds_between(t_insert, clock_type::now());
+  }
+  return header.num_rows;
+}
+
+// Every table but the last is a cache tier worth saving; the last one holds the whole table.
+void dump_hier_tables(const RunConfig& cfg, const LayerBundle& bundle, int64_t layer_idx) {
+  const std::string prefix = cfg.num_layers > 1 ? "Layer " + std::to_string(layer_idx) + ": " : "";
+  const auto t0 = clock_type::now();
+  for (size_t t = 0; t + 1 < bundle.tables.size(); ++t) {
+    const auto path = dump_file_name(cfg.dump_hier, layer_idx, t);
+    const auto t_table = clock_type::now();
+    const int64_t rows = dump_table(cfg, *bundle.tables[t], path);
+    std::cout << prefix << "Dumped " << rows << " rows of table " << t << " (" << bundle.tier_names[t] << ") to " << path
+              << " in " << fmt(seconds_between(t_table, clock_type::now()), 2) << " s" << std::endl;
+  }
+  std::cout << prefix << "Dump: " << fmt(seconds_between(t0, clock_type::now()), 2) << " s" << std::endl;
+}
+
+void load_hier_tables(const RunConfig& cfg, const LayerBundle& bundle, int64_t layer_idx) {
+  const std::string prefix = cfg.num_layers > 1 ? "Layer " + std::to_string(layer_idx) + ": " : "";
+  std::cout << prefix << "Loading tables from " << RunConfig::per_layer_path(cfg.load_hier, layer_idx)
+            << ".* instead of warming up" << std::endl;
+  const auto t0 = clock_type::now();
+  for (size_t t = 0; t + 1 < bundle.tables.size(); ++t) {
+    const auto path = dump_file_name(cfg.load_hier, layer_idx, t);
+    const auto t_table = clock_type::now();
+    double insert_s = 0.0;
+    const int64_t rows = load_table(cfg, *bundle.tables[t], path, insert_s);
+    std::cout << prefix << "Loaded " << rows << " rows into table " << t << " (" << bundle.tier_names[t] << ") from " << path
+              << " in " << fmt(seconds_between(t_table, clock_type::now()), 2) << " s (insert " << fmt(insert_s, 2) << " s)" << std::endl;
+  }
+  std::cout << prefix << "Load: " << fmt(seconds_between(t0, clock_type::now()), 2) << " s" << std::endl;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Inference threads
 // ---------------------------------------------------------------------------------------------
 struct ThreadResult {
@@ -741,10 +915,15 @@ void worker_main(const RunConfig& cfg, const LayerBundle& bundle, nve::context_p
   };
   generate_keys(cfg.num_steps);
   std::vector<float> hitrates(num_tables);
+  // Table dumps / loads run on one thread per layer while the others wait at the barrier.
+  const int64_t layer_idx = thread_idx / cfg.threads;
+  const bool first_in_layer = thread_idx % cfg.threads == 0;
 
   // Warmup on fresh keys from the same distribution, generated in chunks. In lookup mode the layer's
   // auto-insert fills the caches; in insert mode the warmup keys go straight into the cache tiers.
-  {
+  if (cfg.loads_tables()) {
+    if (first_in_layer) load_hier_tables(cfg, bundle, layer_idx);
+  } else {
     const bool insert_mode = cfg.warmup_mode == "insert";
     std::vector<std::unique_ptr<WarmupInserter>> inserters;
     if (insert_mode) {
@@ -775,6 +954,10 @@ void worker_main(const RunConfig& cfg, const LayerBundle& bundle, nve::context_p
     ctx->wait();  // let pending (auto-)inserts settle before measuring
   }
   barrier.wait();
+  if (cfg.dumps_tables()) {
+    if (first_in_layer) dump_hier_tables(cfg, bundle, layer_idx);
+    barrier.wait();
+  }
 
   // Throughput phase: back-to-back lookups, one sync at the end (as single_gpu_bench.py).
   result.hitrates.assign(num_tables, {});
@@ -874,6 +1057,10 @@ RunConfig parse_args(int argc, char** argv) {
   args.add_argument("--tag").default_value(std::string("")).help("free-form label written to the CSV");
   args.add_argument("-csv", "--csv_filename").default_value(std::string("")).help("append the metrics as one CSV row");
   args.add_argument("-v", "--verbose").default_value(false).implicit_value(true).help("print configuration and progress");
+  args.add_argument("--nvhm_partitions").default_value(int64_t(1)).scan<'i', int64_t>().help("nvhm host tier partitions (power of 2); inserts parallelize across partitions, lookups fan out per partition");
+  args.add_argument("--nvhm_insert_queue").default_value(int64_t(0)).scan<'i', int64_t>().help("nvhm insert prefetch queue length: buckets are prefetched this many keys ahead (0 = off | 1 | 2 | 4 | 8)");
+  args.add_argument("--dump_hier").default_value(std::string("")).help("hierarchical: after warmup, dump every table but the last to <filename>.<table_idx> through the table API (layers past the first use <filename>_l<idx>.<table_idx>)");
+  args.add_argument("--load_hier").default_value(std::string("")).help("hierarchical: insert the rows of <filename>.<table_idx> into every table but the last through the table API instead of warming up");
   // storage
   const char* env_dir = std::getenv("NVE_BENCH_FILE_DIR");
   args.add_argument("--file_dir").default_value(std::string(env_dir ? env_dir : "/tmp")).help("directory of the default table file / RocksDB (default: $NVE_BENCH_FILE_DIR or /tmp)");
@@ -934,6 +1121,10 @@ RunConfig parse_args(int argc, char** argv) {
   cfg.tag = args.get<std::string>("--tag");
   cfg.csv_filename = args.get<std::string>("--csv_filename");
   cfg.verbose = args.get<bool>("--verbose");
+  cfg.nvhm_partitions = args.get<int64_t>("--nvhm_partitions");
+  cfg.nvhm_insert_queue = args.get<int64_t>("--nvhm_insert_queue");
+  cfg.dump_hier = args.get<std::string>("--dump_hier");
+  cfg.load_hier = args.get<std::string>("--load_hier");
   cfg.file_dir = args.get<std::string>("--file_dir");
   cfg.file_path = args.get<std::string>("--file_path");
   cfg.rocksdb_path = args.get<std::string>("--rocksdb_path");
@@ -955,6 +1146,7 @@ RunConfig parse_args(int argc, char** argv) {
   NVE_CHECK_ARG_(cfg.kernel >= 0 && cfg.kernel <= 2, "--kernel must be 0, 1 or 2");
   NVE_CHECK_ARG_(cfg.warmup_mode == "lookup" || cfg.warmup_mode == "insert", "--warmup_mode must be lookup or insert");
   NVE_CHECK_ARG_(cfg.warmup_insert_size > 0, "--warmup_insert_size must be positive");
+  NVE_CHECK_ARG_(cfg.nvhm_partitions > 0 && (cfg.nvhm_partitions & (cfg.nvhm_partitions - 1)) == 0, "--nvhm_partitions must be a power of 2");
   NVE_CHECK_ARG_(cfg.latency_keys == "fresh" || cfg.latency_keys == "replay", "--latency_keys must be fresh or replay");
   const auto keys_on = args.get<std::string>("--keys_on");
   NVE_CHECK_ARG_(keys_on == "gpu" || keys_on == "host", "--keys_on must be gpu or host");
@@ -1000,6 +1192,8 @@ int run(const RunConfig& cfg) {
   }
   const LayerBundle& bundle = bundles.front();  // every layer shares the spec
   const double setup_s = seconds_between(setup_start, clock_type::now());
+  if (!cfg.dump_hier.empty() && !cfg.dumps_tables()) std::cout << "--dump_hier ignored: layer is not hierarchical" << std::endl;
+  if (!cfg.load_hier.empty() && !cfg.loads_tables()) std::cout << "--load_hier ignored: layer is not hierarchical" << std::endl;
   const double host_mem_delta_gb = mem_before_gb - mem_available_gb();
 
   std::cout << "Layer: " << bundle.description << "; ";

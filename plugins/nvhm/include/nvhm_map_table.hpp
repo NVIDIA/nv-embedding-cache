@@ -76,6 +76,10 @@ struct NvhmMapTableConfig final : public HostTableConfig {
 
   OverflowPolicyConfig overflow_policy;  // Overflow detection / handling parameters.
 
+  // Insert prefetch queue length: a key's bucket is prefetched this many keys before it is inserted.
+  // Must be in [0, 1, 2, 4, 8]; 0 disables the pipeline.
+  int64_t insert_fetch_queue_length{0};
+
   void check() const;
 };
 
@@ -134,6 +138,10 @@ class NvhmMapTable final : public HostTable<NvhmMapTableConfig> {
   template <int64_t PrefetchQueueLength, bool PrefetchValues, bool WithValues, bool WithValueSizes>
   int64_t find_(context_ptr_t& ctx, int64_t n, const key_type* keys, bitmask64_t* hit_mask,
                 int64_t value_stride, std::byte* values, int64_t* value_sizes) const;
+
+  template <int64_t PrefetchQueueLength>
+  void insert_(context_ptr_t& ctx, int64_t n, const key_type* keys, int64_t value_stride,
+               int64_t value_size, const std::byte* values);
 
  private:
   using base_type::config_;

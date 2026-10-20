@@ -198,6 +198,32 @@ void NvhmMapTable<MapType, PartitionerType>::insert(
 
   // TODO: Allow dynamically sized vectors.
   NVE_CHECK_(value_size >= 0 && value_size <= config_.max_value_size);
+  switch (config_.insert_fetch_queue_length) {
+    case 0:
+      insert_<0>(ctx, n, keys, value_stride, value_size, values);
+      break;
+    case 1:
+      insert_<1>(ctx, n, keys, value_stride, value_size, values);
+      break;
+    case 2:
+      insert_<2>(ctx, n, keys, value_stride, value_size, values);
+      break;
+    case 4:
+      insert_<4>(ctx, n, keys, value_stride, value_size, values);
+      break;
+    case 8:
+      insert_<8>(ctx, n, keys, value_stride, value_size, values);
+      break;
+    default:
+      NVE_THROW_("`insert_fetch_queue_length` (", config_.insert_fetch_queue_length, ") is out of bounds!");
+  }
+}
+
+template <typename MapType, typename PartitionerType>
+template <int64_t PrefetchQueueLength>
+void NvhmMapTable<MapType, PartitionerType>::insert_(
+    context_ptr_t& ctx, const int64_t n, const key_type* __restrict keys,
+    const int64_t value_stride, const int64_t value_size, const std::byte* __restrict values) {
   const int64_t overflow_margin{config_.overflow_policy.overflow_margin};
   const int64_t resolution_margin{config_.overflow_policy.abs_resolution_margin()};
 
@@ -213,16 +239,14 @@ void NvhmMapTable<MapType, PartitionerType>::insert(
     map_type& __restrict map{part.map};
 
     const meta_type meta_value{default_meta_value<meta_type>()};
-
     int64_t part_size{static_cast<int64_t>(map.size())};
-    for (int64_t ij{}; ij < n; ++ij) {
-      const key_type key{keys[ij]};
-      if (partitioner(key, num_parts_mask) != task_idx) continue;
 
-      const auto [pos, op]{map.insert(key)};
+    // Stores row `ij` under `key`; `hint` is the optional result of a preceding `write_prefetch`.
+    const auto store{[&](const key_type& key, const int64_t ij, const auto&... hint) {
+      const auto [pos, op]{map.insert(key, hint...)};
       map.set_blob_at(pos, &values[ij * value_stride], value_size);
 
-      if (op == nvhm::insert_op_t::found) continue;
+      if (op == nvhm::insert_op_t::found) return;
       ++part_size;
 
       if constexpr (!std::is_same_v<meta_type, no_meta_t>) {
@@ -230,17 +254,17 @@ void NvhmMapTable<MapType, PartitionerType>::insert(
       }
 
       // Handle overflows.
-      if NVE_LIKELY_(part_size < overflow_margin) continue;
+      if NVE_LIKELY_(part_size < overflow_margin) return;
       NVE_LOG_VERBOSE_("NV map table ", table_id, " part ", task_idx,
                        " is overflowing. Attempting to resolve...");
 
       if constexpr (std::is_same_v<meta_type, no_meta_t>) {
         // Fetch all keys and shuffle them randomly.
-        std::vector<key_type> keys(map.keys());
-        std::shuffle(keys.begin(), keys.end(), std::default_random_engine{random_seed()});
+        std::vector<key_type> all_keys(map.keys());
+        std::shuffle(all_keys.begin(), all_keys.end(), std::default_random_engine{random_seed()});
 
         // Reclaim slots above the resolution margin.
-        for (auto it{keys.begin() + resolution_margin}; it < keys.end(); ++it) {
+        for (auto it{all_keys.begin() + resolution_margin}; it < all_keys.end(); ++it) {
           map.erase(*it);
         }
       } else {
@@ -262,6 +286,44 @@ void NvhmMapTable<MapType, PartitionerType>::insert(
 
       // Update part_size after erasing.
       part_size = static_cast<int64_t>(map.size());
+    }};
+
+    if constexpr (PrefetchQueueLength == 0) {
+      for (int64_t ij{}; ij < n; ++ij) {
+        const key_type key{keys[ij]};
+        if (partitioner(key, num_parts_mask) != task_idx) continue;
+        store(key, ij);
+      }
+    } else {
+      // Software pipeline: a key's bucket is prefetched when the key enters the ring and the key is
+      // inserted PrefetchQueueLength keys later, so several cache misses are in flight at once.
+      // `queued_ij` mirrors the ring to keep each key's row index; `head` tracks the oldest entry.
+      nvhm::ring_prefetch_queue<key_type, prefetch_hint_type, PrefetchQueueLength> queue{};
+      int64_t queued_ij[PrefetchQueueLength]{};
+      int64_t head{};
+      constexpr int64_t ring_mask{PrefetchQueueLength - 1};
+
+      int64_t ij{};
+      for (; ij < n && !queue.full(); ++ij) {
+        const key_type key{keys[ij]};
+        if (partitioner(key, num_parts_mask) != task_idx) continue;
+        queued_ij[queue.size()] = ij;
+        queue.prefill_write(map, key);
+      }
+      for (; ij < n; ++ij) {
+        const key_type key{keys[ij]};
+        if (partitioner(key, num_parts_mask) != task_idx) continue;
+        const int64_t slot{head++ & ring_mask};
+        const int64_t qij{queued_ij[slot]};
+        queued_ij[slot] = ij;
+        const auto [qkey, qhint]{queue.push_write(map, key)};
+        store(qkey, qij, qhint);
+      }
+      while (!queue.empty()) {
+        const int64_t slot{head++ & ring_mask};
+        const auto [qkey, qhint]{queue.pop()};
+        store(qkey, queued_ij[slot], qhint);
+      }
     }
   }};
 
