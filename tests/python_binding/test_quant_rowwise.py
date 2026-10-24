@@ -115,6 +115,39 @@ def test_quant_pooling(qtype, mode):
 
 @requires_nvhm
 @pytest.mark.parametrize("qtype", QUANT_TYPES, ids=QUANT_IDS)
+def test_quant_bag_per_call_mode(qtype):
+    # One layer (one GPU cache) serves sum, weighted sum, mean and concat lookups.
+    bag, _, dequant = _make(qtype, bag_mode="sum")
+    keys = torch.tensor([1, 2, MISS_KEY, 7], dtype=torch.int64, device="cuda")
+    offsets = torch.tensor([0, 3, 4], dtype=torch.int64, device="cuda")
+    weights = torch.tensor([0.5, 2.0, 1.0, -1.0], device="cuda")
+    rows = torch.stack([dequant[1], dequant[2], torch.zeros(EMBED_SIZE), dequant[7]])
+    w = weights.cpu().unsqueeze(1)
+    expected = {
+        "sum": torch.stack([rows[:3].sum(0), rows[3]]),
+        "mean": torch.stack([rows[:3].mean(0), rows[3]]),
+        "weighted": torch.stack([(w[:3] * rows[:3]).sum(0), w[3] * rows[3]]),
+        "concat": rows,
+    }
+    for _ in range(2):
+        outs = {
+            "sum": bag(keys, offsets),
+            "mean": bag(keys, offsets, mode="mean"),
+            "weighted": bag(keys, offsets, weights),
+            "concat": bag(keys, mode="concat"),
+        }
+        for name, out in outs.items():
+            assert out.dtype == bag.data_type
+            torch.testing.assert_close(out.float().cpu(), expected[name], **_tol(qtype))
+    assert bag.mode == "sum"
+    with pytest.raises(ValueError):
+        bag(keys, mode="mean")
+    with pytest.raises(ValueError):
+        bag(keys, offsets, mode="max")
+
+
+@requires_nvhm
+@pytest.mark.parametrize("qtype", QUANT_TYPES, ids=QUANT_IDS)
 def test_quant_misses_return_zeros_by_default(qtype):
     layer, _, dequant = _make(qtype)
     assert len(layer.config.default_embedding) == nve_dtypes.stored_row_bytes(EMBED_SIZE, qtype)
