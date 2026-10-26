@@ -118,6 +118,12 @@ class CMakeBuild(build_ext):
         for filename in glob(f'{_build_dir}/lib.linux-*/*.so', recursive=True):
             subprocess.check_call(['rm', filename])
 
+    def build_extension(self, ext):
+        # CMake already built the modules. The 'pynve' extension has no sources and
+        # only marks the wheel as platform-specific; linking it would run the linker
+        # with no input files, which gcc rejects outside conda toolchains.
+        pass
+
     def copy_binaries(self):
         # Specify the source and destination directories
         src_dir = f"{_build_dir}/lib"
