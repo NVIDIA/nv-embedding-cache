@@ -18,6 +18,7 @@ from pynve.torch import HAS_TORCH_OPS
 from pynve.torch.nve_tensors import CachedTable
 import pynve.nve as nve
 import pynve.torch.nve_ps as nve_ps
+from pynve.torch import nve_dtypes
 import torch
 from enum import Enum
 from typing import Optional
@@ -139,7 +140,9 @@ class NVEmbeddingBase(torch.nn.Module):
     Args:
         num_embeddings (int): Size of the embedding dictionary
         embedding_size (int): Size of each embedding vector
-        data_type (torch.dtype): Data type of embedding vectors (float32 or float16)
+        data_type (torch.dtype | nve.DataType_t): Storage type of embedding vectors: float32,
+            float16, or a rowwise-quantized nve.DataType_t (Hierarchical only), whose lookups
+            return rows dequantized to its F32/F16 precision.
         layer_type (LayerType): Layer implementation to use, see LayerType enum for details.
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Required for LinearUVM and Hierarchical. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
@@ -157,7 +160,7 @@ class NVEmbeddingBase(torch.nn.Module):
     def __init__(self,
                  num_embeddings: int,
                  embedding_size: int,
-                 data_type: torch.dtype,
+                 data_type: nve_dtypes.StorageType,
                  layer_type: LayerType, * ,
                  gpu_cache_size: int = 0,
                  host_cache_size: int = 0,
@@ -169,9 +172,20 @@ class NVEmbeddingBase(torch.nn.Module):
                  config: Optional[dict] = None):
         super().__init__()
 
+        is_quant = nve_dtypes.is_quant_rowwise(data_type)
+        if is_quant and layer_type != LayerType.Hierarchical:
+            raise ValueError(
+                f"rowwise-quantized data_type {data_type} is only supported for "
+                f"Hierarchical layers, got layer_type={layer_type}")
+        if is_quant and optimize_for_training:
+            raise ValueError(
+                f"rowwise-quantized data_type {data_type} is inference-only, "
+                f"pass optimize_for_training=False")
+        # A quantized default row is given as its raw stored bytes.
+        default_dtype = torch.uint8 if is_quant else data_type
         if (config is not None
                 and isinstance(config.get("default_embedding"), torch.Tensor)
-                and config["default_embedding"].dtype != data_type):
+                and config["default_embedding"].dtype != default_dtype):
             # Checked before config_to_nve_config flattens the tensor to raw
             # bytes, where a wrong dtype could still pass the byte-length check.
             raise ValueError(
@@ -182,14 +196,14 @@ class NVEmbeddingBase(torch.nn.Module):
         self.layer_type = layer_type
         self.num_embeddings = num_embeddings
         self.embedding_size = embedding_size
-        self.data_type = data_type
-        self.layer_data_type = torch_type_to_nve_type(data_type)
-        row_bytes = embedding_size * torch.empty(0, dtype=data_type).element_size()
+        # data_type is the type lookups return; layer_data_type is the stored type.
+        self.data_type = nve_dtypes.output_torch_type(data_type)
+        self.layer_data_type = nve_dtypes.storage_nve_type(data_type)
+        row_bytes = nve_dtypes.stored_row_bytes(embedding_size, data_type)
         if len(self.config.default_embedding) not in (0, row_bytes):
             raise ValueError(
-                f"config['default_embedding'] must hold one row ({embedding_size} "
-                f"elements of {data_type} = {row_bytes} bytes), got "
-                f"{len(self.config.default_embedding)} bytes")
+                f"config['default_embedding'] must hold one stored row of {data_type} "
+                f"({row_bytes} bytes), got {len(self.config.default_embedding)} bytes")
         if layer_type in (LayerType.HostLayer, LayerType.Hierarchical):
             if config is None or "default_embedding" not in config:
                 # Misses return zeros unless the user picks a value; pass an explicit
@@ -257,7 +271,7 @@ class NVEmbeddingBase(torch.nn.Module):
                 raise ValueError("Weight init is not supported for hierarchical embedding")
             self.storage = storage
             if isinstance(storage, nve_ps.NVEParameterServer):
-                if storage.data_type != data_type:
+                if storage.layer_data_type != self.layer_data_type:
                     raise ValueError(
                         f"NVEmbedding(Hierarchical): storage.data_type="
                         f"{storage.data_type} doesn't match layer "
@@ -266,7 +280,7 @@ class NVEmbeddingBase(torch.nn.Module):
             else:
                 remote_interface = storage
             self.emb_layer = nve.HierarchicalEmbedding(embedding_size, self.layer_data_type, gpu_cache_size, host_cache_size, remote_interface, num_embeddings, optimize_for_training, self.device_index, self.config)
-            tensor_storage = torch.sparse_coo_tensor(size=(num_embeddings, embedding_size), dtype=data_type, device=self.device)
+            tensor_storage = torch.sparse_coo_tensor(size=(num_embeddings, embedding_size), dtype=self.data_type, device=self.device)
             self.table_ids = {0: 'gpu_cache'}
             self.table_ids |= {1: 'host_cache', 2: 'remote_ps'} if host_cache_size > 0 else {1: 'remote_ps'}
         elif layer_type == LayerType.HostLayer:
@@ -327,7 +341,7 @@ class NVEmbeddingBase(torch.nn.Module):
         # dtype op-arg (int value of the nve DataType_t enum) — baked into the
         # op so the meta/fake impl can infer the output dtype without a registry
         # lookup.
-        self.dtype_tag = int(self.layer_data_type)
+        self.dtype_tag = int(torch_type_to_nve_type(self.data_type))
         if HAS_TORCH_OPS:
             nve.register_for_torch(self.marker_tensor.data_ptr(), self.emb_layer)
 
@@ -416,7 +430,7 @@ class NVEmbedding(NVEmbeddingBase):
     Args:
         num_embeddings (int): Size of the embedding dictionary
         embedding_size (int): Size of each embedding vector
-        data_type (torch.dtype): Data type of the embedding weights
+        data_type (torch.dtype | nve.DataType_t): Storage type of the embedding weights, see NVEmbeddingBase
         layer_type (LayerType): Layer implementation to use
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Defaults to 0.
         host_cache_size (int, optional): Size of host cache. Defaults to 0.
@@ -431,7 +445,7 @@ class NVEmbedding(NVEmbeddingBase):
     def __init__(self,
                     num_embeddings: int,
                     embedding_size: int,
-                    data_type: torch.dtype,
+                    data_type: nve_dtypes.StorageType,
                     layer_type: LayerType,
                     * ,
                     gpu_cache_size: int = 0,
@@ -477,7 +491,7 @@ class NVEmbeddingBag(NVEmbeddingBase):
     Args:
         num_embeddings (int): Size of the embedding dictionary
         embedding_size (int): Size of each embedding vector
-        data_type (torch.dtype): Data type of the embedding weights
+        data_type (torch.dtype | nve.DataType_t): Storage type of the embedding weights, see NVEmbeddingBase
         layer_type (LayerType): Layer implementation to use
         mode (str): The operation to use for combining embeddings ('sum', 'mean', or 'concat'). 'max' is not supported.
         gpu_cache_size (int, optional): Size of GPU cache in bytes. Defaults to 0.
@@ -500,7 +514,7 @@ class NVEmbeddingBag(NVEmbeddingBase):
     def __init__(self,
                  num_embeddings: int,
                  embedding_size: int,
-                 data_type: torch.dtype,
+                 data_type: nve_dtypes.StorageType,
                  layer_type: LayerType,
                  mode : str, * ,
                  gpu_cache_size: int = 0,
@@ -517,29 +531,39 @@ class NVEmbeddingBag(NVEmbeddingBase):
         super().__init__(num_embeddings, embedding_size, data_type, layer_type, gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, storage=storage, weight_init=weight_init, optimize_for_training=optimize_for_training, device=device, id=id, config=config)
         self.mode = mode
 
-    def forward(self, input: torch.Tensor, offsets: torch.Tensor, per_sample_weights: Optional[torch.Tensor] = None):
+    def forward(self, input: torch.Tensor, offsets: Optional[torch.Tensor] = None,
+                per_sample_weights: Optional[torch.Tensor] = None, mode: Optional[str] = None):
         """Performs embedding bag lookup and reduction for the input indices.
 
         Args:
             input (torch.Tensor): Input indices to lookup in the embedding table
-            offsets (torch.Tensor): Offsets into input tensor defining the boundaries of sequences.
+            offsets (Optional[torch.Tensor]): Offsets into input tensor defining the boundaries of sequences.
                 Uses torch's include_last_offset=True convention: num_bags + 1 entries, with
                 offsets[0] == 0 and a trailing sentinel offsets[-1] == input.numel().
+                Required unless the effective mode is 'concat'.
             per_sample_weights (Optional[torch.Tensor], optional): Weights for each embedding entry. Defaults to None.
+            mode (Optional[str], optional): Overrides the layer's mode ('sum', 'mean' or 'concat') for this
+                call only, so one layer, and its cache, can serve several poolings. Defaults to None (the
+                layer's mode).
 
         Returns:
             torch.Tensor: Reduced embedding vectors for each sequence. For 'concat' mode, returns
                          concatenated embeddings. For other modes ('sum', 'mean'), returns
                          the reduced embeddings according to the specified mode.
         """
+        mode = self.mode if mode is None else mode
+        if mode != "concat":
+            nve_ops.pooling_type_from_mode(mode, weighted=False)
+            if offsets is None:
+                raise ValueError(f"offsets are required for mode {mode!r}")
         _check_forward_inputs(input, offsets, per_sample_weights)
         if not HAS_TORCH_OPS:
-            if self.mode == "concat":
+            if mode == "concat":
                 return nve_ops.CacheEmbeddingOp.apply(input, self.weight)
             else:
                 return nve_ops.CacheEmbeddingBagOp.apply(
-                    input, self.weight, offsets, self.mode, per_sample_weights)
-        elif self.mode == "concat":
+                    input, self.weight, offsets, mode, per_sample_weights)
+        elif mode == "concat":
             if self.optimize_for_training:
                 return nve_ops.NVEmbeddingOpTraining.apply(
                     self.marker_tensor, input, self.weight,
@@ -550,7 +574,7 @@ class NVEmbeddingBag(NVEmbeddingBase):
                     self.embedding_size, self.dtype_tag)
         else:
             pooling_type = int(nve_ops.pooling_type_from_mode(
-                self.mode, weighted=per_sample_weights is not None))
+                mode, weighted=per_sample_weights is not None))
             if self.optimize_for_training:
                 return nve_ops.NVEmbeddingBagOpTraining.apply(
                     self.marker_tensor, input, self.weight, offsets,

@@ -15,6 +15,7 @@
 
 import torch
 import pynve.nve as nve
+from pynve.torch import nve_dtypes
 from typing import Optional
 from collections.abc import Iterator
 import warnings
@@ -73,9 +74,11 @@ class NVEParameterServer ():
         num_embeddings (int): Size of the embedding dictionary, when set to 0, storage will increase until OOM
                               Use erase or clear to manually remove data.
         embedding_size (int): Size of each embedding vector (in elements)
-        data_type (torch.dtype): Data type of embedding vectors (float32 or float16)
+        data_type (torch.dtype | nve.DataType_t): Storage type of embedding vectors: float32, float16,
+                                                 or a rowwise-quantized nve.DataType_t whose values are the raw
+                                                 stored rows (uint8 codes followed by the scale [+ offset] bytes)
         initializer (Optional[Iterator]): Initializer for the data.
-                                          Iterator must return a tuple of tensors, keys(int64) and values(vector with embedding_size elements of data_type per key)
+                                          Iterator must return a tuple of tensors, keys(int64) and values(one stored row of data_type per key)
         initial_size (Optional[int]): Initial amount of embeddings to allocate
         ps_type (Optional[nve.PSType_t]): Type of parameter server backend to use
         extra_params: Optional[dict]: Additional parameters in dict format. plugin params under "plugin" node, table params under "table" node.
@@ -88,7 +91,7 @@ class NVEParameterServer ():
     def __init__(self,
                  num_embeddings: int,
                  embedding_size: int,
-                 data_type: torch.dtype,
+                 data_type: nve_dtypes.StorageType,
                  initializer: Optional[Iterator] = None,
                  initial_size: Optional[int] = 1024,
                  ps_type: Optional[nve.PSType_t] = None,
@@ -99,12 +102,8 @@ class NVEParameterServer ():
         self.num_embeddings = num_embeddings
         self.embedding_size = embedding_size
         self.data_type = data_type
-        if data_type == torch.float32:
-            self.layer_data_type = nve.DataType_t.Float32
-        elif data_type == torch.float16:
-            self.layer_data_type = nve.DataType_t.Float16
-        else:
-            raise ValueError(f"Invalid data type: {data_type}")
+        self.layer_data_type = nve_dtypes.storage_nve_type(data_type)
+        self.row_bytes = nve_dtypes.stored_row_bytes(embedding_size, data_type)
 
         if plugin_name is not None:
             if ps_type is not None or extra_params is not None:
@@ -153,15 +152,15 @@ class NVEParameterServer ():
 
         Args:
             keys (torch.Tensor): Tensor of int64 keys to insert
-            values (torch.Tensor): Tensor of value vectors (containing embedding_size elements each), matching the given keys
+            values (torch.Tensor): Tensor of stored rows (row_bytes bytes each), matching the given keys
         """
         if keys.dtype is not torch.int64:
             warnings.warn(f"Keys provided to NVEParameterServer were of type {keys.dtype} instead of int64 (converting on the fly)")
             keys = keys.long()
-        values_size = torch.numel(values)
-        values_needed = torch.numel(keys) * self.embedding_size
+        values_size = torch.numel(values) * values.element_size()
+        values_needed = torch.numel(keys) * self.row_bytes
         if values_size < values_needed:
-            raise ValueError(f"Values tensor has too few elements, expected {values_needed} - got {values_size}")
+            raise ValueError(f"Values tensor has too few bytes, expected {values_needed} - got {values_size}")
         self.parameter_server.insert_keys(torch.numel(keys), keys.data_ptr(), values.data_ptr())
 
     def load_from_file(self, keys_path: str, values_path: str, batch_size: Optional[int] = 1024*1024):

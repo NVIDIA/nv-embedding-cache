@@ -33,6 +33,15 @@
 #include <unistd.h>
 #include <filesystem>
 
+// Kernel headers older than 5.6 (e.g. manylinux_2_28's) lack these numbers. Syscalls
+// added since Linux 5.1 share one number on every architecture.
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
+
 #define ERRNO_CHECK(_expr_) \
 do { \
   auto res = (_expr_); \

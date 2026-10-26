@@ -19,6 +19,7 @@ from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 import subprocess
 import os
+import shlex
 from glob import glob
 import distutils.command.build
 
@@ -29,10 +30,12 @@ import distutils.command.build
 # - PYNVE_DISABLE_TORCH_BINDINGS: Set to '1' to skip the PyTorch custom op bindings
 # - PYNVE_DRIVERLESS_BUILD: Set to '1' to build without the CUDA driver (libcuda)
 # - PYNVE_DISABLE_MPI: Set to '1' to build without OpenMPI
+# - PYNVE_CMAKE_ARGS: Extra CMake arguments, e.g. '-DNVE_SM_VERSION="80;90;100" -DNVE_FEATURES=nvhm_plugin'
+# - PYNVE_LOCAL_VERSION: PEP 440 local version label appended to the package version, e.g. "cu130"
 _build_dir = os.environ.get('PYNVE_BUILD_DIR', 'build')
 
 
-def get_version():
+def get_base_version():
     """Read version from version.txt file."""
     version_file = "version.txt"
     try:
@@ -40,6 +43,14 @@ def get_version():
             return f.read().strip()
     except FileNotFoundError:
         return "0.0.0"  # Fallback version
+
+
+def get_version():
+    """Package version: the base version plus the optional PYNVE_LOCAL_VERSION label."""
+    local_version = os.environ.get('PYNVE_LOCAL_VERSION')
+    return f"{get_base_version()}+{local_version}" if local_version else get_base_version()
+
+
 class BuildCommand(distutils.command.build.build):
     def initialize_options(self):
         distutils.command.build.build.initialize_options(self)
@@ -88,6 +99,10 @@ class CMakeBuild(build_ext):
             if os.environ.get('PYNVE_DISABLE_MPI') == '1':
                 cmake_args.append('-DNVE_DISABLE_MPI=ON')
 
+            # Extra CMake arguments, e.g. the target architectures or feature set of a
+            # redistributable wheel. Appended last so they take precedence.
+            cmake_args.extend(shlex.split(os.environ.get('PYNVE_CMAKE_ARGS', '')))
+
             subprocess.check_call(cmake_args)
             build_threads = min(os.cpu_count(), 32)
             subprocess.check_call(['cmake', '--build', _build_dir, f'-j{build_threads}'])
@@ -102,6 +117,12 @@ class CMakeBuild(build_ext):
         # Manually remove unneeded .so
         for filename in glob(f'{_build_dir}/lib.linux-*/*.so', recursive=True):
             subprocess.check_call(['rm', filename])
+
+    def build_extension(self, ext):
+        # CMake already built the modules. The 'pynve' extension has no sources and
+        # only marks the wheel as platform-specific; linking it would run the linker
+        # with no input files, which gcc rejects outside conda toolchains.
+        pass
 
     def copy_binaries(self):
         # Specify the source and destination directories
@@ -123,7 +144,7 @@ class CMakeBuild(build_ext):
         version_dest = os.path.join(dest_dir, "_version.py")
         version_content = f"""# Generated from version.txt
 __version__ = "{version}"
-__version_info__ = tuple(int(x) for x in "{version}".split('.'))
+__version_info__ = tuple(int(x) for x in "{get_base_version()}".split('.'))
 """
         with open(version_dest, 'w') as f:
             f.write(version_content)

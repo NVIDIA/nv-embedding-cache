@@ -35,6 +35,8 @@ build, enables `NVE_ORIGIN_RPATH`, and supports these environment variables:
 | `PYNVE_DISABLE_TORCH_BINDINGS` | Unset | Set to exactly `1` to set `NVE_DISABLE_TORCH_BINDINGS=ON`. |
 | `PYNVE_DRIVERLESS_BUILD` | Unset | Set to exactly `1` to enable `NVE_DRIVERLESS_BUILD` and set `NVE_SM_VERSION=100`. |
 | `PYNVE_DISABLE_MPI` | Unset | Set to exactly `1` to set `NVE_DISABLE_MPI=ON`. |
+| `PYNVE_CMAKE_ARGS` | Unset | Extra CMake arguments appended last, e.g. `-DNVE_SM_VERSION="80;90;100" -DNVE_FEATURES="nvhm_plugin;ht_key_64;ht_kernel_8;ht_part_fnv1a"` to pin the architectures and feature set of a redistributable wheel. |
+| `PYNVE_LOCAL_VERSION` | Unset | PEP 440 local version label appended to the package version (`<version>+<label>`), e.g. to tag a CUDA-specific build. `__version_info__` keeps the base version. |
 
 For example:
 
