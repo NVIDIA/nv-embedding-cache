@@ -70,7 +70,7 @@ extern "C" AtenTensorHandle nve_embedding_lookup_cpu(
     std::array<int64_t, 2> out_sizes = {num_keys, emb_dim};
     ts::Tensor output = ts::empty(
         ts::IntHeaderOnlyArrayRef(out_sizes.data(), 2),
-        dtype_tag_to_stable(nve::binding_data_type_int(binding)),
+        dtype_tag_to_stable(nve::binding_output_data_type_int(binding)),
         std::nullopt,
         ts::Device(ts::DeviceType::CPU));
 
@@ -105,7 +105,7 @@ extern "C" AtenTensorHandle nve_embedding_lookup_with_pooling_cpu(
     std::array<int64_t, 2> out_sizes = {num_bags, emb_dim};
     ts::Tensor output = ts::empty(
         ts::IntHeaderOnlyArrayRef(out_sizes.data(), 2),
-        dtype_tag_to_stable(nve::binding_data_type_int(binding)),
+        dtype_tag_to_stable(nve::binding_output_data_type_int(binding)),
         std::nullopt,
         ts::Device(ts::DeviceType::CPU));
 

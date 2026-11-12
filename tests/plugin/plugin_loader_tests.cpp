@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit_ops.hpp>
 #include <buffer_wrapper.hpp>
 #include <cstdint>
@@ -200,6 +201,17 @@ TEST(plugin_loader, external_data_ops_roundtrip) {
   table->find(ctx, n, keys_buf, mask_buf, kRowBytes, out_buf, nullptr);
   EXPECT_EQ(out[0], 101.5f);
 
+  // size + get_keys (ABI 3.0): the full set, then a clipped read.
+  EXPECT_EQ(table->size(ctx), n);
+  std::vector<int64_t> stored(n + 1, -1);
+  EXPECT_EQ(table->get_keys(ctx, static_cast<int64_t>(stored.size()), stored.data()), n);
+  std::vector<int64_t> sorted(stored.begin(), stored.begin() + n);
+  std::sort(sorted.begin(), sorted.end());
+  EXPECT_EQ(sorted, keys);
+  EXPECT_EQ(stored.back(), -1);
+  EXPECT_EQ(table->get_keys(ctx, 5, stored.data()), 5);
+  EXPECT_THROW(table->get_keys(ctx, -1, stored.data()), nve::Exception);
+
   // erase + clear.
   table->erase(ctx, 1, wrap_const(ctx, "erase", keys.data(), sizeof(int64_t)));
   std::fill(mask.begin(), mask.end(), 0);
@@ -363,9 +375,27 @@ TEST(plugin_loader, c_api_table_op_status_fidelity) {
         sanitize_external_status(static_cast<nve_status_t>(status));
     EXPECT_EQ(expected, nve_table_clear(table.get(), ctx.get()));
     expect_last_error_contains("injected operation failure");
+    int64_t out = 0;
+    EXPECT_EQ(expected, nve_table_size(table.get(), ctx.get(), &out));
+    expect_last_error_contains("injected operation failure");
+    EXPECT_EQ(expected, nve_table_get_keys(table.get(), ctx.get(), 1, &out, &out));
+    expect_last_error_contains("injected operation failure");
     EXPECT_EQ(NVE_SUCCESS, nve_context_destroy(ctx.release()));
     EXPECT_EQ(NVE_SUCCESS, nve_table_destroy(table.release()));
   }
+  EXPECT_EQ(NVE_SUCCESS, nve_table_factory_destroy(factory.release()));
+}
+
+// size/get_keys are mandatory: a table that leaves them NULL is rejected at produce time.
+TEST(plugin_loader, c_api_rejects_table_without_key_ops) {
+  nve_table_factory_t raw_factory = nullptr;
+  ASSERT_EQ(NVE_SUCCESS, nve_create_table_factory(&raw_factory, NVE_FAULT_PLUGIN_PATH, "{}"));
+  FactoryPtr factory(raw_factory, nve_table_factory_destroy);
+  nve_table_t raw_table = nullptr;
+  EXPECT_EQ(NVE_ERROR_RUNTIME, nve_table_factory_produce(factory.get(), /*table_id=*/3,
+                                                         inject("omit_key_ops", 1).c_str(), &raw_table));
+  EXPECT_EQ(nullptr, raw_table);
+  expect_last_error_contains("missing mandatory callbacks");
   EXPECT_EQ(NVE_SUCCESS, nve_table_factory_destroy(factory.release()));
 }
 

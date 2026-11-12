@@ -68,8 +68,52 @@ TEST(NumpyTensorFileFormat, Loads2DFile)
     auto reader = open_npy(path);
     EXPECT_EQ(reader.get_num_rows(), 2u);
     EXPECT_EQ(reader.get_row_size_in_bytes(), 3 * sizeof(float));
+    EXPECT_TRUE(reader.holds_rows_of(nve::DataType_t::Float32));
+    EXPECT_FALSE(reader.holds_rows_of(nve::DataType_t::Float16));
+    EXPECT_FALSE(reader.holds_rows_of(nve::DataType_t::QUint8RowwiseF32));
 
     std::vector<float> loaded(6, -1.f);
+    reader.reset();
+    reader.load_batch(2, loaded.data());
+    EXPECT_EQ(loaded, data);
+}
+
+// Raw byte rows (e.g. rowwise-quantized tables) load as uint8/int8 arrays.
+TEST(NumpyTensorFileFormat, LoadsByteRows)
+{
+    for (const char* descr : {"|u1", "|i1"}) {
+        const std::string data = {'\x01', '\x02', '\x03', '\xfd', '\xfe', '\xff'};
+        const std::string path = write_npy("npy_bytes.npy", header_for_shape("(2, 3)", descr), data);
+        auto reader = open_npy(path);
+        EXPECT_EQ(reader.get_num_rows(), 2u) << descr;
+        EXPECT_EQ(reader.get_row_size_in_bytes(), 3u) << descr;
+        EXPECT_EQ(reader.get_descr(), descr);
+        EXPECT_TRUE(reader.holds_rows_of(nve::DataType_t::QInt8RowwiseF16)) << descr;
+        EXPECT_TRUE(reader.holds_rows_of(nve::DataType_t::QUint8RowwiseF32)) << descr;
+        EXPECT_FALSE(reader.holds_rows_of(nve::DataType_t::Float32)) << descr;
+
+        std::string loaded(6, '\0');
+        reader.reset();
+        reader.load_batch(2, loaded.data());
+        EXPECT_EQ(loaded, data) << descr;
+    }
+}
+
+TEST(NumpyTensorFileFormat, LoadsFloat16File)
+{
+    // fp16 bit patterns for 0.5, 1, 2, -1, 65504 (max half), 0.
+    const std::vector<uint16_t> data = {0x3800, 0x3c00, 0x4000, 0xbc00, 0x7bff, 0x0000};
+    const std::string path = write_npy("npy_f16.npy", header_for_shape("(2, 3)", "<f2"),
+                                       std::string(reinterpret_cast<const char*>(data.data()),
+                                                   data.size() * sizeof(uint16_t)));
+    auto reader = open_npy(path);
+    EXPECT_EQ(reader.get_num_rows(), 2u);
+    EXPECT_EQ(reader.get_row_size_in_bytes(), 3 * sizeof(uint16_t));
+    EXPECT_TRUE(reader.holds_rows_of(nve::DataType_t::Float16));
+    EXPECT_TRUE(reader.holds_rows_of(nve::DataType_t::BFloat));  // no numpy equivalent: row bytes only
+    EXPECT_FALSE(reader.holds_rows_of(nve::DataType_t::Float32));
+
+    std::vector<uint16_t> loaded(6, 0xffff);
     reader.reset();
     reader.load_batch(2, loaded.data());
     EXPECT_EQ(loaded, data);

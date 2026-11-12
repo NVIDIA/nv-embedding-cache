@@ -447,13 +447,13 @@ def test_pytorch_multi_layer():
     assert torch.equal(out_2, out_ref_2)
 
 @requires_nvhm
-def test_pytorch_load_from_numpy_file():
+@pytest.mark.parametrize("data_type", [torch.float32, torch.float16], ids=["fp32", "fp16"])
+def test_pytorch_load_from_numpy_file(data_type):
     import numpy as np
 
     cache_size = 1024*1024
     embed_size = 2
     num_embeddings = 100000
-    data_type = torch.float32
     device = torch.device("cuda")
 
     nvhm_ps = nve_ps.NVEParameterServer(
@@ -467,7 +467,8 @@ def test_pytorch_load_from_numpy_file():
     values_path = "/tmp/values.npy"
     
     keys_array = np.array([10, 5, 700, 1050], dtype=np.int64)
-    values_array = np.array([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=np.float32)
+    np_dtype = np.float32 if data_type == torch.float32 else np.float16
+    values_array = np.array([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=np_dtype)
 
     with open(keys_path, "wb") as f:
         np.save(f, keys_array)
@@ -480,7 +481,7 @@ def test_pytorch_load_from_numpy_file():
     nv_nvhm_ps_emb_layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=cache_size, storage=nvhm_ps, device=device)
 
     out = nv_nvhm_ps_emb_layer(torch.tensor([10, 5, 700, 1050], dtype=torch.int64, device=device))
-    assert torch.equal(out, torch.tensor([[10.0, 10.5], [5.0, 5.5], [700.0, 700.5], [1050.0, 1050.5]], dtype=torch.float32, device=device))
+    assert torch.equal(out, torch.from_numpy(values_array).to(device))
 
 def test_pytorch_update():
     weight_init = torch.zeros(10000, 2, dtype=torch.float32)
@@ -529,6 +530,78 @@ def test_pytorch_erase():
     # After erase, looking up the keys should return the values from table 1 (after cache misses in the table 0)
     out_after_erase = layer(keys)
     assert torch.equal(out_after_erase, values1.reshape(5, 2).to(device='cuda'))
+
+@requires_nvhm
+def test_pytorch_update_accumulate_table_id():
+    keys = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64, device='cuda')
+    values0 = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], dtype=torch.float32, device='cuda')
+    values1 = torch.tensor([11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0], dtype=torch.float32, device='cuda')
+    values2 = torch.tensor([21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0], dtype=torch.float32, device='cuda')
+    deltas = torch.full((10,), 0.5, dtype=torch.float32, device='cuda')
+
+    num_embeddings = 2**20
+    embed_size = 2
+    data_type = torch.float32
+    nvhm_ps_init = nve_ps.SimpleInitializer(num_embeddings, embed_size, data_type, torch.zeros(num_embeddings, embed_size, dtype=torch.float32))
+    nvhm_ps = nve_ps.NVEParameterServer(num_embeddings, embed_size, data_type, nvhm_ps_init)
+    layer = nve_layers.NVEmbedding(num_embeddings, embed_size, data_type, nve_layers.LayerType.Hierarchical, gpu_cache_size=2**16, storage=nvhm_ps, device=torch.device('cuda'))
+
+    layer.insert(keys, values0, table_id=0)
+    layer.insert(keys, values1, table_id=1)
+
+    # Update only table 1, lookups still hit table 0
+    layer.update(keys, values2, table_id=1)
+    assert torch.equal(layer(keys), values0.reshape(5, 2))
+
+    # Accumulate only into table 0
+    stream = nve_layers._current_stream_handle(layer.device)
+    layer.emb_layer.accumulate(torch.numel(keys), keys.data_ptr(), deltas.data_ptr(), 0, stream)
+    assert torch.equal(layer(keys), (values0 + deltas).reshape(5, 2))
+
+    # Table 1 holds the updated values without the accumulated deltas
+    layer.erase(keys, table_id=0)
+    assert torch.equal(layer(keys), values2.reshape(5, 2))
+
+@requires_nvhm
+def test_pytorch_ps_keys():
+    """NVEParameterServer.num_keys()/keys() report the stored keys after insert and erase."""
+    embed_size = 2
+    ps = nve_ps.NVEParameterServer(0, embed_size, torch.float32, None)
+    assert ps.num_keys() == 0
+    assert ps.keys().numel() == 0
+
+    keys = torch.tensor([7, 3, 11, 5], dtype=torch.int64)
+    values = torch.arange(keys.numel() * embed_size, dtype=torch.float32).reshape(keys.numel(), embed_size)
+    ps.insert(keys, values)
+    assert ps.num_keys() == keys.numel()
+    stored = ps.keys()
+    assert stored.dtype == torch.int64
+    assert torch.equal(torch.sort(stored).values, torch.sort(keys).values)
+
+    # export_keys() clips to the buffer capacity and reports how many keys it wrote.
+    small = torch.full((2,), -1, dtype=torch.int64)
+    assert ps.parameter_server.export_keys(2, small.data_ptr()) == 2
+    assert all(int(k) in keys.tolist() for k in small)
+
+    # Device buffers are rejected instead of being written from the CPU.
+    gpu_buf = torch.empty(keys.numel(), dtype=torch.int64, device="cuda")
+    with pytest.raises(RuntimeError, match="host accessible"):
+        ps.parameter_server.export_keys(gpu_buf.numel(), gpu_buf.data_ptr())
+
+    ps.erase(keys[:2])
+    assert torch.equal(torch.sort(ps.keys()).values, torch.sort(keys[2:]).values)
+
+    # keys() must come back on the host even when torch defaults to CUDA allocations.
+    torch.set_default_device('cuda')
+    try:
+        stored = ps.keys()
+    finally:
+        torch.set_default_device(None)
+    assert stored.device.type == 'cpu'
+    assert torch.equal(torch.sort(stored).values, torch.sort(keys[2:]).values)
+
+    ps.clear()
+    assert ps.num_keys() == 0
 
 def test_pytorch_pooling():
     #right now we are testing unweighted sum. If other pooling types are tested,
@@ -678,6 +751,11 @@ def test_pytorch_simple_sample_linear():
     sys.path.append(f"{dir_path}/../../samples/pytorch/simple_sample")
     import simple_linear_embedding
     simple_linear_embedding.main()
+
+def test_pytorch_simple_sample_quantized_rowwise():
+    sys.path.append(f"{dir_path}/../../samples/pytorch/simple_sample")
+    import simple_quantized_embedding
+    simple_quantized_embedding.main()
 
 def load_sample_parse_args(args: list[str]):
     parser = argparse.ArgumentParser()
@@ -943,6 +1021,33 @@ def test_pytorch_hierarchical_default_embedding_validation():
     # Same byte length as MISS_EMBED_SIZE x float32 but the wrong dtype.
     with pytest.raises(ValueError, match="does not match layer data_type"):
         _make_hierarchical(weight, config={"default_embedding": torch.zeros(MISS_EMBED_SIZE // 2, dtype=torch.float64)})
+
+
+@requires_nvhm
+def test_pytorch_hierarchical_lookup_does_not_insert_into_storage():
+    # Lookups must not write cached rows, or a row for the invalid key, into the layer's storage.
+    weight = torch.ones(MISS_NUM_EMBEDDINGS, MISS_EMBED_SIZE)
+    ps = make_nvhm_ps(weight)
+
+    def make():
+        return make_layer(MISS_NUM_EMBEDDINGS, MISS_EMBED_SIZE, weight.dtype,
+                          nve_layers.LayerType.Hierarchical, torch.device("cuda"),
+                          storage=ps, gpu_cache_size=MISS_CACHE_SIZE)
+
+    layer = make()
+    cached = torch.arange(16, dtype=torch.int64, device="cuda")
+    layer.insert(cached, weight[:16].cuda(), 0)  # rows 0..15 are now also in the GPU cache
+    # The storage is updated without going through the layer, so the GPU cache is stale.
+    ps.insert(cached.cpu(), torch.full((16, MISS_EMBED_SIZE), 2.0))
+
+    # Keys missing from the storage used to make the layer insert the whole batch into it.
+    keys = torch.cat([cached, cached + 10 * MISS_NUM_EMBEDDINGS])
+    for _ in range(20):
+        layer(keys)
+    del layer  # waits for pending auto-inserts
+
+    assert ps.num_keys() == MISS_NUM_EMBEDDINGS
+    assert torch.all(make()(cached) == 2.0)
 
 
 @pytest.mark.parametrize("layer_type", LINEAR_LAYERS, ids=["gpu", "uvm"])

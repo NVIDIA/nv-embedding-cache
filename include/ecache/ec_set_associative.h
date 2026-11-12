@@ -17,6 +17,7 @@
 
 #pragma once
 #include "embed_cache.h"
+#include "ec_hash.h"
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
@@ -376,12 +377,20 @@ public:
                 cache_ = allocate_in_pool(pd, ed - pd, data_size, 16);
             }
             d_tags_ = (TagT*)allocate_in_pool(pd, ed - pd, tag_size, 16);
+            if (!cache_ || !d_tags_)
+            {
+                EC_THROW(ECERROR_MEMORY_ALLOCATION);
+            }
             CACHE_CUDA_ERR_CHK_AND_THROW(call_fill_tags<TagT>(d_tags_, num_sets_ * NUM_WAYS * config_.num_tables, config_.sentinel_key, 0));
             CACHE_CUDA_ERR_CHK_AND_THROW(cudaStreamSynchronize(0));
 
             // always allocate host buffer for tags
             // in gpu_modify mode it is required for get_keys_stored_in_cache method
             h_tags_ = (TagT*)allocate_in_pool(ph, eh - ph, tag_size, 16);
+            if (!h_tags_)
+            {
+                EC_THROW(ECERROR_MEMORY_ALLOCATION);
+            }
 
             std::fill(h_tags_, h_tags_ + num_sets_ * NUM_WAYS * config_.num_tables, config_.sentinel_key);
 
@@ -577,7 +586,30 @@ public:
         return num_sets_ * NUM_WAYS;
     }
 
-    virtual ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t& num_out_keys) const override = 0;
+    // Scans the host tag mirror: returns the number of live entries and writes the first `capacity` keys to out_keys.
+    size_t collect_keys_from_host_tags(IndexT* out_keys, size_t capacity) const
+    {
+        size_t num_keys = 0;
+        for (size_t i = 0; i < num_sets_; i++)
+        {
+            for (size_t j = 0; j < NUM_WAYS; j++)
+            {
+                TagT tag = h_tags_[i * NUM_WAYS + j];
+                if (tag == config_.sentinel_key)
+                {
+                    continue;
+                }
+                if (num_keys < capacity)
+                {
+                    out_keys[num_keys] = embed_cache_construct_key<IndexT>(tag, i, num_sets_);
+                }
+                num_keys++;
+            }
+        }
+        return num_keys;
+    }
+
+    virtual ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t capacity, size_t& num_keys, cudaStream_t stream) const override = 0;
     
     CacheAllocationSize get_lookup_context_size() const override
     {

@@ -26,7 +26,7 @@
 namespace nve {
 
 MPIMemBlock::MPIMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, const std::vector<size_t> ranks, const std::vector<int> devices)
-  : MPIMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype)), ranks, devices) {}
+  : MPIMemBlock(memblock_size_in_bytes(row_size, num_embeddings, dtype), ranks, devices) {}
 
 MPIMemBlock::MPIMemBlock(size_t size_to_alloc, const std::vector<size_t> ranks, const std::vector<int> devices) : MemBlock(MemBlockType::MPI) {
   auto mpi_env = std::make_shared<nve::MPIEnv>(ranks, devices);

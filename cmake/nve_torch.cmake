@@ -61,6 +61,8 @@ function(nve_configure_torch)
 
     # Verify torch stable ABI is available by compiling a minimal test program.
     # _torch_prefix is e.g. /usr/local/.../torch/share/cmake → torch root is ../../
+    # The stable ABI headers call dlsym, which lives in libdl before glibc 2.34
+    # (nve-torch-ops links it too).
     get_filename_component(_torch_include "${_torch_prefix}/../../include" ABSOLUTE)
     get_filename_component(_torch_lib     "${_torch_prefix}/../../lib"     ABSOLUTE)
     try_compile(TORCH_STABLE_ABI_OK
@@ -71,7 +73,7 @@ function(nve_configure_torch)
             "-DCMAKE_CXX_STANDARD=17"
             "-DINCLUDE_DIRECTORIES=${_torch_include}"
             "-DLINK_DIRECTORIES=${_torch_lib}"
-        LINK_LIBRARIES torch torch_cpu c10
+        LINK_LIBRARIES torch torch_cpu c10 ${CMAKE_DL_LIBS}
         OUTPUT_VARIABLE _torch_abi_output
     )
 
@@ -95,6 +97,8 @@ function(nve_configure_torch)
     # TORCH_CUDA_ARCH_LIST expects "7.5;8.0;8.6" format; CMAKE_CUDA_ARCHITECTURES is "75;80;86".
     set(_arch_list "")
     foreach(arch ${CMAKE_CUDA_ARCHITECTURES})
+        # A -real/-virtual suffix (e.g. 89-real) only selects SASS vs PTX; the arch is the same.
+        string(REGEX REPLACE "-(real|virtual)$" "" arch "${arch}")
         string(LENGTH "${arch}" _arch_len)
         if (_arch_len EQUAL 2)
             string(SUBSTRING "${arch}" 0 1 _major)

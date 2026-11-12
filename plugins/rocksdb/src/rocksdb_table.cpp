@@ -61,6 +61,10 @@ RocksDBTable::RocksDBTable(const table_id_t id, const RocksDBTableConfig& config
   write_opts_.sync = false;
 }
 
+// With manual_wal_flush, a write stays in process memory until the WAL buffer is flushed. Flushing
+// at the end of each call makes a completed call survive a process crash (not a host crash: no fsync).
+void RocksDBTable::flush_wal_() { NVE_CHECK_(rdb_ctx_->db->FlushWAL(false)); }
+
 void RocksDBTable::clear(context_ptr_t&) {
   std::unique_ptr<rocksdb::DB>& __restrict db{rdb_ctx_->db};
   rocksdb::ColumnFamilyHandle* const __restrict cf{col_families_.front()};
@@ -107,6 +111,7 @@ void RocksDBTable::erase(context_ptr_t& ctx, const int64_t n, buffer_ptr<const v
   if (batch_size) {
     NVE_CHECK_(db->Write(write_opts_, &batch));
   }
+  flush_wal_();
 }
 
 void RocksDBTable::find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys_bw,
@@ -201,22 +206,39 @@ void RocksDBTable::insert(context_ptr_t& ctx, const int64_t n, buffer_ptr<const 
   if (batch_size) {
     NVE_CHECK_(db->Write(write_opts_, &batch));
   }
+  flush_wal_();
 }
 
-int64_t RocksDBTable::size(context_ptr_t&, const bool exact) const {
+int64_t RocksDBTable::size(context_ptr_t&) const {
   std::unique_ptr<rocksdb::DB>& __restrict db{rdb_ctx_->db};
   rocksdb::ColumnFamilyHandle* const __restrict cf{col_families_.front()};
 
-  uint64_t n{};
-  if (exact) {
-    std::unique_ptr<rocksdb::Iterator> it{db->NewIterator(read_opts_, cf)};
-    for (it->SeekToFirst(); it->Valid(); it->Next()) {
-      ++n;
-    }
-  } else {
-    NVE_CHECK_(db->GetIntProperty(cf, rocksdb::DB::Properties::kEstimateNumKeys, &n));
+  int64_t n{};
+  std::unique_ptr<rocksdb::Iterator> it{db->NewIterator(read_opts_, cf)};
+  for (it->SeekToFirst(); it->Valid(); it->Next()) {
+    ++n;
   }
-  return static_cast<int64_t>(n);
+  NVE_CHECK_(it->status());
+  return n;
+}
+
+int64_t RocksDBTable::get_keys(context_ptr_t&, const int64_t capacity, void* const keys_ptr) const {
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  char* const __restrict keys{static_cast<char*>(keys_ptr)};
+
+  std::unique_ptr<rocksdb::DB>& __restrict db{rdb_ctx_->db};
+  rocksdb::ColumnFamilyHandle* const __restrict cf{col_families_.front()};
+  const int64_t key_size{config_.key_size};
+
+  int64_t n{};
+  std::unique_ptr<rocksdb::Iterator> it{db->NewIterator(read_opts_, cf)};
+  for (it->SeekToFirst(); it->Valid() && n < capacity; it->Next(), ++n) {
+    const rocksdb::Slice key{it->key()};
+    NVE_CHECK_(static_cast<int64_t>(key.size()) == key_size, "Unexpected key size in RocksDB table");
+    std::memcpy(&keys[n * key_size], key.data(), to_uint(key_size));
+  }
+  NVE_CHECK_(it->status());
+  return n;
 }
 
 void RocksDBTable::update(context_ptr_t& ctx, const int64_t n,
@@ -274,6 +296,7 @@ void RocksDBTable::update(context_ptr_t& ctx, const int64_t n,
   if (batch_size) {
     NVE_CHECK_(db->Write(write_opts_, &batch));
   }
+  flush_wal_();
 }
 
 void RocksDBTable::update_accumulate(
@@ -339,6 +362,7 @@ void RocksDBTable::update_accumulate(
   if (batch_size) {
     NVE_CHECK_(db->Write(write_opts_, &batch));
   }
+  flush_wal_();
 }
 
 template <bool WithValues, bool WithValueSizes>

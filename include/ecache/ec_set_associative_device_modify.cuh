@@ -164,6 +164,11 @@ public:
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
+            // The tag kernel reads num_entries entries; each key adds at most one.
+            if (num_keys > context->max_update_sz)
+            {
+                EC_THROW(ECERROR_INVALID_ARGUMENT);
+            }
 
             auto dst_tags = this->d_tags_ + table_index * this->num_sets_ * NUM_WAYS;
 
@@ -389,32 +394,19 @@ public:
         }
     }
 
-    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t& num_out_keys) const override
+    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t capacity, size_t& num_keys, cudaStream_t stream) const override
     {
         try 
         {
-            if (!out_keys || !this->h_tags_)
+            if ((!out_keys && capacity) || !this->h_tags_)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
-
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaDeviceSynchronize());
-            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpy(this->h_tags_, this->d_tags_, this->num_sets_ * NUM_WAYS * sizeof(TagT), cudaMemcpyDeviceToHost));
- 
-            num_out_keys = 0;
-            for (size_t i = 0; i < this->num_sets_; i++)
-            {
-                for (size_t j = 0; j < NUM_WAYS; j++)
-                {
-                    TagT tag = this->h_tags_[i * NUM_WAYS + j];
-                    if (tag == this->config_.sentinel_key)
-                    {
-                        continue;
-                    }
-                    IndexT key = static_cast<IndexT>(tag * this->num_sets_ + i);
-                    out_keys[num_out_keys++] = key;
-                }
-            }
+            // The host mirror is only a staging buffer for this snapshot; serialize concurrent callers.
+            std::lock_guard<std::mutex> lock(tags_snapshot_mutex_);
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaMemcpyAsync(this->h_tags_, this->d_tags_, this->num_sets_ * NUM_WAYS * sizeof(TagT), cudaMemcpyDeviceToHost, stream));
+            CACHE_CUDA_ERR_CHK_AND_THROW(cudaStreamSynchronize(stream));
+            num_keys = this->collect_keys_from_host_tags(out_keys, capacity);
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -424,6 +416,7 @@ public:
     }
 
 private:
+    mutable std::mutex tags_snapshot_mutex_; // guards h_tags_ while get_keys_stored_in_cache stages the device tags
 
     ECError invalidate_tags_and_sync(const ModifyContext* context,
                                   size_t num_entries,

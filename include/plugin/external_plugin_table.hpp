@@ -120,6 +120,8 @@ class ExternalPluginTable final : public Table {
   void update_accumulate(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
                          int64_t update_stride, int64_t update_size,
                          buffer_ptr<const void> updates, DataType_t update_dtype) override;
+  int64_t size(context_ptr_t& ctx) const override;
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
 
  private:
   plugin_library_ptr_t library_;  // destroyed last: outlives the plugin code below

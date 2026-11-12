@@ -89,7 +89,7 @@ class HierachicalLinearFile : public ::testing::Test {
                                       {"path", path.string()},
                                       {"num_rows", kNumRows}};
     table_factory_ptr_t file_fac{nve_test::plugin_factory("linear-file")};
-    auto file_tab{file_fac->produce(4718, file_conf)};
+    file_tab_ = file_fac->produce(4718, file_conf);
 
     typename HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
     layer_cfg.layer_name = "gpu_linear_file";
@@ -97,7 +97,7 @@ class HierachicalLinearFile : public ::testing::Test {
     layer_cfg.insert_heuristic = std::make_shared<TestInsertHeuristic>(std::vector<bool>{true, false});
     layer_cfg.min_insert_size_gpu = 1;
     layer_ = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(
-        layer_cfg, std::vector<table_ptr_t>{gpu_tab, file_tab});
+        layer_cfg, std::vector<table_ptr_t>{gpu_tab, file_tab_});
     ctx_ = layer_->create_execution_context(0, 0, nullptr, nullptr);
   }
 
@@ -141,9 +141,24 @@ class HierachicalLinearFile : public ::testing::Test {
     }
   }
 
+  table_ptr_t file_tab_;
   std::shared_ptr<HierarchicalEmbeddingLayer<IndexT>> layer_;
   context_ptr_t ctx_;
 };
+
+// Every row exists: size() is num_rows, get_keys() yields the row range clipped to capacity.
+TEST_F(HierachicalLinearFile, SizeAndGetKeys) {
+  auto file_ctx{file_tab_->create_execution_context(0, 0, nullptr, nullptr)};
+  EXPECT_EQ(file_tab_->size(file_ctx), kNumRows);
+
+  constexpr int64_t capacity{kNumRows / 2};
+  std::vector<IndexT> keys(to_uint(kNumRows), IndexT{-1});
+  EXPECT_EQ(file_tab_->get_keys(file_ctx, capacity, keys.data()), capacity);
+  for (int64_t i{}; i < kNumRows; ++i) {
+    ASSERT_EQ(keys[to_uint(i)], i < capacity ? i : IndexT{-1}) << "slot " << i;
+  }
+  EXPECT_THROW(file_tab_->get_keys(file_ctx, -1, keys.data()), nve::Exception);
+}
 
 TEST_F(HierachicalLinearFile, GpuMissReadsFileThenCaches) {
   const auto keys{SpreadKeys(512)};

@@ -30,13 +30,18 @@
 
 namespace nve {
 
+// Table id used for plugin tables when the caller does not choose one.
+inline constexpr table_id_t DEFAULT_PLUGIN_TABLE_ID = 1000;
+
 // Loads the plugin shared object named by plugin_name, builds the table
 // factory from the plugin-specific factory_config, and produces the
 // underlying table with table_config.
+// Some plugins derive where the data is stored from table_id (e.g. the Redis
+// hash names), so a table must be reopened with the id it was written with.
 table_ptr_t create_table_from_plugin(const std::string& plugin_name,
                                      const nlohmann::json& factory_config,
                                      const nlohmann::json& table_config,
-                                     table_id_t table_id = 1000);
+                                     table_id_t table_id = DEFAULT_PLUGIN_TABLE_ID);
 
 // Streams (key, value) pairs from already-opened tensor-file readers into
 // `table` in batches of `batch_size` rows. row_bytes is the size of a single
@@ -58,12 +63,14 @@ void insert_keys_from_tensor_file(table_ptr_t table,
 // Convenience wrapper: open the keys/values files, dispatch on extension
 // (.npy → NumpyTensorFileFormat, .dyn → BinaryTensorFileFormat), and call
 // insert_keys_from_tensor_file. Same async/wait contract as
-// insert_keys_from_tensor_file. Keys are assumed to be int64.
+// insert_keys_from_tensor_file. Keys are assumed to be int64. For .npy values,
+// a known value_dtype is also checked against the file's element type.
 void insert_keys_from_filepath(table_ptr_t table,
                                context_ptr_t ctx,
                                const std::string& keys_path,
                                const std::string& values_path,
                                uint64_t row_bytes,
-                               uint64_t batch_size);
+                               uint64_t batch_size,
+                               DataType_t value_dtype);
 
 }  // namespace nve

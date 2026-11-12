@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <buffer_wrapper.hpp>
 #include <execution_context.hpp>
 #include <host_table.hpp>
@@ -28,6 +29,22 @@
 using namespace nve;
 using namespace nve::plugin;
 using namespace nlohmann::literals;
+
+// get_keys() with a generous buffer returns exactly `expected`; a smaller buffer is filled to capacity.
+template <typename KeyType>
+void expect_stored_keys(const host_table_ptr_t& tab, context_ptr_t& ctx, std::vector<KeyType> expected) {
+  std::vector<KeyType> out(expected.size() + 8, KeyType{-1});
+  ASSERT_EQ(tab->get_keys(ctx, static_cast<int64_t>(out.size()), out.data()), static_cast<int64_t>(expected.size()));
+  out.resize(expected.size());
+  std::sort(out.begin(), out.end());
+  std::sort(expected.begin(), expected.end());
+  ASSERT_EQ(out, expected);
+  if (expected.size() > 1) {
+    const int64_t capacity{static_cast<int64_t>(expected.size()) / 2};
+    ASSERT_EQ(tab->get_keys(ctx, capacity, out.data()), capacity);
+  }
+  ASSERT_THROW(tab->get_keys(ctx, -1, out.data()), nve::Exception);
+}
 
 TEST(redis_plugin, parse_table_conf) {
   const RedisClusterTableConfig conf{{sizeof(int32_t), 16, DataType_t::BFloat},
@@ -173,11 +190,12 @@ TEST(redis_plugin, single_node_string_crud) {
   tab->find(ctx, n, keys_bw(keys.data()), hit_mask_bw(), value_stride, nullptr, nullptr);
   tab->get_lookup_counter(ctx, &cnt);
   ASSERT_EQ(cnt, 0);
-  ASSERT_EQ(tab->size(ctx, true), 0);
+  ASSERT_EQ(tab->size(ctx), 0);
 
   // Insert -> find returns every key with the original payload.
   tab->insert(ctx, n, keys_bw(keys.data()), value_stride, max_value_size, values_in_bw());
-  ASSERT_EQ(tab->size(ctx, true), n);
+  ASSERT_EQ(tab->size(ctx), n);
+  expect_stored_keys(tab, ctx, keys);
 
   std::fill(hit_mask.begin(), hit_mask.end(), 0);
   std::fill(out_values.begin(), out_values.end(), 0);
@@ -198,7 +216,8 @@ TEST(redis_plugin, single_node_string_crud) {
   // Erase the first half; only the second half should remain.
   const int64_t half{n / 2};
   tab->erase(ctx, half, keys_bw(keys.data()));
-  ASSERT_EQ(tab->size(ctx, true), n - half);
+  ASSERT_EQ(tab->size(ctx), n - half);
+  expect_stored_keys(tab, ctx, std::vector<key_type>(keys.begin() + half, keys.end()));
 
   std::fill(hit_mask.begin(), hit_mask.end(), 0);
   tab->reset_lookup_counter(ctx);
@@ -208,7 +227,7 @@ TEST(redis_plugin, single_node_string_crud) {
 
   // Clear (SCAN+DEL by prefix) removes the rest.
   tab->clear(ctx);
-  ASSERT_EQ(tab->size(ctx, true), 0);
+  ASSERT_EQ(tab->size(ctx), 0);
 }
 
 // Two string-mode tables sharing one standalone Redis but with distinct `string_namespace_id` values must be
@@ -298,8 +317,8 @@ TEST(redis_plugin, single_node_string_namespace_id_isolation) {
   do_insert(tab_b, ctx_b, values_b);
 
   // `size()` is prefix-scoped: each table sees only its own n keys, not the combined 2*n.
-  ASSERT_EQ(tab_a->size(ctx_a, true), n);
-  ASSERT_EQ(tab_b->size(ctx_b, true), n);
+  ASSERT_EQ(tab_a->size(ctx_a), n);
+  ASSERT_EQ(tab_b->size(ctx_b), n);
 
   int64_t cnt{};
   // Each table reads back its own payloads despite the keys being identical.
@@ -310,8 +329,8 @@ TEST(redis_plugin, single_node_string_namespace_id_isolation) {
 
   // Clearing A (SCAN+DEL by prefix 111) must not touch B (prefix 222).
   tab_a->clear(ctx_a);
-  ASSERT_EQ(tab_a->size(ctx_a, true), 0);
-  ASSERT_EQ(tab_b->size(ctx_b, true), n);
+  ASSERT_EQ(tab_a->size(ctx_a), 0);
+  ASSERT_EQ(tab_b->size(ctx_b), n);
   find_check(tab_a, ctx_a, nullptr, cnt);
   ASSERT_EQ(cnt, 0);
   find_check(tab_b, ctx_b, &values_b, cnt);
@@ -319,7 +338,7 @@ TEST(redis_plugin, single_node_string_namespace_id_isolation) {
 
   // Clean up the remaining table.
   tab_b->clear(ctx_b);
-  ASSERT_EQ(tab_b->size(ctx_b, true), 0);
+  ASSERT_EQ(tab_b->size(ctx_b), 0);
 }
 
 // String mode with `num_partitions > 1` fans the client-side work across thread-pool tasks. Results
@@ -381,7 +400,7 @@ TEST(redis_plugin, single_node_string_parallel_crud) {
   tab->insert(ctx, n, keys_bw(), value_stride, max_value_size,
               std::make_shared<BufferWrapper<const void>>(ctx, "values_in", values.data(),
                                                           values.size()));
-  ASSERT_EQ(tab->size(ctx, true), n);
+  ASSERT_EQ(tab->size(ctx), n);
 
   std::fill(hit_mask.begin(), hit_mask.end(), 0);
   std::fill(out_values.begin(), out_values.end(), 0);
@@ -402,7 +421,7 @@ TEST(redis_plugin, single_node_string_parallel_crud) {
   // Erase a sub-range across partitions, then confirm only the rest remains.
   const int64_t erase_n{n / 2};
   tab->erase(ctx, erase_n, keys_bw());
-  ASSERT_EQ(tab->size(ctx, true), n - erase_n);
+  ASSERT_EQ(tab->size(ctx), n - erase_n);
 
   std::fill(hit_mask.begin(), hit_mask.end(), 0);
   tab->reset_lookup_counter(ctx);
@@ -411,7 +430,7 @@ TEST(redis_plugin, single_node_string_parallel_crud) {
   ASSERT_EQ(cnt, n - erase_n);
 
   tab->clear(ctx);
-  ASSERT_EQ(tab->size(ctx, true), 0);
+  ASSERT_EQ(tab->size(ctx), 0);
 }
 
 // Cluster (hash) mode stores values and metadata in separate per-partition hashes. Repeated finds
@@ -462,7 +481,8 @@ TEST(redis_plugin, cluster_meta_does_not_clobber_values) {
     tab->insert(ctx, n, keys_bw, value_stride, max_value_size,
                 std::make_shared<BufferWrapper<const void>>(ctx, "values_in", values.data(),
                                                             values.size()));
-    ASSERT_EQ(tab->size(ctx, true), n);
+    ASSERT_EQ(tab->size(ctx), n);
+    expect_stored_keys(tab, ctx, keys);
 
     // The first find updates metadata; the second one would observe any value corruption.
     for (int pass{}; pass != 2; ++pass) {
@@ -489,6 +509,115 @@ TEST(redis_plugin, cluster_meta_does_not_clobber_values) {
     }
 
     tab->clear(ctx);
-    ASSERT_EQ(tab->size(ctx, true), 0);
+    ASSERT_EQ(tab->size(ctx), 0);
   }
+}
+
+// get_keys() scans in `max_batch_size` batches (HSCAN in hash mode, SCAN in string mode): a small batch size
+// forces several batches, and partial reads stop early with distinct stored keys. Skips when no Redis is
+// reachable.
+void batched_get_keys(const char* address, const bool single_node, const nlohmann::json& table_conf,
+                      const table_id_t table_id) {
+  using key_type = int64_t;
+
+  RedisClusterTableFactoryConfig fac_conf;
+  fac_conf.address = address;
+  fac_conf.single_node = single_node;
+  RedisClusterTableFactory fac{fac_conf};
+  host_table_ptr_t tab{std::dynamic_pointer_cast<HostTableLike>(fac.produce(table_id, table_conf))};
+  auto ctx = tab->create_execution_context(0, 0, nullptr, nullptr);
+
+  try {
+    tab->clear(ctx);
+  } catch (const std::exception& e) {
+    GTEST_SKIP() << "No Redis reachable at " << address << ": " << e.what();
+  }
+
+  const int64_t max_value_size{table_conf.at("max_value_size").get<int64_t>()};
+  const int64_t n{1000};
+  std::vector<key_type> keys(to_uint(n));
+  std::iota(keys.begin(), keys.end(), key_type{1});
+  std::vector<char> values(to_uint(n * max_value_size), 1);
+  tab->insert(ctx, n,
+              std::make_shared<BufferWrapper<const void>>(ctx, "keys", keys.data(), keys.size() * sizeof(key_type)),
+              max_value_size, max_value_size,
+              std::make_shared<BufferWrapper<const void>>(ctx, "values_in", values.data(), values.size()));
+  ASSERT_EQ(tab->size(ctx), n);
+  expect_stored_keys(tab, ctx, keys);
+
+  EXPECT_EQ(tab->get_keys(ctx, 0, nullptr), 0);
+  std::vector<key_type> some(300, key_type{-1});
+  ASSERT_EQ(tab->get_keys(ctx, 1, some.data()), 1);
+  ASSERT_EQ(tab->get_keys(ctx, static_cast<int64_t>(some.size()), some.data()), static_cast<int64_t>(some.size()));
+  std::sort(some.begin(), some.end());
+  EXPECT_EQ(std::unique(some.begin(), some.end()), some.end()) << "duplicate keys returned";
+  EXPECT_TRUE(std::all_of(some.begin(), some.end(), [](const key_type k) { return k >= 1 && k <= n; }));
+
+  tab->clear(ctx);
+  ASSERT_EQ(tab->size(ctx), 0);
+}
+
+TEST(redis_plugin, single_node_hash_get_keys) {
+  batched_get_keys("localhost:6379", true,
+                     {{"key_size", sizeof(int64_t)},
+                      {"max_value_size", 16},
+                      {"value_dtype", "float32"},
+                      {"num_partitions", 0},
+                      {"hash_key", "nve_test_hash_get_keys"},
+                      {"max_batch_size", 64}},
+                     31);
+}
+
+// String mode SCANs the keyspace by namespace prefix: keys of another namespace in the same DB must not be
+// returned. Skips when no Redis is reachable.
+TEST(redis_plugin, single_node_string_get_keys) {
+  using key_type = int64_t;
+
+  RedisClusterTableFactoryConfig fac_conf;
+  fac_conf.address = "localhost:6379";
+  fac_conf.single_node = true;
+  RedisClusterTableFactory fac{fac_conf};
+  nlohmann::json table_conf{{"key_size", sizeof(key_type)},
+                            {"max_value_size", 16},
+                            {"value_dtype", "float32"},
+                            {"num_partitions", 0},
+                            {"max_batch_size", 64}};
+
+  // A neighbouring namespace whose keys (outside the 1..1000 range used below) share the DB.
+  table_conf["string_namespace_id"] = 434343;
+  host_table_ptr_t other{std::dynamic_pointer_cast<HostTableLike>(fac.produce(34, table_conf))};
+  auto other_ctx = other->create_execution_context(0, 0, nullptr, nullptr);
+  try {
+    other->clear(other_ctx);
+  } catch (const std::exception& e) {
+    GTEST_SKIP() << "No standalone Redis reachable at localhost:6379: " << e.what();
+  }
+  const int64_t n_other{200};
+  std::vector<key_type> other_keys(to_uint(n_other));
+  std::iota(other_keys.begin(), other_keys.end(), key_type{1'000'000});
+  std::vector<char> other_values(to_uint(n_other * 16), 2);
+  other->insert(other_ctx, n_other,
+                std::make_shared<BufferWrapper<const void>>(other_ctx, "keys", other_keys.data(),
+                                                            other_keys.size() * sizeof(key_type)),
+                16, 16,
+                std::make_shared<BufferWrapper<const void>>(other_ctx, "values_in", other_values.data(),
+                                                            other_values.size()));
+
+  table_conf["string_namespace_id"] = 424242;
+  batched_get_keys("localhost:6379", true, table_conf, 33);
+
+  // The neighbour is untouched by the scans and the clear above.
+  expect_stored_keys(other, other_ctx, other_keys);
+  other->clear(other_ctx);
+  ASSERT_EQ(other->size(other_ctx), 0);
+}
+
+TEST(redis_plugin, cluster_get_keys) {
+  batched_get_keys("localhost:7000", false,
+                     {{"key_size", sizeof(int64_t)},
+                      {"max_value_size", 16},
+                      {"value_dtype", "float32"},
+                      {"num_partitions", 2},
+                      {"max_batch_size", 64}},
+                     32);
 }

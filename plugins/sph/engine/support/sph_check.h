@@ -53,7 +53,15 @@
 //
 // NOTE: SPH_CHECK throws, so it must not be used in a destructor. Teardown
 // paths (ShardedVmmBuffer::unmap_shard, ResizeableBuffer::~ResizeableBuffer,
-// SphDeduper::~SphDeduper) deliberately call the raw driver/runtime APIs.
+// SphDeduper::~SphDeduper, ~ShardedPerfectHashMap) use SPH_TEARDOWN instead:
+//
+//   SPH_TEARDOWN(cudaFree(p), "freeing ", what);   // never throws
+//
+// It accepts the same cudaError_t / CUresult statuses, returns whether the call
+// succeeded, reports a warning through sph::set_warning_handler() on failure
+// (nothing is printed unless the embedder installs one), and stays silent when
+// the CUDA runtime is already unloading at process exit (nothing left to
+// release). As with SPH_CHECK, the message parts are only formatted on failure.
 // ============================================================================
 
 namespace sph {
@@ -82,10 +90,10 @@ std::string sph_join(const Args&... args) {
     return os.str();
 }
 
-inline std::string sph_compose(const char* expr, const char* status_text,
+inline std::string sph_compose(const char* macro, const char* expr, const char* status_text,
                                const std::string& message, const char* file, int line) {
     std::ostringstream os;
-    os << "SPH_CHECK(" << expr << ") failed";
+    os << macro << "(" << expr << ") failed";
     if (status_text && *status_text) os << ": " << status_text;
     if (!message.empty())            os << ": " << message;
     os << " [" << file << ":" << line << "]";
@@ -97,13 +105,13 @@ inline std::string sph_compose(const char* expr, const char* status_text,
 // the status text, failed expression, and source location.
 [[noreturn]] inline void sph_fail(bool, const char* file, int line, const char* expr,
                                   const std::string& message) {
-    std::string what = sph_compose(expr, nullptr, message, file, line);
+    std::string what = sph_compose("SPH_CHECK", expr, nullptr, message, file, line);
     throw SphInvalidArgument(std::move(what), file, line, expr);
 }
 
 [[noreturn]] inline void sph_fail(cudaError_t code, const char* file, int line, const char* expr,
                                   const std::string& message) {
-    std::string what = sph_compose(expr, cudaGetErrorString(code), message, file, line);
+    std::string what = sph_compose("SPH_CHECK", expr, cudaGetErrorString(code), message, file, line);
     if (code == cudaErrorMemoryAllocation) {
         throw SphOutOfMemory(std::move(what), file, line, expr);
     }
@@ -114,7 +122,7 @@ inline std::string sph_compose(const char* expr, const char* status_text,
                                   const std::string& message) {
     const char* status_text = nullptr;
     cuGetErrorString(code, &status_text);
-    std::string what = sph_compose(expr, status_text ? status_text : "(unknown driver error)",
+    std::string what = sph_compose("SPH_CHECK", expr, status_text ? status_text : "(unknown driver error)",
                                    message, file, line);
     if (code == CUDA_ERROR_OUT_OF_MEMORY) {
         throw SphOutOfMemory(std::move(what), file, line, expr);
@@ -132,8 +140,43 @@ inline std::string sph_compose(const char* expr, const char* status_text,
            << " max_bucket_reached=" << r.failures.max_bucket_reached
            << " bucket_offset_overflow=" << r.failures.bucket_offset_overflow
            << " page_index_overflow=" << r.failures.page_index_overflow << ")";
-    std::string what = sph_compose(expr, status.str().c_str(), message, file, line);
+    std::string what = sph_compose("SPH_CHECK", expr, status.str().c_str(), message, file, line);
     throw SphInsertFailed(std::move(what), file, line, expr, r);
+}
+
+// ---- SPH_TEARDOWN support ---------------------------------------------------
+// "Runtime unloading" statuses: returned when a static/global destructor runs
+// after the CUDA runtime or driver has shut down. Nothing can be released at
+// that point, so teardown treats them as a silent no-op (the runtime's sticky
+// error is cleared so later probes are unaffected).
+inline bool sph_runtime_unloading(cudaError_t v) {
+    if (v != cudaErrorCudartUnloading) return false;
+    (void)cudaGetLastError();
+    return true;
+}
+inline bool sph_runtime_unloading(CUresult v) { return v == CUDA_ERROR_DEINITIALIZED; }
+
+inline const char* sph_status_text(cudaError_t v) { return cudaGetErrorString(v); }
+inline const char* sph_status_text(CUresult v) {
+    const char* text = nullptr;
+    (void)cuGetErrorString(v, &text);
+    return text ? text : "(unknown driver error)";
+}
+
+// message_fn is only invoked on failure, so the success path costs one compare.
+template <typename Status, typename MessageFn>
+bool sph_teardown(Status status, const char* file, int line, const char* expr,
+                  MessageFn&& message_fn) noexcept {
+    if (sph_is_success(status)) return true;
+    if (sph_runtime_unloading(status)) return false;
+    try {
+        const std::string what =
+            sph_compose("SPH_TEARDOWN", expr, sph_status_text(status), message_fn(), file, line);
+        ::sph::report_warning(what.c_str());
+    } catch (...) {
+        // Message formatting failed (allocation); the status is still dropped on purpose.
+    }
+    return false;
 }
 
 }  // namespace detail
@@ -149,4 +192,12 @@ inline std::string sph_compose(const char* expr, const char* status_text,
                                          ::sph::detail::sph_join(__VA_ARGS__));  \
         }                                                                             \
     } while (false)
+#endif
+
+// Non-throwing counterpart of SPH_CHECK for destructors and other teardown
+// paths. Evaluates to true when the call succeeded.
+#ifndef SPH_TEARDOWN
+#define SPH_TEARDOWN(_expr_, ...)                                                     \
+    ::sph::detail::sph_teardown((_expr_), __FILE__, __LINE__, #_expr_,                \
+                                [&] { return ::sph::detail::sph_join(__VA_ARGS__); })
 #endif

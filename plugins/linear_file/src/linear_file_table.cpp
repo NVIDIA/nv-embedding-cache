@@ -39,6 +39,7 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <shared_mutex>
 #include <vector>
 
@@ -274,8 +275,24 @@ void LinearFileTable::clear(context_ptr_t&) {
   NVE_LOG_INFO_("Clearing a linear file table has no effect");
 }
 
-int64_t LinearFileTable::size(context_ptr_t&, bool) const {
+int64_t LinearFileTable::size(context_ptr_t&) const {
   return config_.num_rows;
+}
+
+int64_t LinearFileTable::get_keys(context_ptr_t&, const int64_t capacity, void* const keys) const {
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  const int64_t n = std::min(capacity, config_.num_rows);
+  switch (config_.key_size) {
+    case sizeof(int64_t):
+      std::iota(static_cast<int64_t*>(keys), static_cast<int64_t*>(keys) + n, int64_t{});
+      break;
+    case sizeof(int32_t):
+      std::iota(static_cast<int32_t*>(keys), static_cast<int32_t*>(keys) + n, int32_t{});
+      break;
+    default:
+      NVE_THROW_("LinearFileTable: unsupported key_size ", config_.key_size);
+  }
+  return n;
 }
 
 void LinearFileTable::erase(context_ptr_t&, int64_t, buffer_ptr<const void>) {

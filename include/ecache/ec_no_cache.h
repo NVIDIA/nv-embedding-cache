@@ -346,9 +346,9 @@ public:
         return ret;
     }
 
-    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* /*out_keys*/, size_t& num_out_keys) const override
+    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* /*out_keys*/, size_t /*capacity*/, size_t& num_keys, cudaStream_t /*stream*/) const override
     {
-        num_out_keys = 0;
+        num_keys = 0;
         return ECERROR_SUCCESS;
     }
 

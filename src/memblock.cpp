@@ -16,6 +16,7 @@
  */
 
 #include "include/memblock.hpp"
+#include "include/bit_ops.hpp"
 #include "include/common.hpp"
 #include "include/cuda_support.hpp"
 #include "include/default_allocator.hpp"
@@ -24,8 +25,16 @@
 
 namespace nve {
 
+size_t memblock_size_in_bytes(size_t row_size, size_t num_embeddings, nve::DataType_t dtype) {
+  // row_size counts values; rowwise-quant rows also carry trailing metadata.
+  NVE_CHECK_(row_size <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+             "MemBlock row size computation overflows result type");
+  const auto row_bytes = static_cast<size_t>(row_size_in_bytes(dtype, static_cast<int64_t>(row_size)));
+  return checked_mul(row_bytes, num_embeddings, "MemBlock size");
+}
+
 LinearMemBlock::LinearMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, int device_id)
-  : LinearMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype)), device_id) {}
+  : LinearMemBlock(memblock_size_in_bytes(row_size, num_embeddings, dtype), device_id) {}
 
 LinearMemBlock::LinearMemBlock(size_t size_to_alloc, int device_id)
   : MemBlock(MemBlockType::LINEAR),
@@ -55,7 +64,7 @@ void* LinearMemBlock::get_ptr() const {
 
 DistMemBlock::DistMemBlock(std::shared_ptr<DistributedEnv> env, size_t row_size, size_t num_embeddings, nve::DataType_t dtype) 
   : MemBlock(MemBlockType::MPI) {
-  auto size_to_alloc = row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype));
+  auto size_to_alloc = memblock_size_in_bytes(row_size, num_embeddings, dtype);
   dist_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, env, nve::BufferLocation::ALLOCATION_GPU_MEM);
   NVE_CHECK_(dist_buffer_->ptr() != nullptr);
 }
@@ -70,7 +79,7 @@ size_t DistMemBlock::get_size_in_bytes() const {
 
 DistHostMemBlock::DistHostMemBlock(std::shared_ptr<DistributedEnv> env, size_t row_size, size_t num_embeddings, nve::DataType_t dtype) 
   : MemBlock(MemBlockType::MPI) {
-  auto size_to_alloc = row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype));
+  auto size_to_alloc = memblock_size_in_bytes(row_size, num_embeddings, dtype);
   dist_buffer_ = std::make_shared<nve::CUDADistributedBuffer>(size_to_alloc, env, nve::BufferLocation::ALLOCATION_SYS_MEM);
   NVE_CHECK_(dist_buffer_->ptr() != nullptr);
 }
@@ -91,7 +100,7 @@ void* UserMemBlock::get_ptr() const {
 }
 
 HostMemBlock::HostMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype)
-  : HostMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype))) {}
+  : HostMemBlock(memblock_size_in_bytes(row_size, num_embeddings, dtype)) {}
 
 HostMemBlock::HostMemBlock(size_t size_to_alloc)
   : MemBlock(MemBlockType::HOST), ptr_(nullptr), size_(size_to_alloc), allocator_(GetDefaultAllocator()) {
@@ -109,7 +118,7 @@ void* HostMemBlock::get_ptr() const {
 }
 
 ManagedMemBlock::ManagedMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, const std::vector<int>& gpu_ids) 
-  : ManagedMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype)), gpu_ids) {}
+  : ManagedMemBlock(memblock_size_in_bytes(row_size, num_embeddings, dtype), gpu_ids) {}
 
 ManagedMemBlock::ManagedMemBlock(size_t size_to_alloc, const std::vector<int>& gpu_ids)
   : MemBlock(MemBlockType::MANAGED), size_(size_to_alloc) {

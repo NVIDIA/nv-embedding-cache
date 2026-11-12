@@ -469,10 +469,11 @@ nve_context_wait(ctx);
 
 ## Insert Heuristics
 
-Insert heuristics control when the layer auto-populates caches during lookup. When the `insert_heuristic` field is `NULL` (the default), a `DefaultInsertHeuristic` is created automatically with a threshold of 0.75 for each table.
+Insert heuristics control when the layer auto-populates caches during lookup. When the `insert_heuristic` field is `NULL` (the default), a `DefaultInsertHeuristic` is created automatically with a threshold of 0.75 for each table. A hierarchical layer never auto-inserts into its last table, whatever the heuristic.
 
 ```c
-// Explicitly create a default heuristic with custom thresholds
+// Explicitly create a default heuristic with custom thresholds, one per table.
+// A negative threshold disables auto-inserts into that table.
 float thresholds[] = {0.5f, 0.5f};
 nve_heuristic_t h = NULL;
 nve_heuristic_create_default(&h, thresholds, 2);

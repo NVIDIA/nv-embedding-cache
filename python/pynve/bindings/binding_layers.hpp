@@ -53,32 +53,33 @@ class NVEmbedBinding
 {
 public:
     // Accessors used by torch custom ops for shape inference and output allocation.
-    int64_t get_embedding_dim() const {
-        switch (data_type_) {
-            case nve::DataType_t::Float32:
-                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(float));
-            case nve::DataType_t::Float16:
-                return static_cast<int64_t>(row_size_in_bytes_ / sizeof(__half));
-            default:
-                NVE_CHECK_(false, "Invalid data type");
-                return 0;
-        }
-    }
+    int64_t get_embedding_dim() const { return embedding_dim_; }
 
+    // Storage dtype (may be rowwise-quantized).
     nve::DataType_t get_data_type() const { return data_type_; }
+
+    // Dtype of lookup outputs: the storage dtype, or the dequantized float type for quantized storage.
+    nve::DataType_t get_output_data_type() const { return output_dtype_; }
 
     void lookup(size_t num_keys, uintptr_t keys, uintptr_t output, uint64_t stream_)
     {
         float hitrates[3] = {0};
         auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
-        
+
+        // Plain lookup returns raw stored rows; quantized rows need a dequantizing Concatenate.
+        EmbeddingLayerBase::PoolingParams dequant_params;
+        dequant_params.pooling_type = PoolingType_t::Concatenate;
+        dequant_params.fixed_hotness = 1;
+        dequant_params.output_type = output_dtype_;
+        const bool quantized = is_quant_rowwise(data_type_);
+
         emb_layer_ptr_->lookup(ctx,
                             num_keys,
                             reinterpret_cast<const void*>(keys),
                             reinterpret_cast<void*>(output),
-                            row_size_in_bytes_,
+                            output_row_bytes_,
                             nullptr, /* hitmask */
-                            nullptr, /* pool_params*/
+                            quantized ? &dequant_params : nullptr, /* pool_params*/
                             hitrates);
 
         log_hit_rates(hitrates, sizeof(hitrates) / sizeof(hitrates[0]));
@@ -98,13 +99,13 @@ public:
         pool_params.num_csr_offsets = num_offsets;
         pool_params.weights = reinterpret_cast<const void*>(weights);
         pool_params.weight_type = DataType_t(weight_data_type);
-        pool_params.output_type = DataType_t(data_type_);
+        pool_params.output_type = output_dtype_;
 
         emb_layer_ptr_->lookup(ctx,
                             num_keys,
                             reinterpret_cast<const void*>(keys),
                             reinterpret_cast<void*>(output),
-                            row_size_in_bytes_,
+                            output_row_bytes_,
                             nullptr, /* hitmask */
                             &pool_params, /* pool_params*/
                             hitrates);
@@ -115,6 +116,7 @@ public:
     size_t concat_backprop(size_t num_keys, uintptr_t keys, uintptr_t grads,
                            uint64_t unique_keys, uintptr_t output_grads, uint64_t stream_)
     {
+        check_not_quantized("concat_backprop");
         NVE_CHECK_(device_id_ >= 0,
                    "concat_backprop is not supported on a host-only layer (device_id < 0). "
                    "Gradient computation requires a CUDA device; HostLayer is inference-only.");
@@ -177,6 +179,7 @@ public:
                             uint32_t pooling_type, uint32_t num_offsets, uintptr_t offsets,
                             uint64_t /*data_type*/, uintptr_t weights, uint64_t stream_)
     {
+        check_not_quantized("pooling_backprop");
         NVE_CHECK_(device_id_ >= 0,
                    "pooling_backprop is not supported on a host-only layer (device_id < 0). "
                    "Gradient computation requires a CUDA device; HostLayer is inference-only.");
@@ -234,8 +237,9 @@ public:
         }
     }
 
-    void accumulate(size_t num_keys, uintptr_t keys, uintptr_t updates, uint64_t stream_)
+    void accumulate(size_t num_keys, uintptr_t keys, uintptr_t updates, int64_t table_id, uint64_t stream_)
     {
+        check_not_quantized("accumulate");
         auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
         emb_layer_ptr_->accumulate(ctx, num_keys, 
                             reinterpret_cast<const void*>(keys),
@@ -243,10 +247,10 @@ public:
                             row_size_in_bytes_,
                             reinterpret_cast<const void*>(updates),
                             data_type_,
-                            -1 /* affect all tables */);
+                            table_id);
     }
 
-    void update(size_t num_keys, uintptr_t keys, uintptr_t updates, uint64_t stream_)
+    void update(size_t num_keys, uintptr_t keys, uintptr_t updates, int64_t table_id, uint64_t stream_)
     {
         auto ctx = get_exec_context(reinterpret_cast<cudaStream_t>(stream_));
         emb_layer_ptr_->update(ctx, num_keys, 
@@ -254,7 +258,7 @@ public:
                             row_size_in_bytes_,
                             row_size_in_bytes_,
                             reinterpret_cast<const void*>(updates),
-                            -1 /* affect all tables */);
+                            table_id);
     }
 
     void insert(size_t num_keys, uintptr_t keys, uintptr_t values, int64_t table_id, uint64_t stream_)
@@ -287,12 +291,18 @@ public:
                         device_id_(device_id),
                         data_type_(dtype)
     {
+        embedding_dim_ = static_cast<int64_t>(row_size);
+        row_size_in_bytes_ = static_cast<uint64_t>(nve::row_size_in_bytes(dtype, embedding_dim_));
+        output_dtype_ = is_quant_rowwise(dtype) ? quant_rowwise_output_dtype(dtype) : dtype;
+        NVE_CHECK_(output_dtype_ == nve::DataType_t::Float32 || output_dtype_ == nve::DataType_t::Float16,
+                   "Unsupported layer data type ", dtype,
+                   ": expected float32, float16 or a rowwise-quantized type");
+        output_row_bytes_ = static_cast<uint64_t>(nve::row_size_in_bytes(output_dtype_, embedding_dim_));
+
         // allocate two entries - one for number of unique runs, and one for
         // the number of chunks after splitting the runs to avoid exceeding
         // max run size limit
-        auto element_size = (dtype == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
-        row_size_in_bytes_ = (row_size * element_size);
-        
+
         ScopedDevice scope_device(device_id_);
         if (device_id_ >= 0) {
             // Backprop machinery and CUDA streams only make sense when a real GPU is in play.
@@ -327,7 +337,12 @@ protected:
         std::lock_guard lock(stream_ctx_map_mutex_);
         for (auto& stream_ctx_pair : stream_ctx_map_)
         {
-            stream_ctx_pair.second->wait();    
+            try {
+                stream_ctx_pair.second->wait();
+            } catch (const std::exception& e) {
+                // Runs in destructors: a failed background auto-insert must not terminate the process
+                NVE_LOG_ERROR_("Pending work failed during layer teardown: ", e.what());
+            }
             stream_ctx_pair.second.reset();
         }
         stream_ctx_map_.clear();
@@ -349,7 +364,49 @@ protected:
 
         return stream_ctx_map_[stream];
     }
-    
+
+    // Ensure mem_block can hold num_embeddings rows of row_size elements.
+    static void check_mem_block(const std::shared_ptr<MemBlock>& mem_block, size_t row_size,
+                                size_t num_embeddings, nve::DataType_t dtype)
+    {
+        NVE_CHECK_(mem_block != nullptr, "mem_block must not be null");
+        const size_t required = nve::memblock_size_in_bytes(row_size, num_embeddings, dtype);
+        NVE_CHECK_(mem_block->get_size_in_bytes() >= required,
+                   "mem_block is too small: ", mem_block->get_size_in_bytes(),
+                   " bytes, layer requires ", required);
+    }
+
+    // Tables only agree on row bytes; equal widths can still hold differently encoded rows.
+    static void check_table_value_type(const table_ptr_t& table, nve::DataType_t dtype)
+    {
+        const DataType_t table_dtype = table->get_value_type();
+        // Quantized rows are only safe in a table that declares its encoding.
+        NVE_CHECK_(table_dtype != DataType_t::Unknown || !is_quant_rowwise(dtype),
+                   "Quantized layer data type ", dtype, " requires the table to declare its "
+                   "value type (e.g. set 'value_dtype' in the table config)");
+        NVE_CHECK_(table_dtype == DataType_t::Unknown || table_dtype == dtype,
+                   "Table value type ", table_dtype, " doesn't match layer data type ", dtype);
+    }
+
+    // Quantized tables are inference-only: gradients and accumulate assume float elements.
+    void check_not_quantized(const char* op) const
+    {
+        NVE_CHECK_(!is_quant_rowwise(data_type_), op, " is not supported for rowwise-quantized layers (",
+                   data_type_, "); quantized layers are inference-only.");
+    }
+
+    // Serialized geometry of the stored table: quantized rows are written as raw bytes.
+    TensorWrapper make_table_wrapper(void* data, uint64_t num_rows) const
+    {
+        TensorWrapper t;
+        t.data = data;
+        t.row = num_rows;
+        const bool quantized = is_quant_rowwise(data_type_);
+        t.col = quantized ? row_size_in_bytes_ : static_cast<uint64_t>(embedding_dim_);
+        t.element_size_in_bytes = quantized ? 1 : static_cast<uint64_t>(dtype_size(data_type_));
+        return t;
+    }
+
 private:
     void log_hit_rates(const float* hit_rates, size_t n)
     {
@@ -374,7 +431,10 @@ protected:
     static constexpr int32_t MAX_RUN_SIZE = 1024;
 
     std::shared_ptr<nve::EmbeddingLayerBase> emb_layer_ptr_;
-    uint64_t row_size_in_bytes_ = 0;
+    int64_t embedding_dim_ = 0;          // values per row (logical width)
+    uint64_t row_size_in_bytes_ = 0;     // stored row bytes, including quant metadata
+    nve::DataType_t output_dtype_ = nve::DataType_t::Unknown;
+    uint64_t output_row_bytes_ = 0;
     std::shared_ptr<GradientCalculator<IndexT, MAX_RUN_SIZE>> backprop_runner_;
     allocator_ptr_t allocator_;
     IndexT* h_num_runs_out_ = nullptr;
@@ -409,6 +469,9 @@ public:
                           use_private_stream_(use_private_stream),
                           ps_table_(nullptr)
     {
+        if (remote) {
+            this->check_table_value_type(remote, dtype);
+        }
         ScopedDevice scope_device(this->device_id_);
         std::vector<std::shared_ptr<nve::Table>> tables;
 
@@ -434,7 +497,7 @@ public:
 
         if (host_cache_size > 0) {
             table_ptr_t nvhm_table = create_nvhm_table(host_cache_size, this->row_size_in_bytes_, dtype);
-            tables.push_back(nvhm_table);
+            tables.push_back(std::move(nvhm_table));
             if (remote) {
                 // Host cache is L2 with remote being L3, set target hitrate to be proportional by size.
                 // num_rows == 0 means the remote is unbounded, so the host cache can grow indefinitely.
@@ -453,7 +516,8 @@ public:
             // we are using a custom table wrapper to be able to do late binding of the parameter server
             ps_table_ = std::make_shared<PyNVETable>(remote);
             tables.push_back(ps_table_);
-            insert_heuristic_thresholds.push_back(0.f); // remote PS is typically updated externally instead of by the layer
+            // Remote PS is typically updated externally instead of by the layer, so lookups never insert into it
+            insert_heuristic_thresholds.push_back(DefaultInsertHeuristic::NEVER_INSERT_THRESHOLD);
         }
         typename layer_type::Config layer_cfg = {"ps_layer", std::make_shared<DefaultInsertHeuristic>(insert_heuristic_thresholds)};
         layer_cfg.default_embedding = config.default_embedding;
@@ -527,8 +591,8 @@ private:
                         use_private_stream_(use_private_stream),
                         mem_block_(std::move(mem_block))
     {
+        this->check_mem_block(mem_block_, row_size, num_embeddings, dtype);
         ScopedDevice scope_device(this->device_id_);
-        auto element_size = (dtype == nve::DataType_t::Float32) ? sizeof(float) : sizeof(__half);
 
         nve::GPUTableConfig cfg;
         cfg.device_id = this->device_id_;
@@ -568,10 +632,7 @@ private:
         layer_cfg.default_row_index = config.default_row_index;
         this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, gpu_table, nullptr /* using default allocator for device 0*/);
 
-        uvm_table_.col = row_size;
-        uvm_table_.row = num_embeddings;
-        uvm_table_.data = cfg.uvm_table;
-        uvm_table_.element_size_in_bytes = element_size;
+        uvm_table_ = this->make_table_wrapper(cfg.uvm_table, num_embeddings);
     }
 
     // TODO: this is called for hierarchical, need to change
@@ -582,12 +643,15 @@ private:
         int64_t* shape  = new int64_t[2];
         shape[0] = uvm_table_.row;
         shape[1] = uvm_table_.col;
-        unsigned char value_size = dtype == nve::DataType_t::Float32 ? 32 : 16;
+        // Quantized rows are exposed as raw bytes: uint8 [rows, stored_row_bytes].
+        const DLDataType dl_dtype = is_quant_rowwise(dtype)
+            ? DLDataType{kDLUInt, 8, 1}
+            : DLDataType{kDLFloat, static_cast<uint8_t>(dtype == nve::DataType_t::Float32 ? 32 : 16), 1};
         DLManagedTensor* dlm_tensor = new DLManagedTensor();
         dlm_tensor->dl_tensor.data = uvm_table_.data;
         dlm_tensor->dl_tensor.device = {kDLCUDA, this->device_id_};
         dlm_tensor->dl_tensor.ndim = 2;
-        dlm_tensor->dl_tensor.dtype = {kDLFloat, value_size, 1};
+        dlm_tensor->dl_tensor.dtype = dl_dtype;
         dlm_tensor->dl_tensor.shape = shape;
         dlm_tensor->dl_tensor.strides = nullptr;
         dlm_tensor->dl_tensor.byte_offset = 0;
@@ -656,12 +720,10 @@ private:
                 num_embeddings_(num_embeddings),
                 mem_block_(std::move(mem_block))
     {
+        this->check_mem_block(mem_block_, row_size, num_embeddings, dtype);
         ScopedDevice scope_device(this->device_id_);
 
-        gpu_table_.data = mem_block_->get_ptr();
-        gpu_table_.row = num_embeddings;
-        gpu_table_.col = row_size;
-        gpu_table_.element_size_in_bytes = static_cast<uint64_t>(dtype_size(dtype));
+        gpu_table_ = this->make_table_wrapper(mem_block_->get_ptr(), num_embeddings);
 
         nve::GPUEmbeddingLayerConfig layer_cfg;
         layer_cfg.device_id = this->device_id_;
@@ -726,12 +788,10 @@ public:
                   num_embeddings_(num_embeddings),
                   mem_block_(std::move(mem_block))
     {
+        this->check_mem_block(mem_block_, row_size, num_embeddings, dtype);
         ScopedDevice scope_device(this->device_id_);
 
-        host_table_.data = mem_block_->get_ptr();
-        host_table_.row = num_embeddings;
-        host_table_.col = row_size;
-        host_table_.element_size_in_bytes = static_cast<uint64_t>(dtype_size(dtype));
+        host_table_ = this->make_table_wrapper(mem_block_->get_ptr(), num_embeddings);
 
         LinearHostTableConfig cfg;
         cfg.value_dtype = dtype;
@@ -739,24 +799,41 @@ public:
         cfg.key_size = sizeof(IndexT);
         cfg.num_rows = static_cast<int64_t>(num_embeddings);
         cfg.emb_table = host_table_.data;
-        auto linear_host_tab = std::make_shared<nve::LinearHostTable<IndexT>>(cfg);
+        create_layer(std::make_shared<nve::LinearHostTable<IndexT>>(cfg), config);
+    }
 
-        typename layer_type::Config layer_cfg;
-        layer_cfg.layer_name = "host_layer";
-        layer_cfg.default_embedding = config.default_embedding;
-        layer_cfg.disable_threadpool = config.disable_threadpool;
-        this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, linear_host_tab,
-                                                            /*allocator=*/nullptr);
+    // Layer over an existing host table (e.g. a plugin hash table holding non-linear keys).
+    HostEmbedding(size_t row_size,
+                  nve::DataType_t dtype,
+                  table_ptr_t table,
+                  int device_id,
+                  EmbedLayerConfig config) :
+                  NVEmbedBinding<IndexT>(device_id, row_size, dtype, config)
+    {
+        NVE_CHECK_(table != nullptr, "table must not be null");
+        this->check_table_value_type(table, dtype);
+        NVE_CHECK_(table->get_key_size() == static_cast<int64_t>(sizeof(IndexT)),
+                   "Table key size ", table->get_key_size(), " doesn't match layer key size ",
+                   sizeof(IndexT));
+        // HostEmbeddingLayer gathers whole table rows, so the sizes must match exactly.
+        NVE_CHECK_(table->get_max_row_size() == static_cast<int64_t>(this->row_size_in_bytes_),
+                   "Table max row size ", table->get_max_row_size(),
+                   " doesn't match layer row size ", this->row_size_in_bytes_);
+        ScopedDevice scope_device(this->device_id_);
+        create_layer(std::move(table), config);
+        table_backed_ = true;
     }
 
     void write_tensor_to_stream(nve::StreamWrapperBase& stream, uint64_t name)
     {
+        check_linear_storage("write_tensor_to_stream");
         nve::TensorFileFormat writer;
         writer.write_tensor_to_stream(stream, name, host_table_);
     }
 
     void load_tensor_from_stream(nve::StreamWrapperBase& stream, uint64_t name)
     {
+        check_linear_storage("load_tensor_from_stream");
         nve::TensorFileFormat reader;
         reader.load_tensor_from_stream(stream, name, host_table_);
     }
@@ -768,9 +845,26 @@ public:
     }
 
 private:
+    void create_layer(table_ptr_t table, const EmbedLayerConfig& config)
+    {
+        typename layer_type::Config layer_cfg;
+        layer_cfg.layer_name = "host_layer";
+        layer_cfg.default_embedding = config.default_embedding;
+        layer_cfg.disable_threadpool = config.disable_threadpool;
+        this->emb_layer_ptr_ = std::make_shared<layer_type>(layer_cfg, std::move(table),
+                                                            /*allocator=*/nullptr);
+    }
+
+    // Table-backed layers have no dense tensor; their data is saved through the table.
+    void check_linear_storage(const char* op) const
+    {
+        NVE_CHECK_(!table_backed_, op, " is not supported for a table-backed HostLayer");
+    }
+
     TensorWrapper host_table_;
     uint64_t num_embeddings_{0};
     std::shared_ptr<MemBlock> mem_block_;
+    bool table_backed_{false};
 };
 
 }  // namespace nve

@@ -26,6 +26,7 @@
  *                 {"task_status": N}      find's execute_n_wg tasks return N.
  *                 {"value_dtype": N}      raw dtype ID the table reports.
  *                 {"report_key_size": N}  key size the table reports.
+ *                 {"omit_key_ops": 1}     leaves the mandatory size/get_keys ops NULL.
  */
 
 #include <plugin/nve_external_plugin.h>
@@ -214,6 +215,26 @@ static nve_status_t fault_clear(void* self, nve_ext_context_t ctx) {
   return fault_injected((fault_table_t*)self);
 }
 
+/* Stores no data: size and get_keys report no keys. */
+static nve_status_t fault_size(void* self, nve_ext_context_t ctx, int64_t* out_size) {
+  (void)ctx;
+  fault_table_t* t = (fault_table_t*)self;
+  if (t->operation_status != NVE_SUCCESS) return fault_injected(t);
+  *out_size = 0;
+  return NVE_SUCCESS;
+}
+
+static nve_status_t fault_get_keys(void* self, nve_ext_context_t ctx, int64_t capacity, void* keys,
+                                   int64_t* out_num_keys) {
+  (void)ctx;
+  (void)capacity;
+  (void)keys;
+  fault_table_t* t = (fault_table_t*)self;
+  if (t->operation_status != NVE_SUCCESS) return fault_injected(t);
+  *out_num_keys = 0;
+  return NVE_SUCCESS;
+}
+
 static const nve_ext_table_ops_t kOps = {
     sizeof(nve_ext_table_ops_t),
     fault_destroy,
@@ -233,7 +254,12 @@ static const nve_ext_table_ops_t kOps = {
     fault_erase,
     fault_clear,
     fault_last_error,
+    fault_size,
+    fault_get_keys,
 };
+
+/* kOps without the mandatory size/get_keys ops; filled by produce for {"omit_key_ops": 1}. */
+static nve_ext_table_ops_t g_ops_without_key_ops;
 
 /* ============================================================================
  * Factory
@@ -264,6 +290,12 @@ static nve_status_t fault_produce(void* self, int64_t table_id, const char* cfg,
 
   out->self = t;
   out->ops = &kOps;
+  if (json_get_int(cfg, "omit_key_ops", 0) != 0) {
+    g_ops_without_key_ops = kOps;
+    g_ops_without_key_ops.size = NULL;
+    g_ops_without_key_ops.get_keys = NULL;
+    out->ops = &g_ops_without_key_ops;
+  }
   return NVE_SUCCESS; /* ownership transfers only here */
 }
 

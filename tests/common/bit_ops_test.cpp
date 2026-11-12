@@ -21,6 +21,31 @@
 
 namespace nve {
 
+namespace {
+
+template <typename T>
+void test_checked_mul() {
+  constexpr T max{std::numeric_limits<T>::max()};
+  static_assert(std::is_same_v<decltype(checked_mul(T{}, T{}, "test")), T>);
+  EXPECT_EQ(checked_mul(T{6}, T{7}, "test"), T{42});
+  EXPECT_EQ(checked_mul(T{0}, max, "test"), T{0});
+  EXPECT_EQ(checked_mul(max, T{0}, "test"), T{0});
+  EXPECT_EQ(checked_mul(max, T{1}, "test"), max);
+  EXPECT_EQ(checked_mul(static_cast<T>(max / 2), T{2}, "test"), max - 1);
+  EXPECT_THROW(checked_mul(max, T{2}, "test"), Exception);
+  EXPECT_THROW(checked_mul(T{2}, max, "test"), Exception);
+}
+
+}  // namespace
+
+TEST(bit_ops_test, checked_mul) {
+  test_checked_mul<uint8_t>();
+  test_checked_mul<uint16_t>();
+  test_checked_mul<uint32_t>();
+  test_checked_mul<uint64_t>();
+  test_checked_mul<size_t>();
+}
+
 TEST(bit_ops_test, bitmask64_count) {
   EXPECT_EQ(bitmask64::count(bitmask64::empty), 0);
   EXPECT_EQ(bitmask64::count(bitmask64::full), bitmask64::num_bits);

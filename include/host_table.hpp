@@ -343,17 +343,6 @@ class HostTableLike : public Table {
 
   virtual const HostTableConfig& config() const = 0;
 
-  /**
-   * Determine number of entries in the table.
-   *
-   * @param ctx Execution context to use if additional resources are needed to run the command.
-   * @param exact If true [default], then attempts provide an accurate answer. If false, certain
-   * implementations will only return an approximate figure.
-   *
-   * @returns The number of entries in the table.
-   */
-  virtual int64_t size(context_ptr_t& ctx, bool exact = true) const = 0;
-
   int32_t get_device_id() const override final { return -1; }
   int64_t get_max_row_size() const override final { return config().max_value_size; }
   int64_t get_key_size() const override final { return config().key_size; }

@@ -207,7 +207,7 @@ case $1 in
     fi
 
     SLEEP=0
-    while [ "$(redis-cli -p 7000 cluster info|head -n1)" == "cluster_state:ok\r" ] && [ ${SLEEP} != ${MAX_SLEEP} ]; do
+    while [ "$(redis-cli -p 7000 cluster info 2>/dev/null | head -n1 | tr -d '\r')" != "cluster_state:ok" ] && [ ${SLEEP} != ${MAX_SLEEP} ]; do
       ((SLEEP+=1))
       sleep 1
     done

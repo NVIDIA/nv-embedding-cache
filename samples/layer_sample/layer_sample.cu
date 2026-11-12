@@ -259,7 +259,9 @@ int main(int argc, char* argv[]) {
           // Create embedding layer
           layer_type::Config layer_cfg;
           if (insert_target_hitrate > 0.f) {
-            layer_cfg.insert_heuristic = std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>{insert_target_hitrate, insert_target_hitrate, insert_target_hitrate});
+            // The remote is the last table: lookups must not insert into it
+            layer_cfg.insert_heuristic = std::make_shared<nve::DefaultInsertHeuristic>(std::vector<float>{
+              insert_target_hitrate, insert_target_hitrate, nve::DefaultInsertHeuristic::NEVER_INSERT_THRESHOLD});
           } else {
             layer_cfg.insert_heuristic = std::make_shared<nve::NeverInsertHeuristic>();
           }
@@ -330,6 +332,7 @@ int main(int argc, char* argv[]) {
 
           // Create the linear host table
           nve::LinearHostTableConfig table_cfg;
+          table_cfg.key_size = sizeof(IndexT);
           table_cfg.max_threads = std::numeric_limits<int64_t>::max(); // will use all available threads in the thread pool
           table_cfg.max_value_size = row_size;
           table_cfg.num_rows = static_cast<int64_t>(num_rows);

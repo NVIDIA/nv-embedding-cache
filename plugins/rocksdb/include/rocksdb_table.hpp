@@ -57,7 +57,9 @@ class RocksDBTable final : public HostTable<RocksDBTableConfig> {
 
   void clear(context_ptr_t& ctx) override;
 
-  int64_t size(context_ptr_t& ctx, bool exact) const override;
+  int64_t size(context_ptr_t& ctx) const override;
+
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
 
   void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
 
@@ -79,6 +81,9 @@ class RocksDBTable final : public HostTable<RocksDBTableConfig> {
   template <bool WithValues, bool WithValueSizes>
   int64_t find_(int64_t n, const char* keys, bitmask64_t* hit_mask,
                 int64_t value_stride, char* values, int64_t* value_sizes) const;
+
+  // Hands the buffered WAL records to the OS. Called at the end of every write call.
+  void flush_wal_();
 
  private:
   rdb_ctx_ptr_t rdb_ctx_;

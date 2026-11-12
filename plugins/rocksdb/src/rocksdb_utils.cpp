@@ -55,6 +55,8 @@ RocksDBContext::RocksDBContext(const std::string& path, const bool read_only, co
   // Enumerate existing column families.
   rocksdb::Options opts;
   opts.create_if_missing = true;
+  // WAL records collect in a process buffer; RocksDBTable::flush_wal_() hands them to the OS once per
+  // write call instead of once per batch.
   opts.manual_wal_flush = true;
   NVE_CHECK_(num_threads <= 4096);
   opts.IncreaseParallelism(static_cast<int>(num_threads));

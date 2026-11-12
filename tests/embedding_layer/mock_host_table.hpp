@@ -40,7 +40,14 @@ class MockHostTable final : public HostTable<HostTableConfig> {
 
   ~MockHostTable() override = default;
 
-  int64_t size(context_ptr_t&, bool) const override { return static_cast<int64_t>(data_.size()) * config_.max_value_size; }
+  int64_t size(context_ptr_t&) const override { return static_cast<int64_t>(data_.size()); }
+
+  int64_t get_keys(context_ptr_t&, int64_t capacity, void* keys) const override {
+    auto* out = static_cast<IndexT*>(keys);
+    int64_t n = 0;
+    for (auto it = data_.begin(); it != data_.end() && n < capacity; ++it) out[n++] = it->first;
+    return n;
+  }
 
   void clear(context_ptr_t&) override { data_.clear(); }
 

@@ -23,6 +23,8 @@ target_link_libraries(sph_engine_tests PUBLIC
 )
 # sph is a -rdc static lib; the consuming executable does the device link.
 set_target_properties(sph_engine_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+# Test-only access to the private check macros (SPH_CHECK / SPH_TEARDOWN).
+target_include_directories(sph_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../engine/support)
 
 add_executable(sph_plugin_tests sph_plugin_tests.cpp)
 target_link_libraries(sph_plugin_tests PUBLIC
@@ -31,6 +33,8 @@ target_link_libraries(sph_plugin_tests PUBLIC
   nve-common
   CUDA::cudart
 )
+# For the shared test-only CUDA RAII handles (cuda_ptr.hpp).
+target_include_directories(sph_plugin_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 add_executable(sph_plugin_loader_tests sph_plugin_loader_tests.cpp)
 target_link_libraries(sph_plugin_loader_tests PUBLIC
@@ -40,4 +44,6 @@ target_link_libraries(sph_plugin_loader_tests PUBLIC
 )
 target_compile_definitions(sph_plugin_loader_tests PRIVATE
   NVE_SPH_PLUGIN_PATH="$<TARGET_FILE:nve-plugin-sph>")
+# For the shared test-only owning handles (cuda_ptr.hpp).
+target_include_directories(sph_plugin_loader_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 add_dependencies(sph_plugin_loader_tests nve-plugin-sph)

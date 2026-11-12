@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "include/bit_ops.hpp"
 #include "include/buffer_wrapper.hpp"
 #include "include/host_table.hpp"
 #include "include/plugin/plugin_loader.hpp"
@@ -77,6 +78,7 @@ void insert_keys_from_tensor_file(table_ptr_t table,
 {
   NVE_CHECK_(table != nullptr, "insert_keys_from_tensor_file: table is null");
   NVE_CHECK_(ctx != nullptr, "insert_keys_from_tensor_file: ctx is null");
+  NVE_CHECK_(batch_size > 0, "insert_keys_from_tensor_file: batch_size must be positive");
 
   using KeyType = int64_t;
 
@@ -85,7 +87,7 @@ void insert_keys_from_tensor_file(table_ptr_t table,
   NVE_CHECK_(keys_num_rows == values_num_rows,
          "insert_keys_from_tensor_file: keys/values row count mismatch");
 
-  std::vector<int8_t> value_buffer(row_bytes * batch_size);
+  std::vector<int8_t> value_buffer(checked_mul(row_bytes, batch_size, "insert_keys_from_tensor_file buffer size"));
   std::vector<KeyType> keys(batch_size);
 
   auto submit = [&](uint64_t n) {
@@ -122,7 +124,8 @@ void insert_keys_from_filepath(table_ptr_t table,
                                const std::string& keys_path,
                                const std::string& values_path,
                                uint64_t row_bytes,
-                               uint64_t batch_size)
+                               uint64_t batch_size,
+                               DataType_t value_dtype)
 {
   using KeyType = int64_t;
 
@@ -144,6 +147,9 @@ void insert_keys_from_filepath(table_ptr_t table,
            "values/keys shape mismatch");
     NVE_CHECK_(values_reader->get_row_size_in_bytes() == row_bytes,
            "values row size mismatch");
+    NVE_CHECK_(values_reader->holds_rows_of(value_dtype),
+               "values element type '", values_reader->get_descr(),
+               "' doesn't match table data type ", value_dtype);
     NVE_CHECK_(keys_reader->get_row_size_in_bytes() == sizeof(KeyType),
            "key size mismatch");
     insert_keys_from_tensor_file(std::move(table), std::move(ctx),

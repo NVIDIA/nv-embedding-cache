@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "cuda_ptr.hpp"
+
 using namespace nve;
 
 TEST(sph_plugin_loader, table_retains_library_lease) {
@@ -60,8 +62,11 @@ TEST(sph_plugin_loader, table_retains_library_lease) {
   unsigned char* device_values = nullptr;
   unsigned char* device_output = nullptr;
   ASSERT_EQ(cudaSuccess, cudaMalloc(&device_keys, keys.size() * sizeof(int64_t)));
+  DevicePtr<int64_t> keys_owner(device_keys);
   ASSERT_EQ(cudaSuccess, cudaMalloc(&device_values, values.size()));
+  DevicePtr<unsigned char> values_owner(device_values);
   ASSERT_EQ(cudaSuccess, cudaMalloc(&device_output, values.size()));
+  DevicePtr<unsigned char> output_owner(device_output);
   ASSERT_EQ(cudaSuccess, cudaMemcpy(device_keys, keys.data(), keys.size() * sizeof(int64_t),
                                     cudaMemcpyHostToDevice));
   ASSERT_EQ(cudaSuccess, cudaMemcpy(device_values, values.data(), values.size(),
@@ -87,7 +92,7 @@ TEST(sph_plugin_loader, table_retains_library_lease) {
                                     cudaMemcpyDeviceToHost));
   EXPECT_EQ(values, output);
 
-  EXPECT_EQ(cudaSuccess, cudaFree(device_keys));
-  EXPECT_EQ(cudaSuccess, cudaFree(device_values));
-  EXPECT_EQ(cudaSuccess, cudaFree(device_output));
+  EXPECT_EQ(cudaSuccess, cudaFree(keys_owner.release()));
+  EXPECT_EQ(cudaSuccess, cudaFree(values_owner.release()));
+  EXPECT_EQ(cudaSuccess, cudaFree(output_owner.release()));
 }

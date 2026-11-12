@@ -477,8 +477,7 @@ class HierLayerTest {
     const bool quant = is_quant_rowwise(value_dtype);
     const bool raw_concat =
         pooling_type == PoolingType_t::Concatenate && out_dtype == value_dtype;
-    const int64_t value_count =
-        quant ? (row_size_ - quant_rowwise_meta_bytes(value_dtype)) : (row_size_ / dtype_size(value_dtype));
+    const int64_t value_count = row_num_elements(value_dtype, row_size_);
     const int64_t out_stride = raw_concat ? row_size_ : value_count * dtype_size(out_dtype);
 
     EmbeddingLayerBase::PoolingParams pp;
@@ -1258,6 +1257,64 @@ TEST(HierachicalDefaultEmbedding, FillsMissesFromConfig) {
   }
 }
 
+// Lookups must not auto-insert into the last table, whatever the heuristic says.
+class AlwaysInsertHeuristic : public InsertHeuristic {
+ public:
+  bool insert_needed(const float /*hitrate*/, const size_t /*table_id*/) override { return true; }
+};
+
+static void CheckLookupDoesNotInsertIntoLastTable(std::shared_ptr<InsertHeuristic> heuristic) {
+  cudaGetLastError();
+  using IndexT = int64_t;
+  constexpr uint64_t row_size = 64;
+  constexpr uint64_t num_keys = 32;
+  constexpr uint64_t num_inserted = 16;
+
+  HostTableConfig host_cfg;
+  host_cfg.value_dtype = DataType_t::Float32;
+  host_cfg.max_value_size = static_cast<int64_t>(row_size);
+  auto host_tab = std::make_shared<MockHostTable<IndexT>>(host_cfg, true /*functional_ref*/);
+
+  typename HierarchicalEmbeddingLayer<IndexT>::Config layer_cfg;
+  layer_cfg.insert_heuristic = std::move(heuristic);
+  std::vector<table_ptr_t> tables{host_tab};
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<IndexT>>(layer_cfg, tables);
+  auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
+  layer->clear(ctx);
+
+  std::vector<IndexT> keys(num_keys);
+  for (uint64_t i = 0; i < num_keys; i++) keys[i] = static_cast<IndexT>(i);
+  std::vector<uint8_t> insert_data(num_inserted * row_size, 0x42);
+  layer->insert(ctx, static_cast<int64_t>(num_inserted), keys.data(),
+                static_cast<int64_t>(row_size), static_cast<int64_t>(row_size),
+                insert_data.data(), 0 /*table_id*/);
+  ctx->wait();
+
+  // Half of the keys miss; an auto-insert would add the batch, with the invalid key for the misses.
+  std::vector<uint8_t> output(num_keys * row_size, 0x00);
+  std::vector<bitmask64_t> hitmask(ceil_div(num_keys, to_uint(bitmask64::num_bits)), 0);
+  for (int i = 0; i < 20; i++) {
+    layer->lookup(ctx, static_cast<int64_t>(num_keys), keys.data(), output.data(),
+                  static_cast<int64_t>(row_size), hitmask.data(),
+                  nullptr /*pool_params*/, nullptr /*hitrates*/);
+    ctx->wait();
+  }
+
+  ctx.reset();
+  layer.reset();  // waits for pending auto-inserts
+
+  context_ptr_t table_ctx;  // MockHostTable::size() ignores the context
+  EXPECT_EQ(static_cast<int64_t>(num_inserted), host_tab->size(table_ctx));
+}
+
+TEST(HierachicalLastTable, DefaultHeuristicDoesNotInsert) {
+  CheckLookupDoesNotInsertIntoLastTable(nullptr);
+}
+
+TEST(HierachicalLastTable, AlwaysInsertHeuristicDoesNotInsert) {
+  CheckLookupDoesNotInsertIntoLastTable(std::make_shared<AlwaysInsertHeuristic>());
+}
+
 // Sanity: when default_embedding is unset, miss outputs are not overwritten.
 TEST(HierachicalDefaultEmbedding, NoDefaultLeavesMissesUntouched) {
   cudaGetLastError();
@@ -1454,8 +1511,7 @@ static void RunHierPooling(bool gpu, TestTableType host, TableType insert_tier, 
                            SparseType_t sparse, int64_t hotness, bool weighted) {
   cudaGetLastError();  // Clear potential errors left by previous tests.
   const bool quant = is_quant_rowwise(value_dtype);
-  const int64_t row_size =
-      quant ? (value_count + quant_rowwise_meta_bytes(value_dtype)) : (value_count * dtype_size(value_dtype));
+  const int64_t row_size = row_size_in_bytes(value_dtype, value_count);
 
   std::vector<TestTableType> tables;
   if (gpu) tables.push_back(TestTableType::Gpu);
@@ -1558,7 +1614,10 @@ class FailingInsertTable final : public HostTable<HostTableConfig> {
   explicit FailingInsertTable(const HostTableConfig& cfg)
       : base_type(0, cfg), inner_(cfg, true /*functional_ref*/) {}
 
-  int64_t size(context_ptr_t& ctx, bool exact) const override { return inner_.size(ctx, exact); }
+  int64_t size(context_ptr_t& ctx) const override { return inner_.size(ctx); }
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override {
+    return inner_.get_keys(ctx, capacity, keys);
+  }
   void clear(context_ptr_t& ctx) override { inner_.clear(ctx); }
   void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override {
     inner_.erase(ctx, n, std::move(keys));
@@ -1601,12 +1660,14 @@ TEST(HierachicalAutoInsert, FailedInsertDoesNotEscapeLookupOrTeardown) {
   tcfg.value_dtype = DataType_t::Float32;
   tcfg.max_value_size = row_size;
   auto table = std::make_shared<FailingInsertTable<int64_t>>(tcfg);
+  // The last table is never auto-inserted into, so the failing table needs a tier behind it.
+  auto last = std::make_shared<MockHostTable<int64_t>>(tcfg, true /*functional_ref*/);
 
   HierarchicalEmbeddingLayer<int64_t>::Config cfg;
   cfg.insert_heuristic = std::make_shared<TestInsertHeuristic>(std::vector<bool>{true});
   cfg.min_insert_freq_host = 0;
   cfg.min_insert_size_host = 1;  // every lookup launches an insert right away
-  auto layer = std::make_shared<HierarchicalEmbeddingLayer<int64_t>>(cfg, std::vector<table_ptr_t>{table});
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<int64_t>>(cfg, std::vector<table_ptr_t>{table, last});
   auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
 
   std::vector<int64_t> keys(num_keys);
@@ -1661,13 +1722,15 @@ TEST(HierachicalHitrate, TierWithNoCandidatesReportsOneNotNaN) {
   tcfg.max_value_size = row_size;
   auto first = std::make_shared<MockHostTable<int64_t>>(tcfg, true /*functional_ref*/);
   auto second = std::make_shared<MockHostTable<int64_t>>(tcfg, true /*functional_ref*/);
+  // The heuristic is not consulted for the last table, so the tier under test needs one behind it.
+  auto third = std::make_shared<MockHostTable<int64_t>>(tcfg, true /*functional_ref*/);
   auto heuristic = std::make_shared<RecordingInsertHeuristic>();
 
   HierarchicalEmbeddingLayer<int64_t>::Config cfg;
   cfg.insert_heuristic = heuristic;
   cfg.min_insert_freq_host = 0;  // consult the heuristic on every lookup
   auto layer = std::make_shared<HierarchicalEmbeddingLayer<int64_t>>(
-      cfg, std::vector<table_ptr_t>{first, second});
+      cfg, std::vector<table_ptr_t>{first, second, third});
   auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
 
   std::vector<int64_t> keys;
@@ -1677,7 +1740,7 @@ TEST(HierachicalHitrate, TierWithNoCandidatesReportsOneNotNaN) {
                 0 /*first tier only*/);
 
   std::vector<uint8_t> out(num_keys * row_size);
-  std::vector<float> hitrates(2, -1.f);
+  std::vector<float> hitrates(3, -1.f);
   layer->lookup(ctx, static_cast<int64_t>(num_keys), keys.data(), out.data(), row_size,
                 nullptr /*hitmask*/, nullptr /*pool_params*/, hitrates.data());
 
@@ -1688,6 +1751,74 @@ TEST(HierachicalHitrate, TierWithNoCandidatesReportsOneNotNaN) {
   // The caller-facing hit rates are relative to num_keys and unchanged: all hits in tier 0.
   EXPECT_FLOAT_EQ(hitrates.at(0), 1.f);
   EXPECT_FLOAT_EQ(hitrates.at(1), 0.f);
+  EXPECT_FLOAT_EQ(hitrates.at(2), 0.f);
+  ctx.reset();
+}
+
+// Tiers with equal row bytes but different value types are rejected at construction; untyped
+// (Unknown) tiers are accepted alongside a typed one.
+TEST(HierachicalValueType, MismatchedTierValueTypesRejected) {
+  constexpr int64_t row_size = 64;
+  HostTableConfig f32_cfg;
+  f32_cfg.value_dtype = DataType_t::Float32;
+  f32_cfg.max_value_size = row_size;
+  HostTableConfig f16_cfg = f32_cfg;
+  f16_cfg.value_dtype = DataType_t::Float16;
+  HostTableConfig untyped_cfg = f32_cfg;
+  untyped_cfg.value_dtype = DataType_t::Unknown;
+  auto f32 = std::make_shared<MockHostTable<int64_t>>(f32_cfg, true /*functional_ref*/);
+  auto f16 = std::make_shared<MockHostTable<int64_t>>(f16_cfg, true /*functional_ref*/);
+  auto untyped = std::make_shared<MockHostTable<int64_t>>(untyped_cfg, true /*functional_ref*/);
+
+  HierarchicalEmbeddingLayer<int64_t>::Config cfg;
+  EXPECT_THROW(HierarchicalEmbeddingLayer<int64_t>(cfg, std::vector<table_ptr_t>{f32, f16}),
+               std::exception);
+  EXPECT_THROW(HierarchicalEmbeddingLayer<int64_t>(cfg, std::vector<table_ptr_t>{f32, untyped, f16}),
+               std::exception);
+  EXPECT_NO_THROW(HierarchicalEmbeddingLayer<int64_t>(cfg, std::vector<table_ptr_t>{untyped, f32}));
+}
+
+// Pooling over a layer whose last tier is untyped uses the typed tiers' value type.
+TEST(HierachicalValueType, PoolingWithUntypedTier) {
+  constexpr int64_t row_size = 64;
+  constexpr int64_t row_elems = row_size / static_cast<int64_t>(sizeof(float));
+  constexpr int64_t num_keys = 32;
+  constexpr int64_t hotness = 2;
+  HostTableConfig typed_cfg;
+  typed_cfg.value_dtype = DataType_t::Float32;
+  typed_cfg.max_value_size = row_size;
+  HostTableConfig untyped_cfg = typed_cfg;
+  untyped_cfg.value_dtype = DataType_t::Unknown;
+  auto typed = std::make_shared<MockHostTable<int64_t>>(typed_cfg, true /*functional_ref*/);
+  auto untyped = std::make_shared<MockHostTable<int64_t>>(untyped_cfg, true /*functional_ref*/);
+
+  HierarchicalEmbeddingLayer<int64_t>::Config cfg;
+  cfg.insert_heuristic = std::make_shared<NeverInsertHeuristic>();
+  auto layer = std::make_shared<HierarchicalEmbeddingLayer<int64_t>>(
+      cfg, std::vector<table_ptr_t>{typed, untyped});
+  auto ctx = layer->create_execution_context(0, 0, nullptr, nullptr);
+
+  std::vector<int64_t> keys;
+  std::vector<uint8_t> data;
+  GenerateData<int64_t>(keys, data, num_keys, row_size, 0, 1ul << 30, DataType_t::Float32);
+  layer->insert(ctx, num_keys, keys.data(), row_size, row_size, data.data(), 1 /*untyped tier only*/);
+
+  EmbeddingLayerBase::PoolingParams pp;
+  pp.pooling_type = PoolingType_t::Sum;
+  pp.fixed_hotness = hotness;
+  pp.output_type = DataType_t::Float32;
+  std::vector<float> out((num_keys / hotness) * row_elems);
+  ASSERT_NO_THROW(layer->lookup(ctx, num_keys, keys.data(), out.data(), row_size, nullptr /*hitmask*/,
+                                &pp, nullptr /*hitrates*/));
+
+  const auto* rows = reinterpret_cast<const float*>(data.data());
+  for (int64_t b = 0; b < num_keys / hotness; b++) {
+    for (int64_t e = 0; e < row_elems; e++) {
+      float expected = 0.f;
+      for (int64_t h = 0; h < hotness; h++) expected += rows[(b * hotness + h) * row_elems + e];
+      EXPECT_FLOAT_EQ(out[static_cast<size_t>(b * row_elems + e)], expected) << "bag " << b << " elem " << e;
+    }
+  }
   ctx.reset();
 }
 

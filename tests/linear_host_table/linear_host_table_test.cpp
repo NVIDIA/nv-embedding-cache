@@ -18,10 +18,13 @@
 #include <gtest/gtest.h>
 #include <buffer_wrapper.hpp>
 #include <common.hpp>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <linear_host_table.hpp>
 #include <default_allocator.hpp>
 #include <numeric>
+#include <thread>
 #include <vector>
 #include "tests/host_layer_test_utils.hpp"
 
@@ -177,7 +180,7 @@ public:
         int64_t hits = 0;
         tb_->get_lookup_counter(ctx_, &hits);
         EXPECT_EQ(hits, 2);
-        EXPECT_EQ(tb_->size(ctx_, true), params.num_rows);
+        EXPECT_EQ(tb_->size(ctx_), params.num_rows);
 
         auto no_mask_keys_bw = std::make_shared<BufferWrapper<const void>>(
             ctx_, "keys", keys.data(), keys.size() * sizeof(KeyType));
@@ -219,6 +222,32 @@ public:
         }
     }
 
+    // Every row exists: size() is num_rows and get_keys() yields the row range, clipped to capacity.
+    void test_size_and_get_keys() {
+        const auto& params = GetParam();
+        EXPECT_EQ(tb_->size(ctx_), params.num_rows);
+
+        const int64_t capacity = params.num_rows / 2;
+        std::vector<KeyType> keys(static_cast<size_t>(params.num_rows), static_cast<KeyType>(-1));
+        EXPECT_EQ(tb_->get_keys(ctx_, capacity, keys.data()), capacity);
+        for (int64_t i = 0; i < params.num_rows; ++i) {
+            EXPECT_EQ(keys[static_cast<size_t>(i)], i < capacity ? static_cast<KeyType>(i) : static_cast<KeyType>(-1));
+        }
+        EXPECT_THROW(tb_->get_keys(ctx_, -1, keys.data()), nve::Exception);
+    }
+
+    // A key_size that differs from sizeof(KeyType) is rejected at construction.
+    void test_rejects_mismatched_key_size() {
+        const auto& params = GetParam();
+        LinearHostTableConfig cfg;
+        cfg.key_size = sizeof(KeyType) == sizeof(int64_t) ? sizeof(int32_t) : sizeof(int64_t);
+        cfg.value_dtype = params.value_dtype;
+        cfg.max_value_size = params.row_size_bytes;
+        cfg.num_rows = params.num_rows;
+        cfg.emb_table = h_table_;
+        EXPECT_THROW(std::make_shared<TableType>(cfg), nve::Exception);
+    }
+
     void test_update_accumulate_ignores_out_of_range_keys() {
         const auto& params = GetParam();
         const size_t row_elements = static_cast<size_t>(params.row_size_bytes) / sizeof(DataType);
@@ -257,6 +286,7 @@ private:
     void Init() {
         const auto& params = GetParam();
         LinearHostTableConfig cfg;
+        cfg.key_size = sizeof(KeyType);
         cfg.value_dtype = params.value_dtype;
         cfg.max_threads = 64;
         cfg.max_value_size = params.row_size_bytes;
@@ -327,6 +357,8 @@ TEST_FORMAT(find, test_find);
 TEST_FORMAT(find_counts_only_new_hits, test_find_counts_only_new_hits);
 TEST_FORMAT(find_reports_out_of_range_keys_as_misses, test_find_reports_out_of_range_keys_as_misses);
 TEST_FORMAT(update, test_update);
+TEST_FORMAT(size_and_get_keys, test_size_and_get_keys);
+TEST_FORMAT(rejects_mismatched_key_size, test_rejects_mismatched_key_size);
 TEST_FORMAT(update_ignores_out_of_range_keys, test_update_ignores_out_of_range_keys);
 TEST_FORMAT(update_accumulate, test_update_accumulate);
 TEST_FORMAT(update_accumulate_ignores_out_of_range_keys,
@@ -366,6 +398,7 @@ class LinearHostTableTaskSizeTest : public testing::Test {
 
   void make_table(int64_t task_size_threshold, int64_t max_threads = 64) {
     LinearHostTableConfig cfg;
+    cfg.key_size = sizeof(int64_t);
     cfg.value_dtype = DataType_t::Float32;
     cfg.max_threads = max_threads;
     cfg.task_size_threshold = task_size_threshold;
@@ -434,6 +467,141 @@ TEST_F(LinearHostTableTaskSizeTest, threshold_one_restores_full_fanout) {
   make_table(/*task_size_threshold=*/1);
   EXPECT_EQ(run_ops(kWorkers + 1), (std::vector<int64_t>{kWorkers, kWorkers, kWorkers}));
   EXPECT_EQ(run_ops(3), (std::vector<int64_t>{3, 3, 3}));
+}
+
+// The table lock makes find() see whole rows and keeps concurrent update_accumulate() calls from
+// losing increments. Each caller thread gets its own context on the inline pool, so the only
+// concurrency is between those threads.
+class LinearHostTableLockTest : public testing::Test {
+ protected:
+  static constexpr int64_t kRowBytes = 4096;  // Wide rows make torn reads likely without the lock.
+  static constexpr int64_t kRowElements = kRowBytes / static_cast<int64_t>(sizeof(float));
+  static constexpr int64_t kNumRows = 16;
+  static constexpr int kNumThreads = 4;
+  static constexpr int kIterations = 200;
+
+  void SetUp() override {
+    NVE_CHECK_(cudaMallocHost(&h_table_, static_cast<size_t>(kRowBytes * kNumRows)));
+    std::memset(h_table_, 0, static_cast<size_t>(kRowBytes * kNumRows));
+    LinearHostTableConfig cfg;
+    cfg.key_size = sizeof(int64_t);
+    cfg.value_dtype = DataType_t::Float32;
+    cfg.max_value_size = kRowBytes;
+    cfg.num_rows = kNumRows;
+    cfg.emb_table = h_table_;
+    table_ = std::make_shared<LinearHostTable<int64_t>>(cfg);
+    keys_.resize(static_cast<size_t>(kNumRows));
+    std::iota(keys_.begin(), keys_.end(), 0);
+  }
+
+  void TearDown() override {
+    table_.reset();
+    NVE_CHECK_(cudaFreeHost(h_table_));
+  }
+
+  context_ptr_t make_context() {
+    return table_->create_execution_context(0, 0, InlineThreadPool::instance(), nullptr);
+  }
+
+  void update_all(context_ptr_t& ctx, const std::vector<float>& data) {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "keys", keys_.data(), keys_.size() * sizeof(int64_t));
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "values", data.data(), data.size() * sizeof(float));
+    table_->update(ctx, kNumRows, keys_bw, kRowBytes, kRowBytes, values_bw);
+  }
+
+  void update_accumulate_all(context_ptr_t& ctx, const std::vector<float>& data) {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "keys", keys_.data(), keys_.size() * sizeof(int64_t));
+    auto updates_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "updates", data.data(), data.size() * sizeof(float));
+    table_->update_accumulate(ctx, kNumRows, keys_bw, kRowBytes, kRowBytes, updates_bw,
+                              DataType_t::Float32);
+  }
+
+  void find_all(context_ptr_t& ctx, std::vector<float>& data) {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+        ctx, "keys", keys_.data(), keys_.size() * sizeof(int64_t));
+    auto values_bw = std::make_shared<BufferWrapper<void>>(
+        ctx, "values", data.data(), data.size() * sizeof(float));
+    table_->find(ctx, kNumRows, keys_bw, nullptr, kRowBytes, values_bw, nullptr);
+  }
+
+  std::shared_ptr<LinearHostTable<int64_t>> table_;
+  std::vector<int64_t> keys_;
+  float* h_table_ = nullptr;
+};
+
+TEST_F(LinearHostTableLockTest, concurrent_update_accumulate_loses_no_increments) {
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kNumThreads; ++t) {
+    threads.emplace_back([this] {
+      context_ptr_t ctx = make_context();
+      const std::vector<float> ones(static_cast<size_t>(kNumRows * kRowElements), 1.f);
+      for (int i = 0; i < kIterations; ++i) {
+        update_accumulate_all(ctx, ones);
+      }
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // Small integer sums are exact in float, so any lost increment shows up.
+  const float expected = static_cast<float>(kNumThreads * kIterations);
+  int64_t wrong_elements = 0;
+  for (int64_t i = 0; i < kNumRows * kRowElements; ++i) {
+    wrong_elements += h_table_[i] != expected;
+  }
+  EXPECT_EQ(wrong_elements, 0);
+}
+
+TEST_F(LinearHostTableLockTest, find_never_returns_partly_written_rows) {
+  // Each update fills every row with a single value, so a row mixing two values was read mid-write.
+  constexpr int kNumReaders = kNumThreads - 1;
+  std::atomic<int> readers_ready{0};
+  std::atomic<bool> writer_done{false};
+  std::atomic<int64_t> torn_rows{0};
+  std::atomic<int64_t> rows_read{0};
+
+  std::thread writer([&] {
+    context_ptr_t ctx = make_context();
+    std::vector<float> data(static_cast<size_t>(kNumRows * kRowElements));
+    while (readers_ready < kNumReaders) {
+      std::this_thread::yield();
+    }
+    // Keep writing until some lookup has run, so the readers can't miss the writes entirely.
+    for (int i = 1; i <= kIterations || rows_read == 0; ++i) {
+      std::fill(data.begin(), data.end(), static_cast<float>(i));
+      update_all(ctx, data);
+    }
+    writer_done = true;
+  });
+
+  std::vector<std::thread> readers;
+  for (int t = 0; t < kNumReaders; ++t) {
+    readers.emplace_back([&] {
+      context_ptr_t ctx = make_context();
+      std::vector<float> data(static_cast<size_t>(kNumRows * kRowElements));
+      ++readers_ready;
+      while (!writer_done) {
+        find_all(ctx, data);
+        for (int64_t row = 0; row < kNumRows; ++row) {
+          const auto first = data.begin() + row * kRowElements;
+          torn_rows += std::any_of(first, first + kRowElements, [&](float v) { return v != *first; });
+        }
+        rows_read += kNumRows;
+      }
+    });
+  }
+
+  writer.join();
+  for (auto& reader : readers) {
+    reader.join();
+  }
+  EXPECT_GT(rows_read.load(), 0);
+  EXPECT_EQ(torn_rows.load(), 0);
 }
 
 TEST(LinearHostTableConfigTest, rejects_non_positive_task_size_threshold) {

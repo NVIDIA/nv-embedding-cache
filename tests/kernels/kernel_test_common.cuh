@@ -116,7 +116,7 @@ class EmbeddingCacheRefTest : public ::testing::Test {
     void GetCacheContent(ElemType* d_cache_content, std::shared_ptr<TestBuffer<IndexType>> keys_in_c, size_t& num_keys) 
     {
         
-        cache_ptr_->get_keys_stored_in_cache(handle_lookup_, keys_in_c->ph, num_keys);
+        cache_ptr_->get_keys_stored_in_cache(handle_lookup_, keys_in_c->ph, cache_ptr_->get_max_num_embedding_vectors_in_cache(), num_keys, stream_);
         keys_in_c->HtoD(stream_);
         int64_t num_hitmask_elems = nve::ceil_div(num_keys, static_cast<size_t>(32));
         auto hitmask = std::make_shared<TestBuffer<uint32_t>>(num_hitmask_elems * sizeof(uint32_t));

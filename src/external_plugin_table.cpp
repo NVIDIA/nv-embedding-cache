@@ -273,16 +273,17 @@ class ExternalPluginFactoryGuard {
 void validate_external_table(ExternalPluginTableGuard& guard) {
   const nve_ext_table_ops_t* ops{guard.handle().ops};
 
-  // Mandatory prefix beyond destroy (which was validated before guard install).
-  if (!NVE_ABI_HAS_FIELD(ops, nve_ext_table_ops_t, last_error) ||
+  // Mandatory callbacks beyond destroy (which was validated before guard install).
+  if (!NVE_ABI_HAS_FIELD(ops, nve_ext_table_ops_t, get_keys) ||
       ops->preferred_buffer_location == nullptr || ops->device_id == nullptr ||
       ops->max_row_size == nullptr || ops->key_size == nullptr ||
       ops->invalid_key == nullptr || ops->value_dtype == nullptr ||
       ops->lookup_counter_hits == nullptr || ops->reset_lookup_counter == nullptr ||
       ops->get_lookup_counter == nullptr || ops->find == nullptr || ops->insert == nullptr ||
       ops->update == nullptr || ops->update_accumulate == nullptr || ops->erase == nullptr ||
-      ops->clear == nullptr || ops->last_error == nullptr) {
-    throw_malformed("External table vtable is missing mandatory ABI 1.0 callbacks");
+      ops->clear == nullptr || ops->last_error == nullptr || ops->size == nullptr ||
+      ops->get_keys == nullptr) {
+    throw_malformed("External table vtable is missing mandatory callbacks");
   }
 
   void* self{guard.handle().self};
@@ -369,6 +370,26 @@ void ExternalPluginTable::clear(context_ptr_t& ctx) {
   ScopedDevice scope(caps_.device_id);
   nve_ext_context_s cctx{&ctx, caps_.device_id};
   check_table_status(tbl_, tbl_.ops->clear(tbl_.self, &cctx), "External table clear failed");
+}
+
+int64_t ExternalPluginTable::size(context_ptr_t& ctx) const {
+  ScopedDevice scope(caps_.device_id);
+  nve_ext_context_s cctx{&ctx, caps_.device_id};
+  int64_t n{};
+  check_table_status(tbl_, tbl_.ops->size(tbl_.self, &cctx, &n), "External table size failed");
+  NVE_CHECK_(n >= 0, "External table reported a negative size");
+  return n;
+}
+
+int64_t ExternalPluginTable::get_keys(context_ptr_t& ctx, const int64_t capacity, void* const keys) const {
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  ScopedDevice scope(caps_.device_id);
+  nve_ext_context_s cctx{&ctx, caps_.device_id};
+  int64_t n{};
+  check_table_status(tbl_, tbl_.ops->get_keys(tbl_.self, &cctx, capacity, keys, &n),
+                     "External table get_keys failed");
+  NVE_CHECK_(n >= 0 && n <= capacity, "External table reported an invalid key count");
+  return n;
 }
 
 void ExternalPluginTable::reset_lookup_counter(context_ptr_t& ctx) {

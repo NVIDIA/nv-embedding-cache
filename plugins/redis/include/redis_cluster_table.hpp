@@ -94,7 +94,13 @@ class RedisClusterTable final : public HostTable<RedisClusterTableConfig> {
 
   void clear(context_ptr_t& ctx) override;
 
-  int64_t size(context_ptr_t& ctx, bool exact) const override;
+  int64_t size(context_ptr_t& ctx) const override;
+
+  // Scans in batches of `max_batch_size` (SCAN in string mode, HSCAN in hash modes) and stops once
+  // `capacity` keys are found. Like any SCAN, a key may be returned twice if the keyspace or hash is
+  // resized during the call. Raw string mode (`string_namespace_id < 0`) scans the whole DB; foreign
+  // keys of the table's key size are indistinguishable from table keys and are returned too.
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
 
   void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
 

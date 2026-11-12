@@ -59,7 +59,9 @@ else()
     set(nve_torch_link_libs ${TORCH_LIBRARIES})
 endif()
 
+# Torch headers call dlsym (libdl before glibc 2.34); PUBLIC so executables that
+# include the same headers (e.g. nve_inference_driverless) link it as well.
 target_link_libraries(nve-torch-ops
-    PUBLIC  nve-common
+    PUBLIC  nve-common ${CMAKE_DL_LIBS}
     PRIVATE ${nve_torch_link_libs}
 )

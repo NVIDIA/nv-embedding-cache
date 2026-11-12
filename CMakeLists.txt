@@ -168,6 +168,12 @@ set(CMAKE_CXX_FLAGS_RELEASE  "${CMAKE_CXX_FLAGS_RELEASE}  -Werror -Wall -Wextra 
 if (CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
   set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -Xcompiler -Wall -Xcompiler -Werror -Xcompiler -Wextra -Xcompiler -Wconversion")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math")
+  # Compress SASS in the fatbinary too (the default mode leaves it uncompressed); the fatbin shrinks
+  # ~9x and the driver decompresses a module once, when it loads. CUDA 13.0+ only: older toolkits
+  # don't guarantee that compressed images load on every driver they support.
+  if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compress-mode=size")
+  endif()
 elseif (CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
   set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -Wall -Werror -Wextra -Wconversion")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wno-unknown-cuda-version -ffast-math -Wno-nan-infinity-disabled")
@@ -243,23 +249,32 @@ if (NOT DEFINED NVE_SM_VERSION)
     endif()
 endif()
 
-set(CMAKE_CUDA_ARCHITECTURES ${NVE_SM_VERSION} CACHE STRING "CUDA architectures" FORCE)
-message(STATUS "CMAKE_CUDA_ARCHITECTURES=" ${CMAKE_CUDA_ARCHITECTURES})
+# Embed PTX (the JIT fallback for GPUs without matching SASS) only where a GPU could use it, and not
+# at all for single-architecture builds, unless NVE_KEEP_PTX is set.
+option(NVE_KEEP_PTX "Embed PTX for every architecture in NVE_SM_VERSION" OFF)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nve_cuda_ptx.cmake)
+set(_nve_cuda_archs ${NVE_SM_VERSION})
+if (NOT NVE_KEEP_PTX)
+  nve_drop_unused_ptx(_nve_cuda_archs)
+endif()
+set(CMAKE_CUDA_ARCHITECTURES ${_nve_cuda_archs} CACHE STRING "CUDA architectures" FORCE)
+message(STATUS "CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Enabling NVE_ORIGIN_RPATH will allow relocated .so files (e.g. during pip install) to start
-# the search for .so dependencies in the local directory
+# NVE_ORIGIN_RPATH makes the binaries relocatable (e.g. for pip install): libraries find each other
+# in their own directory, and executables in bin/ find them in ../lib. No absolute paths, so a
+# relocated library never falls back to a build directory.
 if (NVE_ORIGIN_RPATH)
-  set(CMAKE_INSTALL_RPATH "\$ORIGIN:${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+  set(CMAKE_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../lib")
   set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 endif()
 
 # Generated FindAndCombine kernel instantiations (see cmake/gen_find_and_combine_instantiations.py
-# and src/CMakeLists.txt). The directory holds find_and_combine_kernel_extern.inc, which the kernel
-# header pulls in, so every target that includes the header needs it on the include path.
+# and src/CMakeLists.txt). The directory holds generated .inc files the kernel header pulls in, so
+# every target that includes the header needs it on the include path.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(FAC_GEN_DIR ${CMAKE_BINARY_DIR}/src/generated/find_and_combine)
 
@@ -281,6 +296,15 @@ foreach(NVE_FEATURE ${NVE_FEATURES})
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DNVE_FEATURE_${NVE_FEATURE}=1")
 endforeach()
 unset(NVE_FEATURE)
+
+# NVE_OPTIMIZE_BIN_SIZE trades a little GPU time for a much smaller libnve-common: find_and_combine
+# then takes fixed vs CSR hotness and index loading as kernel arguments (4x fewer kernels) instead
+# of compiling a branch-free kernel per combination (NVE_FAC_SPECIALIZE_FLAGS, the default).
+option(NVE_OPTIMIZE_BIN_SIZE "Smaller libnve-common at a small GPU-time cost" OFF)
+message(STATUS "NVE_OPTIMIZE_BIN_SIZE: ${NVE_OPTIMIZE_BIN_SIZE}")
+if (NOT NVE_OPTIMIZE_BIN_SIZE)
+  add_compile_definitions(NVE_FAC_SPECIALIZE_FLAGS=1)
+endif()
 
 if (NVE_ENABLE_NVTX)
   message(STATUS "NVTX enabled")

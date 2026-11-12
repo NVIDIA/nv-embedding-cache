@@ -631,7 +631,7 @@ class QuantGpuLayerTest {
  public:
   QuantGpuLayerTest(DataType_t dtype, int64_t value_count = 64, int64_t default_row_index = -1)
       : dtype_(dtype), value_count_(value_count),
-        row_bytes_(value_count + quant_rowwise_meta_bytes(dtype)),
+        row_bytes_(row_size_in_bytes(dtype, value_count)),
         output_dtype_(quant_rowwise_output_dtype(dtype)),
         output_stride_(value_count * dtype_size(output_dtype_)),
         host_table_(static_cast<size_t>(kNumRows * row_bytes_)) {

@@ -58,6 +58,25 @@ class Table {
   virtual void clear(context_ptr_t& ctx) = 0;
 
   /**
+   * Determine the number of keys stored in the table.
+   *
+   * @param ctx Execution context to use if additional resources are needed to run the command.
+   * @returns The number of keys stored in the table.
+   */
+  virtual int64_t size(context_ptr_t& ctx) const = 0;
+
+  /**
+   * Writes up to `capacity` of the keys stored in the table to `keys`.
+   * Keys inserted or erased concurrently may or may not be included.
+   *
+   * @param ctx Execution context to use if additional resources are needed to run the command.
+   * @param capacity Number of keys that fit in `keys`. Implementations throw if it is negative.
+   * @param keys Host accessible output buffer.
+   * @returns The number of keys written to `keys`.
+   */
+  virtual int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const = 0;
+
+  /**
    * Reset the lookup key counter for the given context
    * @param ctx Execution context for which lookup keys are collected.
    */

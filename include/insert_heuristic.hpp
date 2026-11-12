@@ -32,9 +32,13 @@ class InsertHeuristic {
 };
 
 // TODO: TRTREC-88
+// Inserts into table i with probability (1 - hitrate) while its hit rate is below thresholds[i],
+// and with probability (1 - hitrate)^3 otherwise. A threshold of 0 still inserts on misses.
+// A negative threshold (e.g. NEVER_INSERT_THRESHOLD) disables auto-inserts into that table.
 class DefaultInsertHeuristic : public InsertHeuristic {
   public:
   static constexpr float DEFAULT_THRESHOLD = 0.75f;
+  static constexpr float NEVER_INSERT_THRESHOLD = -1.0f;
 
   DefaultInsertHeuristic(const std::vector<float> thresholds);
   ~DefaultInsertHeuristic() override = default;

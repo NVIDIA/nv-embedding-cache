@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "tests/inference_test_utils.hpp"
+#include "tests/test_utils.hpp"
 
 namespace {
 
@@ -31,8 +32,10 @@ import sys
 import numpy as np
 import torch
 
+import pynve.nve as nve
 import pynve.torch.nve_layers as nve_layers
 import pynve.torch.nve_ps as nve_ps
+from pynve.torch.nve_dtypes import quantize_rowwise
 from pynve.torch.nve_export import export_aot
 
 save_dir, layer_kind, custom_remote_plugin = sys.argv[1:4]
@@ -44,12 +47,12 @@ keys = torch.tensor([0, 1, 5, 10], dtype=torch.int64, device=device)
 
 
 class Model(torch.nn.Module):
-    def __init__(self, layer_type, storage=None, weight_init=None):
+    def __init__(self, layer_type, storage=None, weight_init=None, data_type=torch.float32):
         super().__init__()
         kwargs = {
             "num_embeddings": num_embeddings,
             "embedding_size": embedding_size,
-            "data_type": torch.float32,
+            "data_type": data_type,
             "layer_type": layer_type,
             "optimize_for_training": False,
             "device": device,
@@ -76,6 +79,19 @@ elif layer_kind == "host":
     host_weights = torch.arange(num_embeddings, dtype=torch.float32) \
         .unsqueeze(1).expand(num_embeddings, embedding_size).contiguous()
     model = Model(nve_layers.LayerType.HostLayer, weight_init=host_weights)
+elif layer_kind == "host_table":
+    # HostLayer over an NVHashMap table: rows restored from ps_data_paths by the C++ loader.
+    all_keys = torch.arange(num_embeddings, dtype=torch.int64)
+    all_values = torch.arange(num_embeddings, dtype=torch.float32) \
+        .unsqueeze(1).expand(num_embeddings, embedding_size).contiguous()
+    parameter_server = nve_ps.NVEParameterServer(0, embedding_size, torch.float32)
+    parameter_server.insert(all_keys, all_values)
+    model = Model(nve_layers.LayerType.HostLayer, parameter_server)
+    keys_path = os.path.join(save_dir, "keys.npy")
+    values_path = os.path.join(save_dir, "values.npy")
+    np.save(keys_path, all_keys.numpy())
+    np.save(values_path, all_values.numpy())
+    export_options["ps_data_paths"] = {"emb": (keys_path, values_path)}
 elif layer_kind == "custom_remote":
     parameter_server = nve_ps.NVEParameterServer(
         num_embeddings=num_embeddings,
@@ -95,6 +111,23 @@ elif layer_kind == "custom_remote":
     np.save(keys_path, all_keys.numpy())
     np.save(values_path, all_values.numpy())
     export_options["ps_data_paths"] = {"emb": (keys_path, values_path)}
+elif layer_kind in ("quant_gpu", "quant_hier"):
+    # Constant rows quantize exactly (affine offset = value, scale 1), so row i still decodes to i.
+    qtype = nve.DataType_t.QUint8RowwiseF32
+    all_values = quantize_rowwise(torch.arange(num_embeddings, dtype=torch.float32)
+                                  .unsqueeze(1).expand(num_embeddings, embedding_size), qtype)
+    if layer_kind == "quant_gpu":
+        model = Model(nve_layers.LayerType.GPULayer, weight_init=all_values, data_type=qtype)
+    else:
+        all_keys = torch.arange(num_embeddings, dtype=torch.int64)
+        parameter_server = nve_ps.NVEParameterServer(0, embedding_size, qtype)
+        parameter_server.insert(all_keys, all_values)
+        model = Model(nve_layers.LayerType.Hierarchical, parameter_server, data_type=qtype)
+        keys_path = os.path.join(save_dir, "keys.npy")
+        values_path = os.path.join(save_dir, "values.npy")
+        np.save(keys_path, all_keys.numpy())
+        np.save(values_path, all_values.numpy())
+        export_options["ps_data_paths"] = {"emb": (keys_path, values_path)}
 else:
     raise ValueError(f"Unknown layer kind: {layer_kind}")
 
@@ -114,6 +147,12 @@ const std::vector<const char*> kExpectedOutput{
 class NVEExportInferenceTest : public ::testing::TestWithParam<const char*> {};
 
 TEST_P(NVEExportInferenceTest, ExportAndRunCppInference) {
+  // These kinds build a default NVEParameterServer, which uses the NVHM plugin.
+  const std::string layer_kind = GetParam();
+  if (layer_kind == "host_table" || layer_kind == "quant_hier") {
+    SKIP_IF_NVHM_UNAVAILABLE();
+  }
+
   const nve_test::TemporaryDirectory export_directory("nve-export-inference-test");
   const std::string save_dir = export_directory.path().string();
 
@@ -131,6 +170,7 @@ TEST_P(NVEExportInferenceTest, ExportAndRunCppInference) {
 }
 
 INSTANTIATE_TEST_SUITE_P(LayerTypes, NVEExportInferenceTest,
-                         ::testing::Values("linear_uvm", "gpu", "host", "custom_remote"));
+                         ::testing::Values("linear_uvm", "gpu", "host", "host_table",
+                                           "custom_remote", "quant_gpu", "quant_hier"));
 
 }  // namespace

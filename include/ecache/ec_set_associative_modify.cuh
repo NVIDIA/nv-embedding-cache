@@ -309,6 +309,9 @@ __global__ void SetReplaceDataKernel(
     }
 }
 
+// A function template only so that the CUB kernels it references are instantiated in the
+// translation units that call it, not in every one that includes this header.
+template<typename = void>
 static cudaError_t GetSetReplaceDataAllocRequirements(uint64_t num_keys, uint64_t num_sets, size_t& size) {
     uint32_t* p = nullptr;
     size_t allocSize;

@@ -40,9 +40,9 @@ class ResizeableBuffer {
   ~ResizeableBuffer() {
     if (buffer_) {
       if (host_alloc_) {
-        cudaFreeHost(buffer_);
+        SPH_TEARDOWN(cudaFreeHost(buffer_));
       } else {
-        cudaFree(buffer_);
+        SPH_TEARDOWN(cudaFree(buffer_));
       }
     }
     size_ = 0;

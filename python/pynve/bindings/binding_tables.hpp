@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "include/common.hpp"  // NVE_CHECK_
+#include "include/table_utils.hpp"  // DEFAULT_PLUGIN_TABLE_ID
 
 namespace nve {
 
@@ -78,6 +79,14 @@ public:
     void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override {
         NVE_CHECK_(table_ != nullptr, "Table is not initialized");
         table_->erase(ctx, n, std::move(keys));
+    }
+    int64_t size(context_ptr_t& ctx) const override {
+        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
+        return table_->size(ctx);
+    }
+    int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override {
+        NVE_CHECK_(table_ != nullptr, "Table is not initialized");
+        return table_->get_keys(ctx, capacity, keys);
     }
     void find(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys,
                  buffer_ptr<bitmask64_t> hit_mask, int64_t value_stride,
@@ -136,12 +145,14 @@ public:
                          nlohmann::json factory_config,
                          nlohmann::json table_config,
                          uint64_t num_rows = 0,
-                         table_id_t table_id = 1000);
+                         table_id_t table_id = DEFAULT_PLUGIN_TABLE_ID);
 
     ~ParameterServerTable();
     void insert_keys(size_t num_keys, uintptr_t keys, uintptr_t values);
     void erase_keys(size_t num_keys, uintptr_t keys);
     void clear_keys();
+    size_t num_keys();
+    size_t export_keys(size_t capacity, uintptr_t keys);
     void insert_keys_from_filepath(const std::string& keys_path, const std::string& values_path, uint64_t batch_size);
     uint64_t get_row_size_in_bytes() const;
     void insert_keys_from_tensor_file(std::shared_ptr<TensorFileFormatBase> keys_file_reader, std::shared_ptr<TensorFileFormatBase> values_file_reader, uint64_t batch_size);
@@ -153,7 +164,8 @@ public:
     //     "table_config":   {...},
     //     "row_elements":   <int>,
     //     "num_rows":       <int>,
-    //     "data_type":      "Float32" | "Float16" | ... }
+    //     "data_type":      "Float32" | "Float16" | ...,
+    //     "table_id":       <int> }
     // The shape is the same regardless of which ctor was used, so consumers
     // (Python load, C++ nve_loader) only need to handle one shape.
     nlohmann::json export_config() const;
@@ -170,6 +182,7 @@ private:
     uint64_t num_rows_;
     uint64_t row_elements_;
     uint64_t row_bytes_;
+    table_id_t table_id_{DEFAULT_PLUGIN_TABLE_ID}; // id the table was produced with
     DataType_t data_type_;
     context_ptr_t ctx_;
     std::string plugin_name_;

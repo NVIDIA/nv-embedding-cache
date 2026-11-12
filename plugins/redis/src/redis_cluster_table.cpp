@@ -20,6 +20,8 @@
 #include <redis_cluster_table.hpp>
 #include <buffer_wrapper.hpp>
 #include <redis_utils.hpp>
+#include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cstring>
 #include <string>
@@ -152,6 +154,20 @@ inline static std::string make_prefix_scan_pattern(int64_t string_namespace_id) 
   return pattern;
 }
 
+// Runs `SCAN MATCH pattern` over the keyspace in batches of about `max_batch_size` keys and passes each batch to
+// `fn`. `fn` returns false to stop early.
+template <typename Func>
+inline static void scan_keyspace(const redis_conn_ptr_t& conn, const std::string& pattern,
+                                 const int64_t max_batch_size, const Func& fn) {
+  sw::redis::Cursor cursor{0};
+  std::vector<std::string> batch;
+  do {
+    batch.clear();
+    cursor = conn->scan(cursor, pattern, max_batch_size, std::back_inserter(batch));
+    if (!fn(batch)) return;
+  } while (cursor != 0);
+}
+
 // Word-aligned [lo, hi) sub-range for task `t` of `parts` over [0, n). Aligning boundaries to `Align`
 // keys ensures no two tasks touch the same hit-mask word, so hit-mask updates stay non-atomic.
 template <int64_t Align>
@@ -210,17 +226,11 @@ void RedisClusterTable<KeyType, MetaType, PartitionerType>::clear(context_ptr_t&
     }
 
     // Prefixed string mode: SCAN for this table's keys and DEL them in batches.
-    const std::string pattern{make_prefix_scan_pattern(string_namespace_id)};
-    const int64_t max_batch_size{config.max_batch_size};
-    sw::redis::Cursor cursor{0};
-    std::vector<std::string> batch;
-    do {
-      batch.clear();
-      cursor = cluster->scan(cursor, pattern, max_batch_size, std::back_inserter(batch));
-      if (!batch.empty()) {
-        cluster->del(batch.begin(), batch.end());
-      }
-    } while (cursor != 0);
+    scan_keyspace(cluster, make_prefix_scan_pattern(string_namespace_id), config.max_batch_size,
+                  [&cluster](const std::vector<std::string>& batch) {
+                    if (!batch.empty()) cluster->del(batch.begin(), batch.end());
+                    return true;
+                  });
     return;
   }
 
@@ -703,7 +713,7 @@ void RedisClusterTable<KeyType, MetaType, PartitionerType>::insert(
 }
 
 template <typename KeyType, typename MetaType, typename PartitionerType>
-int64_t RedisClusterTable<KeyType, MetaType, PartitionerType>::size(context_ptr_t& ctx, bool) const {
+int64_t RedisClusterTable<KeyType, MetaType, PartitionerType>::size(context_ptr_t& ctx) const {
   const auto& __restrict config{config_};
   const redis_conn_ptr_t& cluster{conn_};
 
@@ -718,17 +728,12 @@ int64_t RedisClusterTable<KeyType, MetaType, PartitionerType>::size(context_ptr_
     }
 
     // Prefixed string mode: count this table's keys via SCAN.
-    const std::string pattern{make_prefix_scan_pattern(string_namespace_id)};
-    const int64_t max_batch_size{config.max_batch_size};
     int64_t total{0};
-    sw::redis::Cursor cursor{0};
-    std::vector<std::string> batch;
-    do {
-      batch.clear();
-      // TODO: There is no need to retain the strings in `batch`.
-      cursor = cluster->scan(cursor, pattern, max_batch_size, std::back_inserter(batch));
-      total += static_cast<int64_t>(batch.size());
-    } while (cursor != 0);
+    scan_keyspace(cluster, make_prefix_scan_pattern(string_namespace_id), config.max_batch_size,
+                  [&total](const std::vector<std::string>& batch) {
+                    total += static_cast<int64_t>(batch.size());
+                    return true;
+                  });
     return total;
   }
 
@@ -747,6 +752,70 @@ int64_t RedisClusterTable<KeyType, MetaType, PartitionerType>::size(context_ptr_
 
   ctx->get_thread_pool()->execute_n(0, num_parts, f, config.workgroups, 1);
   return total_size.load(std::memory_order_relaxed);
+}
+
+template <typename KeyType, typename MetaType, typename PartitionerType>
+int64_t RedisClusterTable<KeyType, MetaType, PartitionerType>::get_keys(
+    context_ptr_t& ctx, const int64_t capacity, void* const keys_ptr) const {
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  if (capacity == 0) return 0;
+  key_type* const __restrict keys{static_cast<key_type*>(keys_ptr)};
+
+  const auto& __restrict config{config_};
+  const redis_conn_ptr_t& cluster{conn_};
+  const int64_t num_parts{config.num_partitions};
+  const int64_t max_batch_size{config.max_batch_size};
+  using parser_t = ReplyParser<sw::redis::StringView>;
+
+  // String mode (any `num_partitions`): keys are Redis strings, so this is a keyspace SCAN. Entries
+  // of another size cannot belong to this table (raw mode shares the DB) and are skipped.
+  if (is_string_mode(cluster, config)) {
+    const int64_t string_namespace_id{config.string_namespace_id};
+    const int64_t prefix_size{string_namespace_id >= 0 ? kKeyPrefixSize : 0};
+    const int64_t entry_size{string_key_size(string_namespace_id, sizeof(key_type))};
+    const std::string pattern{string_namespace_id >= 0 ? make_prefix_scan_pattern(string_namespace_id) : "*"};
+    int64_t n{};
+    scan_keyspace(cluster, pattern, max_batch_size, [&](const std::vector<std::string>& batch) {
+      for (const std::string& redis_key : batch) {
+        if (n == capacity) return false;
+        if (static_cast<int64_t>(redis_key.size()) != entry_size) continue;
+        std::memcpy(&keys[n++], redis_key.data() + prefix_size, sizeof(key_type));
+      }
+      return n < capacity;  // Stop scanning once a batch fills the buffer.
+    });
+    return n;
+  }
+
+  // Hash modes: HSCAN the hash in bounded batches. Each batch claims the next contiguous output range
+  // (ranges past `capacity` are dropped), and scanning stops once `capacity` keys have been claimed.
+  std::atomic_int64_t claimed{0};
+  const auto scan_hash{[keys, capacity, max_batch_size, &cluster, &claimed](const sw::redis::StringView& h_key) {
+    std::vector<key_type> batch;
+    sw::redis::Cursor cursor{0};
+    while (claimed.load(std::memory_order_relaxed) < capacity) {
+      batch.clear();
+      // The reply alternates fields (keys) and values; only the fields are kept.
+      cursor = cluster->hscan(h_key, cursor, max_batch_size,
+                              parser_t([&batch](const int64_t idx, const sw::redis::StringView& view) {
+                                if (idx % 2 == 0) batch.emplace_back(view_as_value<key_type>(view));
+                              }));
+      const auto [begin, room]{claim_output_range(claimed, static_cast<int64_t>(batch.size()), capacity)};
+      if (room > 0) std::copy_n(batch.begin(), room, keys + begin);
+      if (cursor == 0) break;
+    }
+  }};
+
+  if (num_parts == 0) {
+    // Single-hash mode: the fields of the shared hash.
+    scan_hash(sw::redis::StringView{config.hash_key});
+  } else {
+    // Multi-hash mode: the fields of every partition's value hash.
+    const table_id_t table_id{this->id};
+    ctx->get_thread_pool()->execute_n(
+        0, num_parts, [table_id, &scan_hash](const int64_t task_idx) { scan_hash(HKey{table_id, task_idx, 'v'}); },
+        config.workgroups, 1);
+  }
+  return std::min(claimed.load(std::memory_order_relaxed), capacity);
 }
 
 template <typename KeyType, typename MetaType, typename PartitionerType>

@@ -128,6 +128,8 @@ class GPUTableExecutionContext: public ExecutionContext {
     if (max_modify_size_ < 1) {
       modify_context_.handle = 0;
     } else {
+      NVE_CHECK_(max_modify_size_ <= std::numeric_limits<uint32_t>::max(),
+                 "max_modify_size must not exceed UINT32_MAX");
       NVE_CHECK_(cache_->modify_context_create(modify_context_, static_cast<uint32_t>(max_modify_size_)),
                 "Failed to create embedding cache modification context.");
     }
@@ -197,6 +199,9 @@ GpuTable<KeyType>::GpuTable(const GPUTableConfig& config, allocator_ptr_t alloca
   using CacheTypeHost = nve::CacheSAHostModify<KeyType, KeyType>;
 
   NVE_CHECK_((config.row_size_in_bytes % 2) == 0, "Invalid cache row size (must divide by 2)");
+  NVE_CHECK_(config.row_size_in_bytes > 0 &&
+             config.row_size_in_bytes <= std::numeric_limits<int32_t>::max(),
+             "Invalid cache row size (must be in (0, INT32_MAX])");
   NVE_CHECK_(config.uvm_table == nullptr || config.uvm_num_rows > 0,
              "uvm_num_rows must be set to the number of rows in uvm_table");
   NVE_CHECK_(config.kernel_mode_type != static_cast<uint64_t>(KernelType::PipelineGather) || config.count_misses,
@@ -242,6 +247,37 @@ void GpuTable<KeyType>::clear(context_ptr_t& ctx) {
 }
 
 template <typename KeyType>
+int64_t GpuTable<KeyType>::scan_keys(context_ptr_t& ctx, const int64_t capacity, KeyType* out_keys) const {
+  ScopedDevice scope_device(config_.device_id);
+  auto gpu_table_ctx = std::dynamic_pointer_cast<GPUTableExecutionContext<KeyType>>(ctx);
+  NVE_CHECK_(gpu_table_ctx != nullptr, "Invalid GPU table context");
+  // The tags only reflect this context's modify ops once they have landed.
+  NVE_CHECK_(cudaStreamSynchronize(ctx->get_modify_stream()));
+  StreamCoordinator sc(ctx->get_lookup_stream(), config_.private_stream);
+  size_t num_keys{};
+  NVE_CHECK_(cache_->get_keys_stored_in_cache(gpu_table_ctx->lookup_context(), out_keys, to_uint(capacity),
+                                              num_keys, sc.queue_stream),
+             "Failed to read the cached keys");
+  return static_cast<int64_t>(num_keys);
+}
+
+template <typename KeyType>
+int64_t GpuTable<KeyType>::size(context_ptr_t& ctx) const {
+  NVE_NVTX_SCOPED_FUNCTION_COL6_();
+  return scan_keys(ctx, 0, nullptr);
+}
+
+template <typename KeyType>
+int64_t GpuTable<KeyType>::get_keys(context_ptr_t& ctx, const int64_t capacity, void* const keys) const {
+  NVE_NVTX_SCOPED_FUNCTION_COL6_();
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  // Keys are collected from host tags and written from the CPU.
+  NVE_CHECK_(capacity == 0 || pointer_memory_type(keys) != cudaMemoryTypeDevice,
+             "keys must be host accessible memory");
+  return std::min(scan_keys(ctx, capacity, static_cast<KeyType*>(keys)), capacity);
+}
+
+template <typename KeyType>
 void GpuTable<KeyType>::erase(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<const void> keys) {
   NVE_NVTX_SCOPED_FUNCTION_COL6_();
   ScopedDevice scope_device(config_.device_id);
@@ -260,12 +296,25 @@ void GpuTable<KeyType>::erase(context_ptr_t& ctx, int64_t num_keys, buffer_ptr<c
 
   auto mod_ctx{gpu_table_ctx->modify_context()};
 
-  auto ec_event = create_sync_event();
-  StreamCoordinator sc(modify_stream, config_.private_stream);
+  // The modify context holds at most max_modify_size entries, so invalidate in chunks.
+  const auto max_modify_size = gpu_table_ctx->max_modify_size_;
+  NVE_CHECK_(max_modify_size > 0, "Cache erase requires max_modify_size > 0");
 
-  NVE_CHECK_(cache_->invalidate(mod_ctx, static_cast<const key_type*>(keys_buf),
-                                num_keys, 0, ec_event.get(), sc.queue_stream),
-             "Failed to call cache invalidate");
+  for (int64_t k_start = 0; k_start < num_keys; k_start += max_modify_size) {
+    const auto k_end = std::min(k_start + max_modify_size, num_keys);
+
+    auto ec_event = create_sync_event();
+    StreamCoordinator sc(modify_stream, config_.private_stream);
+
+    NVE_CHECK_(cache_->invalidate(mod_ctx, static_cast<const key_type*>(keys_buf) + k_start,
+                                  k_end - k_start, 0, ec_event.get(), sc.queue_stream),
+               "Failed to call cache invalidate");
+
+    if (k_end != num_keys) {
+      // Don't overwrite the modify context while the previous chunk is in flight.
+      NVE_CHECK_(cudaStreamSynchronize(sc.queue_stream));
+    }
+  }
 }
 
 KernelType get_kernel_mode(const GPUTableConfig& config, int64_t num_keys) {
@@ -825,7 +874,7 @@ void GpuTable<KeyType>::update_accumulate(context_ptr_t& ctx, int64_t num_keys, 
         NVE_CHECK_(update_size % dtype_size(update_dtype) == 0);
         const auto elements_per_row = update_size / dtype_size(update_dtype);
 
-        const auto update_launcher_task{[=]() {
+        const auto update_launcher_task{[=, copy_events = std::move(copy_events)]() {
           for (int64_t i=0 ; i<num_copies ; i++) {
             // First wait for the copy to complete
             NVE_CHECK_(cudaEventSynchronize(copy_events.at(i)));

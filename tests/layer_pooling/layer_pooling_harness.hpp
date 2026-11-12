@@ -111,14 +111,6 @@ enum class CaseStatus { Enabled, Rejected, Unsupported };
 // Small dtype/stride helpers (no padding -- keeps combine()'s value_count exact)
 // ---------------------------------------------------------------------------
 
-// Stored row stride in bytes for the given input dtype: value bytes (element count times the dtype's
-// element size -- 1 byte for the current int8/uint8 quant types, but kept general for future
-// sub-byte/multi-byte quant element types) plus trailing scale[/offset] metadata for quant types.
-inline int64_t input_row_bytes(DataType_t dt, int64_t value_count) {
-  const int64_t value_bytes = value_count * dtype_size(dt);
-  return is_quant_rowwise(dt) ? value_bytes + quant_rowwise_meta_bytes(dt) : value_bytes;
-}
-
 // Output row stride in bytes for the (always float) output dtype.
 inline int64_t output_row_bytes(DataType_t out_dtype, int64_t value_count) {
   return value_count * dtype_size(out_dtype);
@@ -372,7 +364,7 @@ class PoolingHarness {
   explicit PoolingHarness(const LayerPoolCase& c) : c_(c) {
     ScopedDevice dev(kDeviceId);
 
-    in_row_bytes_  = input_row_bytes(c_.in_dtype, c_.value_count);
+    in_row_bytes_  = row_size_in_bytes(c_.in_dtype, c_.value_count);
     out_row_bytes_ = output_row_bytes(c_.out_dtype, c_.value_count);
 
     // 1. Seed the backing host buffer (the source of truth read by both layer and reference).
@@ -513,7 +505,7 @@ class PoolingHarness {
       ASSERT_EQ(hitrates.size(), 2u) << "case " << c_;
       EXPECT_NEAR(hitrates[0], 0.0f, 1e-6f) << "case " << c_;
       EXPECT_NEAR(hitrates[1], 1.0f, 1e-6f) << "case " << c_;
-      const int64_t cache_rows = host_cache_tab_->size(ctx_, true);
+      const int64_t cache_rows = host_cache_tab_->size(ctx_);
       EXPECT_GT(cache_rows, 0) << "PHMap cache was not warmed for case " << c_;
       EXPECT_LE(cache_rows, kHostCacheRows)
           << "PHMap cache exceeded its configured bound for case " << c_;
@@ -743,6 +735,8 @@ class PoolingHarness {
     gpu_tab_ = std::make_shared<GpuTable<IndexT>>(gcfg);
 
     LinearHostTableConfig hcfg;
+
+    hcfg.key_size = sizeof(IndexT);
     hcfg.value_dtype    = c_.in_dtype;
     hcfg.max_threads    = 64;
     hcfg.max_value_size = in_row_bytes_;
@@ -758,6 +752,7 @@ class PoolingHarness {
 
   void BuildHost() {
     LinearHostTableConfig cfg;
+    cfg.key_size = sizeof(IndexT);
     cfg.value_dtype    = c_.in_dtype;
     cfg.max_threads    = 64;
     cfg.max_value_size = in_row_bytes_;
@@ -790,6 +785,8 @@ class PoolingHarness {
     host_cache_tab_ = std::dynamic_pointer_cast<HostTableLike>(phmap_factory->produce(4714, phmap_cfg));
 
     LinearHostTableConfig hcfg;
+
+    hcfg.key_size = sizeof(IndexT);
     hcfg.value_dtype    = c_.in_dtype;
     hcfg.max_threads    = 64;
     hcfg.max_value_size = in_row_bytes_;

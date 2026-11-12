@@ -347,6 +347,40 @@ def _make_ps_with_data(tmpdir):
 
 
 @requires_nvhm
+def test_ps_table_id_export_load_roundtrip():
+    """The PS table id is recorded in the export and reused when the PS is rebuilt."""
+    enum_cfg = nve_ps.NVEParameterServer(0, HIER_EMB_SIZE, torch.float32).export_config()
+    assert enum_cfg["table_id"] == 100  # fixed id of the NVHashMap ps_type
+
+    def plugin_ps(**kwargs):
+        return nve_ps.NVEParameterServer(
+            0, HIER_EMB_SIZE, torch.float32, plugin_name=enum_cfg["plugin_name"],
+            factory_config=enum_cfg["factory_config"], table_config=enum_cfg["table_config"], **kwargs)
+
+    assert plugin_ps().export_config()["table_id"] == 1000  # default plugin table id
+    with pytest.raises(ValueError, match="table_id"):
+        nve_ps.NVEParameterServer(0, HIER_EMB_SIZE, torch.float32, ps_type=nve.NVHashMap, table_id=7)
+
+    def loaded_table_id(save_dir):
+        return json.loads(load_nve_layers(save_dir)[0].storage.export_config_json())["table_id"]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = os.path.join(tmpdir, "export")
+        save_nve(HierarchicalModel(plugin_ps(table_id=4321)), save_dir)
+        assert loaded_table_id(save_dir) == 4321
+
+        # Exports made before the id was recorded load with the default id.
+        meta_path = os.path.join(save_dir, "metadata.json")
+        with open(meta_path) as f:
+            metadata = json.load(f)
+        for ps_cfg in metadata["resources"]["remote_ps"].values():
+            del ps_cfg["table_id"]
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f)
+        assert loaded_table_id(save_dir) == 1000
+
+
+@requires_nvhm
 def test_save_load_hierarchical():
     """save_nve + load_nve_layers round-trip for Hierarchical with data reload."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -647,7 +681,7 @@ class _StubMemblockModule:
         self.id = layer_id
         self.embedding_size = EMB_SIZE
         self.num_embeddings = NUM_EMB
-        self.data_type = torch.float32
+        self.storage_data_type = nve.DataType_t.Float32
 
 
 def test_memblock_resource_descriptor_records_actual_type():
@@ -1119,6 +1153,168 @@ def test_geometry_mismatch_raises():
         with pytest.raises(ValueError, match="num_rows"):
             load_nve_layers(save_dir)
     print("PASS: geometry mismatch raises ValueError")
+
+
+def test_memblock_dtype_mismatch_raises():
+    """A storage_ref whose dtype disagrees with the layer raises on load."""
+    model = SimpleModel(optimize_for_training=False)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = os.path.join(tmpdir, "export")
+        save_nve(model, save_dir)
+
+        with open(os.path.join(save_dir, "metadata.json")) as f:
+            meta = json.load(f)
+
+        ref = meta["layers"][0]["storage_ref"]
+        meta["layers"][0]["dtype"] = "qint8_rowwise_f32"
+        with open(os.path.join(save_dir, "metadata.json"), "w") as f:
+            json.dump(meta, f)
+
+        with pytest.raises(ValueError, match=f"Resource '{ref}' dtype"):
+            load_nve_layers(save_dir)
+    print("PASS: memblock dtype mismatch raises ValueError")
+
+
+# ---------------------------------------------------------------------------
+# Rowwise-quantized storage
+# ---------------------------------------------------------------------------
+
+def _rowwise_rows(qtype, num_rows, emb_size):
+    from pynve.torch.nve_dtypes import quantize_rowwise
+    x = torch.randn(num_rows, emb_size) * torch.linspace(0.5, 3.0, num_rows)[:, None] + 1.0
+    return quantize_rowwise(x, qtype)
+
+
+@pytest.mark.parametrize("aot", [False, True], ids=["export", "aot"])
+def test_rowwise_export_gpu_layer(aot):
+    """A quantized GPULayer keeps every scale byte through .nve weights and reload."""
+    qtype = nve.DataType_t.QInt8RowwiseF16
+    raw = _rowwise_rows(qtype, NUM_EMB, EMB_SIZE)
+
+    class M(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.emb = nve_layers.NVEmbedding(
+                NUM_EMB, EMB_SIZE, qtype, nve_layers.LayerType.GPULayer,
+                weight_init=raw, optimize_for_training=False, device=DEVICE)
+
+        def forward(self, keys):
+            return self.emb(keys)
+
+    model = M()
+    keys = torch.tensor([0, 3, 77, NUM_EMB - 1], dtype=torch.int64, device=DEVICE)
+    expected = model(keys)
+    assert expected.dtype == torch.float16
+
+    with tempfile.TemporaryDirectory() as save_dir:
+        (export_aot if aot else nve_export)(model, (keys,), save_dir)
+        with open(os.path.join(save_dir, "metadata.json")) as f:
+            metadata = json.load(f)
+        layer0 = metadata["layers"][0]
+        assert layer0["dtype"] == "qint8_rowwise_f16"
+        assert metadata["resources"]["memblocks"][layer0["storage_ref"]]["dtype"] == "qint8_rowwise_f16"
+        del model
+
+        if aot:
+            loader, layers = load_aot(save_dir)
+            actual = loader.run([keys])[0]
+        else:
+            loaded, layers = nve_load(save_dir)
+            actual = loaded(keys)
+        assert layers[0].storage_data_type == qtype
+        # Decoding reads every code and scale byte that was reloaded from the .nve file.
+        assert actual.dtype == expected.dtype
+        assert torch.equal(actual, expected)
+
+
+@requires_nvhm
+def test_rowwise_export_hierarchical():
+    """Quantized Hierarchical layer: PS rows reload from a uint8 .npy through ps_data_paths."""
+    qtype = nve.DataType_t.QUint8RowwiseF32
+    num_rows = 512
+    raw = _rowwise_rows(qtype, num_rows, HIER_EMB_SIZE)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        keys_path = os.path.join(tmpdir, "keys.npy")
+        values_path = os.path.join(tmpdir, "values.npy")
+        np.save(keys_path, np.arange(num_rows, dtype=np.int64))
+        np.save(values_path, raw.numpy())
+        ps = nve_ps.NVEParameterServer(0, HIER_EMB_SIZE, qtype)
+        ps.load_from_file(keys_path, values_path)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.emb = nve_layers.NVEmbedding(
+                    num_rows, HIER_EMB_SIZE, qtype, nve_layers.LayerType.Hierarchical,
+                    gpu_cache_size=HIER_GPU_CACHE, storage=ps,
+                    optimize_for_training=False, device=DEVICE)
+
+            def forward(self, keys):
+                return self.emb(keys)
+
+        model = M()
+        keys = torch.tensor([0, 10, 50, num_rows - 1], dtype=torch.int64, device=DEVICE)
+        expected = model(keys)
+
+        save_dir = os.path.join(tmpdir, "export")
+        save_nve(model, save_dir, ps_data_paths={"emb": (keys_path, values_path)})
+        with open(os.path.join(save_dir, "metadata.json")) as f:
+            metadata = json.load(f)
+        layer0 = metadata["layers"][0]
+        assert layer0["dtype"] == "quint8_rowwise_f32"
+        assert metadata["resources"]["remote_ps"][layer0["storage_ref"]]["data_type"] == "quint8_rowwise_f32"
+
+        del model, ps
+        layers = load_nve_layers(save_dir)
+        actual = layers[0](keys)
+        assert actual.dtype == torch.float32
+        assert torch.equal(actual, expected)
+
+
+@requires_nvhm
+def test_save_load_hierarchical_fp16_npy():
+    """float16 PS rows reload from a '<f2' .npy through ps_data_paths."""
+    num_rows = 512
+    values = (torch.arange(num_rows * HIER_EMB_SIZE, dtype=torch.float32) / 7).reshape(num_rows, HIER_EMB_SIZE)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        keys_path = os.path.join(tmpdir, "keys.npy")
+        values_path = os.path.join(tmpdir, "values.npy")
+        np.save(keys_path, np.arange(num_rows, dtype=np.int64))
+        np.save(values_path, values.half().numpy())
+        ps = nve_ps.NVEParameterServer(0, HIER_EMB_SIZE, torch.float16)
+        ps.load_from_file(keys_path, values_path)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.emb = nve_layers.NVEmbedding(
+                    num_rows, HIER_EMB_SIZE, torch.float16, nve_layers.LayerType.Hierarchical,
+                    gpu_cache_size=HIER_GPU_CACHE, storage=ps,
+                    optimize_for_training=False, device=DEVICE)
+
+            def forward(self, keys):
+                return self.emb(keys)
+
+        model = M()
+        keys = torch.tensor([0, 10, 50, num_rows - 1], dtype=torch.int64, device=DEVICE)
+        expected = model(keys)
+        assert torch.equal(expected.cpu(), values.half()[keys.cpu()])
+
+        save_dir = os.path.join(tmpdir, "export")
+        save_nve(model, save_dir, ps_data_paths={"emb": (keys_path, values_path)})
+        del model, ps
+        layers = load_nve_layers(save_dir)
+        assert torch.equal(layers[0](keys), expected)
+
+
+def test_rowwise_legacy_float_dtype_strings_parse():
+    """Older metadata spelled float dtypes as torch names; both spellings still load."""
+    from pynve.torch.nve_dtypes import parse_dtype
+    assert parse_dtype("torch.float32") == nve.DataType_t.Float32
+    assert parse_dtype("float16") == nve.DataType_t.Float16
+    assert parse_dtype("qint8_rowwise_f32") == nve.DataType_t.QInt8RowwiseF32
+    with pytest.raises(ValueError):
+        parse_dtype("bogus")
 
 
 if __name__ == "__main__":

@@ -447,6 +447,22 @@ TEST(LinearFileTable, UpdateReachesTheFile) {
   EXPECT_EQ(out, vals);
 }
 
+// Every row exists: size() is num_rows and get_keys() yields the row range, clipped to capacity.
+TEST(LinearFileTable, SizeAndGetKeysAreTheRowRange) {
+  TempFile file;
+  write_pattern_file(file.path, kNumRows);
+  Harness h(make_config(file.path));
+  EXPECT_EQ(h.table->size(h.ctx), kNumRows);
+
+  std::vector<KeyType> keys(static_cast<size_t>(kNumRows) + 1, static_cast<KeyType>(-1));
+  EXPECT_EQ(h.table->get_keys(h.ctx, static_cast<int64_t>(keys.size()), keys.data()), kNumRows);
+  for (int64_t i = 0; i < kNumRows; ++i) EXPECT_EQ(keys[static_cast<size_t>(i)], static_cast<KeyType>(i));
+  EXPECT_EQ(keys.back(), static_cast<KeyType>(-1));
+
+  EXPECT_EQ(h.table->get_keys(h.ctx, 3, keys.data()), 3);
+  EXPECT_EQ(h.table->get_keys(h.ctx, 0, nullptr), 0);
+}
+
 TEST(LinearFileTable, AccumulateIsNotImplemented) {
   TempFile file;
   write_pattern_file(file.path, kNumRows);

@@ -27,26 +27,22 @@
 #include <nve_c_api.h>
 
 #include <cuda_runtime_api.h>
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <type_traits>
+#include <vector>
 
+#include "c_api_ptr.hpp"
 #include "cuda_ptr.hpp"
 #include "test_utils.hpp"
 
 namespace {
 
-// Owning handles for C API objects, in the spirit of cuda_ptr.hpp: an ASSERT_* failure
-// returns from the test body and would skip a manual destroy, leaking whatever the
-// handle owns (a GPU table holds its device-side cache).
-struct TableDeleter {
-  void operator()(nve_table_t table) const noexcept { nve_table_destroy(table); }
-};
-struct ContextDeleter {
-  void operator()(nve_context_t ctx) const noexcept { nve_context_destroy(ctx); }
-};
-using TablePtr = std::unique_ptr<std::remove_pointer_t<nve_table_t>, TableDeleter>;
-using ContextPtr = std::unique_ptr<std::remove_pointer_t<nve_context_t>, ContextDeleter>;
+using nve::ContextPtr;
+using nve::TableFactoryPtr;
+using nve::TablePtr;
+using nve::ThreadPoolPtr;
 
 class HostTableTest : public ::testing::Test {
  protected:
@@ -236,6 +232,37 @@ TEST_F(HostTableTest, FindWithAllThreeOptionalArgsNull) {
                                         nullptr));
 }
 
+// Device outputs for a host table: results are copied back and slots this call skips or misses
+// keep the caller's contents.
+TEST_F(HostTableTest, FindIntoDeviceBuffersKeepsUnresolvedSlots) {
+  const std::vector<int64_t> stored_keys{1, 2};
+  const std::vector<int64_t> stored_values{100, 200};
+  ASSERT_EQ(NVE_SUCCESS, nve_table_insert(table_, ctx_, 2, stored_keys.data(), sizeof(int64_t),
+                                          sizeof(int64_t), stored_values.data()));
+  ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx_));
+
+  // Key 1 is already resolved by the caller, key 2 is found, key 3 is missing.
+  const std::vector<int64_t> keys{1, 2, 3};
+  uint64_t hit_mask = 0x1;
+  std::vector<int64_t> values{555, -1, -1};
+  void* d_hit_mask = nullptr;
+  void* d_values = nullptr;
+  ASSERT_EQ(cudaSuccess, cudaMalloc(&d_hit_mask, sizeof(uint64_t)));
+  nve::DevicePtr<void> hit_mask_owner(d_hit_mask);
+  ASSERT_EQ(cudaSuccess, cudaMalloc(&d_values, values.size() * sizeof(int64_t)));
+  nve::DevicePtr<void> values_owner(d_values);
+  ASSERT_EQ(cudaSuccess, cudaMemcpy(d_hit_mask, &hit_mask, sizeof(uint64_t), cudaMemcpyDefault));
+  ASSERT_EQ(cudaSuccess, cudaMemcpy(d_values, values.data(), values.size() * sizeof(int64_t), cudaMemcpyDefault));
+
+  EXPECT_EQ(NVE_SUCCESS, nve_table_find(table_, ctx_, 3, keys.data(), static_cast<uint64_t*>(d_hit_mask),
+                                        sizeof(int64_t), d_values, nullptr));
+  ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx_));
+  ASSERT_EQ(cudaSuccess, cudaMemcpy(&hit_mask, d_hit_mask, sizeof(uint64_t), cudaMemcpyDefault));
+  ASSERT_EQ(cudaSuccess, cudaMemcpy(values.data(), d_values, values.size() * sizeof(int64_t), cudaMemcpyDefault));
+  EXPECT_EQ(0x2u, hit_mask & 0x6);
+  EXPECT_EQ((std::vector<int64_t>{555, 200, -1}), values);
+}
+
 // ---------------------------------------------------------------------------------
 // nve_table_get_device_id/get_max_row_size/get_key_size/get_lookup_counter each
 // called with out == NULL.
@@ -289,75 +316,116 @@ TEST_F(HostTableTest, LookupCounterTracksHitsAfterReset) {
 }
 
 // ---------------------------------------------------------------------------------
-// nve_table_update_accumulate with an update_dtype that doesn't match the table's storage dtype.
+// nve_table_size / nve_table_get_keys: argument validation, then the size tracks inserts
+// and get_keys fills at most `capacity` keys and reports how many it wrote.
 // ---------------------------------------------------------------------------------
-TEST(UpdateAccumulateDtype, MismatchedButSupportedDtypeConvertsCorrectly) {
-  nve_thread_pool_t pool = nullptr;
-  ASSERT_EQ(NVE_SUCCESS, nve_thread_pool_create(&pool, "{\"name\": \"simple\", \"num_workers\": 1}"));
-  nve_table_factory_t factory = nullptr;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_create_table_factory(&factory, "libnve-plugin-stl-map.so", "{}"));
-  nve_table_t table = nullptr;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_table_factory_produce(
-                factory, 0, "{\"value_dtype\": \"float32\", \"max_value_size\": 4}", &table));
-  nve_context_t ctx = nullptr;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_table_create_execution_context(table, &ctx, nullptr, nullptr, pool, nullptr));
+TEST_F(HostTableTest, SizeAndGetKeysNullArgs) {
+  int64_t out = 0;
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_table_size(table_, ctx_, nullptr));
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_table_size(nullptr, ctx_, &out));
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_table_get_keys(table_, ctx_, 1, nullptr, &out));
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_table_get_keys(table_, ctx_, 1, &out, nullptr));
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_table_get_keys(table_, ctx_, -1, &out, &out));
+  // Zero capacity needs no buffer.
+  EXPECT_EQ(NVE_SUCCESS, nve_table_get_keys(table_, ctx_, 0, nullptr, &out));
+  EXPECT_EQ(0, out);
+}
 
-  const int64_t key = 1;
-  float value = 10.0f;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_table_insert(table, ctx, 1, &key, sizeof(float), sizeof(float), &value));
-  ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx));
+// Keys are only written to host memory.
+TEST_F(HostTableTest, GetKeysRejectsDeviceBuffer) {
+  void* d_keys = nullptr;
+  ASSERT_EQ(cudaSuccess, cudaMalloc(&d_keys, sizeof(int64_t)));
+  nve::DevicePtr<void> owner(d_keys);
+  int64_t out = 0;
+  EXPECT_EQ(NVE_ERROR_INVALID_ARGUMENT, nve_table_get_keys(table_, ctx_, 1, d_keys, &out));
+}
 
+TEST_F(HostTableTest, SizeAndGetKeysTrackContents) {
+  int64_t size = -1;
+  ASSERT_EQ(NVE_SUCCESS, nve_table_size(table_, ctx_, &size));
+  EXPECT_EQ(0, size);
+
+  const int64_t keys[3] = {1, 2, 3};
+  const int64_t values[3] = {10, 20, 30};
+  ASSERT_EQ(NVE_SUCCESS,
+            nve_table_insert(table_, ctx_, 3, keys, sizeof(int64_t), sizeof(int64_t), values));
+  ASSERT_EQ(NVE_SUCCESS, nve_table_size(table_, ctx_, &size));
+  EXPECT_EQ(3, size);
+
+  int64_t out[4] = {-1, -1, -1, -1};
+  int64_t written = -1;
+  ASSERT_EQ(NVE_SUCCESS, nve_table_get_keys(table_, ctx_, 4, out, &written));
+  EXPECT_EQ(3, written);
+  std::sort(out, out + 3);
+  EXPECT_EQ(1, out[0]);
+  EXPECT_EQ(2, out[1]);
+  EXPECT_EQ(3, out[2]);
+  EXPECT_EQ(-1, out[3]) << "slots past the written count must stay untouched";
+
+  // A smaller buffer is filled to capacity.
+  ASSERT_EQ(NVE_SUCCESS, nve_table_get_keys(table_, ctx_, 2, out, &written));
+  EXPECT_EQ(2, written);
+  EXPECT_NE(out[0], out[1]);
+}
+
+// ---------------------------------------------------------------------------------
+// nve_table_update_accumulate with an update_dtype that doesn't match the table's storage dtype.
+// A float32 host table seeded with one row (key 1 == 10.0f); owning handles release
+// everything in reverse order even when an ASSERT_* returns early.
+// ---------------------------------------------------------------------------------
+class UpdateAccumulateDtype : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    nve_thread_pool_t pool = nullptr;
+    ASSERT_EQ(NVE_SUCCESS, nve_thread_pool_create(&pool, "{\"name\": \"simple\", \"num_workers\": 1}"));
+    pool_.reset(pool);
+    nve_table_factory_t factory = nullptr;
+    ASSERT_EQ(NVE_SUCCESS,
+              nve_create_table_factory(&factory, "libnve-plugin-stl-map.so", "{}"));
+    factory_.reset(factory);
+    nve_table_t table = nullptr;
+    ASSERT_EQ(NVE_SUCCESS,
+              nve_table_factory_produce(
+                  factory, 0, "{\"value_dtype\": \"float32\", \"max_value_size\": 4}", &table));
+    table_.reset(table);
+    nve_context_t ctx = nullptr;
+    ASSERT_EQ(NVE_SUCCESS,
+              nve_table_create_execution_context(table, &ctx, nullptr, nullptr, pool, nullptr));
+    ctx_.reset(ctx);
+
+    float value = 10.0f;
+    ASSERT_EQ(NVE_SUCCESS,
+              nve_table_insert(table, ctx, 1, &key_, sizeof(float), sizeof(float), &value));
+    ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx));
+  }
+
+  const int64_t key_ = 1;
+  ThreadPoolPtr pool_;
+  TableFactoryPtr factory_;
+  TablePtr table_;
+  ContextPtr ctx_;
+};
+
+TEST_F(UpdateAccumulateDtype, MismatchedButSupportedDtypeConvertsCorrectly) {
   // fp16 bit pattern for 1.0. The table stores float32; the accumulate call declares
   // the update as float16 -- a supported, real dtype conversion, not a bug.
   const uint16_t half_one = 0x3C00;
   ASSERT_EQ(NVE_SUCCESS,
-            nve_table_update_accumulate(table, ctx, 1, &key, sizeof(uint16_t), sizeof(uint16_t),
-                                        &half_one, NVE_DTYPE_FLOAT16));
-  ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx));
+            nve_table_update_accumulate(table_.get(), ctx_.get(), 1, &key_, sizeof(uint16_t),
+                                        sizeof(uint16_t), &half_one, NVE_DTYPE_FLOAT16));
+  ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx_.get()));
 
   float out_value = -1.0f;
   uint64_t hit_mask = 0;
   ASSERT_EQ(NVE_SUCCESS,
-            nve_table_find(table, ctx, 1, &key, &hit_mask, sizeof(float), &out_value, nullptr));
+            nve_table_find(table_.get(), ctx_.get(), 1, &key_, &hit_mask, sizeof(float), &out_value,
+                           nullptr));
   EXPECT_FLOAT_EQ(11.0f, out_value) << "10.0f (storage) + 1.0 (fp16 update) via correct conversion";
-
-  nve_context_destroy(ctx);
-  nve_table_destroy(table);
-  nve_table_factory_destroy(factory);
-  nve_thread_pool_destroy(pool);
 }
 
-TEST(UpdateAccumulateDtype, UpdateSizeNotMultipleOfDtypeSizeIsRejected) {
-  nve_thread_pool_t pool = nullptr;
-  ASSERT_EQ(NVE_SUCCESS, nve_thread_pool_create(&pool, "{\"name\": \"simple\", \"num_workers\": 1}"));
-  nve_table_factory_t factory = nullptr;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_create_table_factory(&factory, "libnve-plugin-stl-map.so", "{}"));
-  nve_table_t table = nullptr;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_table_factory_produce(
-                factory, 0, "{\"value_dtype\": \"float32\", \"max_value_size\": 4}", &table));
-  nve_context_t ctx = nullptr;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_table_create_execution_context(table, &ctx, nullptr, nullptr, pool, nullptr));
-
-  const int64_t key = 1;
-  float value = 10.0f;
-  ASSERT_EQ(NVE_SUCCESS,
-            nve_table_insert(table, ctx, 1, &key, sizeof(float), sizeof(float), &value));
-  ASSERT_EQ(NVE_SUCCESS, nve_context_wait(ctx));
-
+TEST_F(UpdateAccumulateDtype, UpdateSizeNotMultipleOfDtypeSizeIsRejected) {
   // 3 bytes is not a multiple of dtype_size(Float32) == 4.
   const uint8_t bogus_update[3] = {1, 2, 3};
-  EXPECT_NE(NVE_SUCCESS, nve_table_update_accumulate(table, ctx, 1, &key, 3, 3, bogus_update,
-                                                     NVE_DTYPE_FLOAT32));
-
-  nve_context_destroy(ctx);
-  nve_table_destroy(table);
-  nve_table_factory_destroy(factory);
-  nve_thread_pool_destroy(pool);
+  EXPECT_NE(NVE_SUCCESS, nve_table_update_accumulate(table_.get(), ctx_.get(), 1, &key_, 3, 3,
+                                                     bogus_update, NVE_DTYPE_FLOAT32));
 }

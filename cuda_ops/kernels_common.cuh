@@ -141,22 +141,6 @@ struct QuantizationHelper<DataType_t::QUint8RowwiseF16>
     constexpr static const size_t element_size = sizeof(uint8_t);
 };
 
-// Byte size of one stored row: elements followed by any per-row quantization parameters.
-template<DataType_t DTYPE>
-inline constexpr uint32_t get_row_size_in_bytes(uint32_t row_size_in_elements)
-{
-    uint32_t bytes = row_size_in_elements * QuantizationHelper<DTYPE>::element_size;
-    if constexpr (QuantizationHelper<DTYPE>::has_scale)
-    {
-        bytes += sizeof(typename QuantizationHelper<DTYPE>::ParamType);
-    }
-    if constexpr (QuantizationHelper<DTYPE>::has_offset)
-    {
-        bytes += sizeof(typename QuantizationHelper<DTYPE>::ParamType);
-    }
-    return bytes;
-}
-
 // Size in bytes of the dequantized value type (QuantizationHelper::ParamType) for a runtime data
 // type. Used to convert an output row stride (in bytes) into an element count. Returns 0 for
 // unsupported types (callers should only pass value/output types: *F32 -> float, *F16 -> __half).

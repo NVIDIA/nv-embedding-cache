@@ -48,7 +48,8 @@ from dataclasses import dataclass, field
 import torch
 import pynve.nve as _nve_mod
 from pynve.torch import HAS_TORCH_OPS
-from pynve.torch.nve_layers import NVEmbeddingBase, NVEmbedding, NVEmbeddingBag, LayerType, torch_type_to_nve_type
+from pynve.torch.nve_layers import NVEmbeddingBase, NVEmbedding, NVEmbeddingBag, LayerType
+import pynve.torch.nve_dtypes as nve_dtypes
 
 METADATA_SCHEMA_VERSION = 2
 
@@ -86,12 +87,10 @@ def _require_torch_ops(func_name: str):
 # Private helpers
 # ---------------------------------------------------------------------------
 
-def _dtype_str(data_type: torch.dtype) -> str:
-    return str(data_type).removeprefix("torch.")
-
-
-def _parse_dtype(dtype_str: str) -> torch.dtype:
-    return getattr(torch, dtype_str.removeprefix("torch."))
+# Metadata records the storage dtype by its NVE name ("float32", "qint8_rowwise_f32", ...);
+# legacy "torch.float32" spellings still parse.
+_dtype_str = nve_dtypes.dtype_str
+_parse_dtype = nve_dtypes.parse_dtype
 
 
 def _gcd_memblock_type(layer_types: set[LayerType]) -> str:
@@ -160,8 +159,20 @@ def _memblock_resource_descriptor(module: NVEmbeddingBase) -> dict:
         "type": module.memblock_type.name,
         "row_elements": module.embedding_size,
         "num_rows": module.num_embeddings,
-        "dtype": _dtype_str(module.data_type),
+        "dtype": _dtype_str(module.storage_data_type),
     }
+
+
+def _ps_export_config(name: str, storage) -> dict:
+    """Return the PS resource config of an NVEParameterServer or a raw ParameterServerTable."""
+    if hasattr(storage, 'export_config'):
+        return storage.export_config()
+    # Raw tables, including those rebuilt by load_nve_layers.
+    if hasattr(storage, 'export_config_json'):
+        return json.loads(storage.export_config_json())
+    raise ValueError(
+        f"Layer '{name}' has a storage object with no export_config() or export_config_json() "
+        "method. PS storage must describe itself with a dict holding a 'remote_ps_type' key.")
 
 
 def _collect_resources(model: torch.nn.Module, *,
@@ -200,14 +211,9 @@ def _collect_resources(model: torch.nn.Module, *,
                 # blocks are resolved by layer intent.
                 user_block_layer_types.setdefault(key, set()).add(module.layer_type)
         else:
-            if not hasattr(storage, 'export_config'):
-                raise ValueError(
-                    f"Layer '{name}' has a storage object with no export_config() method. "
-                    "PS storage must implement export_config() returning a dict with a "
-                    "'remote_ps_type' key.")
             if obj_id not in obj_to_key:
                 key = f"ps-{obj_id}"
-                resources["remote_ps"][key] = storage.export_config()
+                resources["remote_ps"][key] = _ps_export_config(name, storage)
                 obj_to_key[obj_id] = key
             if ps_data_paths and name in ps_data_paths:
                 key = obj_to_key[obj_id]
@@ -238,7 +244,7 @@ def _export_metadata(model: torch.nn.Module, save_dir: str, *,
             "module_path": name,
             "num_embeddings": module.num_embeddings,
             "embedding_size": module.embedding_size,
-            "dtype": _dtype_str(module.data_type),
+            "dtype": _dtype_str(module.storage_data_type),
             "layer_type": module.layer_type.name,
             "gpu_cache_size": module.gpu_cache_size,
             "host_cache_size": module.host_cache_size,
@@ -311,8 +317,8 @@ def save_nve(model: torch.nn.Module, save_dir: str, *,
         model: Model containing NVEmbedding layers.
         save_dir: Directory to save metadata and weights.
         ps_data_paths: Optional mapping of module path to (keys_file, values_file)
-            for Hierarchical layers. These paths are recorded in metadata.json so
-            that :func:`load_nve_layers` can reload the PS data automatically.
+            for Hierarchical and table-backed HostLayer layers. These paths are recorded in
+            metadata.json so that :func:`load_nve_layers` can reload the PS data automatically.
     """
     os.makedirs(save_dir, exist_ok=True)
     _, obj_to_key = _export_metadata(model, save_dir, ps_data_paths=ps_data_paths)
@@ -333,7 +339,7 @@ def export(model: torch.nn.Module, example_inputs, save_dir: str, *,
         save_dir: Directory to save the exported model.
         dynamic_shapes: Optional dynamic shapes for torch.export.
         ps_data_paths: Optional mapping of module path to (keys_file, values_file)
-            for Hierarchical layers.
+            for Hierarchical and table-backed HostLayer layers.
     """
     _require_torch_ops("export")
     save_nve(model, save_dir, ps_data_paths=ps_data_paths)
@@ -359,7 +365,7 @@ def export_aot(model: torch.nn.Module, example_inputs, save_dir: str, *,
         dynamic_shapes: Optional dynamic shapes for torch.export.
         inductor_configs: Optional AOTInductor configuration dict.
         ps_data_paths: Optional mapping of module path to (keys_file, values_file)
-            for Hierarchical layers.
+            for Hierarchical and table-backed HostLayer layers.
     """
     _require_torch_ops("export_aot")
     save_nve(model, save_dir, ps_data_paths=ps_data_paths)
@@ -393,11 +399,13 @@ def _build_ps_from_config(ps_config: dict):
             "only 'plugin' is supported.")
     remote_ps = _nve_mod.ParameterServerTable(
         row_elements=ps_config["row_elements"],
-        data_type=torch_type_to_nve_type(_parse_dtype(ps_config["data_type"])),
+        data_type=_parse_dtype(ps_config["data_type"]),
         plugin_name=ps_config["plugin_name"],
         factory_config_json=json.dumps(ps_config.get("factory_config", {})),
         table_config_json=json.dumps(ps_config.get("table_config", {})),
         num_rows=ps_config.get("num_rows", 0),
+        # Exports made before table_id was recorded use the binding's default id.
+        **({"table_id": ps_config["table_id"]} if "table_id" in ps_config else {}),
     )
     ps_data = ps_config.get("remote_ps_data")
     if ps_data:
@@ -413,7 +421,7 @@ def _build_memblock_from_descriptor(mb_cfg: dict, device_index: int,
     mb_type_str = mb_cfg["type"]
     row_elements = mb_cfg["row_elements"]
     num_rows = mb_cfg["num_rows"]
-    nve_dtype = torch_type_to_nve_type(_parse_dtype(mb_cfg["dtype"]))
+    nve_dtype = _parse_dtype(mb_cfg["dtype"])
 
     if "NVL" == mb_type_str:
         gpu_ids = _nve_mod.resolve_memblock_devices(
@@ -540,12 +548,11 @@ def _load_nve_layers_v1(metadata: list, save_dir: str,
                                 optimize_for_training, device, layer_id,
                                 mode, is_bag, storage=storage, config=config)
         elif layer_type in (LayerType.LinearUVM, LayerType.GPULayer, LayerType.HostLayer):
-            nve_dtype = torch_type_to_nve_type(data_type)
             if layer_type == LayerType.HostLayer:
                 if device.type == "cpu":
-                    storage = _nve_mod.HostMemBlock(emb_size, num_emb, nve_dtype)
+                    storage = _nve_mod.HostMemBlock(emb_size, num_emb, data_type)
                 else:
-                    storage = _nve_mod.ManagedMemBlock(emb_size, num_emb, nve_dtype, [device_index])
+                    storage = _nve_mod.ManagedMemBlock(emb_size, num_emb, data_type, [device_index])
             else:
                 storage = None
             layer = _make_layer(num_emb, emb_size, data_type, layer_type,
@@ -596,29 +603,15 @@ def _load_nve_layers_v2(doc: dict, save_dir: str,
         registry[effective] = obj
         return obj
 
-    def _get_or_build_memblock(key: str, num_emb: int, emb_size: int,
-                               data_type: torch.dtype) -> tuple:
-        """Returns (memblock, is_new). is_new is False on registry hit so the
-        caller skips re-loading weights into an already-populated block."""
+    def _is_ps_ref(key: str) -> bool:
         effective = _resolve_key(key)
         if effective in registry:
-            mb = registry[effective]
-            mb_cfg = mb_resources.get(effective, {})
-            if mb_cfg:
-                if mb_cfg["row_elements"] != emb_size:
-                    raise ValueError(
-                        f"Resource '{effective}' row_elements={mb_cfg['row_elements']} "
-                        f"!= layer embedding_size={emb_size} — stale or hand-edited metadata?")
-                if mb_cfg["num_rows"] != num_emb:
-                    raise ValueError(
-                        f"Resource '{effective}' num_rows={mb_cfg['num_rows']} "
-                        f"!= layer num_embeddings={num_emb} — stale or hand-edited metadata?")
-            return mb, False
-        if effective not in mb_resources:
-            raise ValueError(
-                f"storage_ref '{effective}' not found in resources.memblocks.")
-        mb_cfg = mb_resources[effective]
-        # Assert geometry
+            return not isinstance(registry[effective], _nve_mod.MemBlock)
+        return effective in ps_resources
+
+    def _check_memblock_cfg(effective: str, mb_cfg: dict, num_emb: int, emb_size: int,
+                            data_type: _nve_mod.DataType_t) -> None:
+        """Assert the memblock descriptor matches the layer's geometry and storage dtype."""
         if mb_cfg["row_elements"] != emb_size:
             raise ValueError(
                 f"Resource '{effective}' row_elements={mb_cfg['row_elements']} "
@@ -627,6 +620,26 @@ def _load_nve_layers_v2(doc: dict, save_dir: str,
             raise ValueError(
                 f"Resource '{effective}' num_rows={mb_cfg['num_rows']} "
                 f"!= layer num_embeddings={num_emb} — stale or hand-edited metadata?")
+        if _parse_dtype(mb_cfg["dtype"]) != data_type:
+            raise ValueError(
+                f"Resource '{effective}' dtype={mb_cfg['dtype']} "
+                f"!= layer dtype={_dtype_str(data_type)} — stale or hand-edited metadata?")
+
+    def _get_or_build_memblock(key: str, num_emb: int, emb_size: int,
+                               data_type: _nve_mod.DataType_t) -> tuple:
+        """Returns (memblock, is_new). is_new is False on registry hit so the
+        caller skips re-loading weights into an already-populated block."""
+        effective = _resolve_key(key)
+        if effective in registry:
+            mb_cfg = mb_resources.get(effective, {})
+            if mb_cfg:
+                _check_memblock_cfg(effective, mb_cfg, num_emb, emb_size, data_type)
+            return registry[effective], False
+        if effective not in mb_resources:
+            raise ValueError(
+                f"storage_ref '{effective}' not found in resources.memblocks.")
+        mb_cfg = mb_resources[effective]
+        _check_memblock_cfg(effective, mb_cfg, num_emb, emb_size, data_type)
         obj = _build_memblock_from_descriptor(
             mb_cfg, device_index, device.type, nvl_devices_override)
         registry[effective] = obj
@@ -661,6 +674,14 @@ def _load_nve_layers_v2(doc: dict, save_dir: str,
             storage = _get_or_build_ps(storage_ref)
             layer = _make_layer(num_emb, emb_size, data_type, layer_type,
                                 gpu_cache_size, host_cache_size,
+                                optimize_for_training, device, layer_id,
+                                mode, is_bag, storage=storage, config=config)
+
+        elif layer_type == LayerType.HostLayer and storage_ref and _is_ps_ref(storage_ref):
+            # Table-backed HostLayer: data is restored by the PS, there is no weight file.
+            storage = _get_or_build_ps(storage_ref)
+            layer = _make_layer(num_emb, emb_size, data_type, layer_type,
+                                gpu_cache_size, 0,
                                 optimize_for_training, device, layer_id,
                                 mode, is_bag, storage=storage, config=config)
 

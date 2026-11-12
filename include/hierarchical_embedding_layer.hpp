@@ -28,6 +28,7 @@ class InsertHeuristic;
 /**
  * An embedding layer with a hierarchy of tables (caches/databases).
  * Lookups will be resolved by processing tables in order, such that indices missing in one table will be forwarded to the next.
+ * Lookups can auto-insert the rows they resolved into every table except the last one (see Config::insert_heuristic).
  */
 template <typename KeyType>
 class HierarchicalEmbeddingLayer : public EmbeddingLayerBase {
@@ -35,6 +36,7 @@ class HierarchicalEmbeddingLayer : public EmbeddingLayerBase {
   struct Config {
     std::string layer_name;
     std::shared_ptr<InsertHeuristic> insert_heuristic = nullptr; // nullptr will result in using the default InsertHeuristic
+                                                                 // the last table is never auto-inserted into, whatever the heuristic
                                                                  // auto inserts can be disabled by using the NeverInsertHeuristic class
     int64_t min_insert_freq_gpu = 0; // Minimal amount of lookups between inserts on GPU. increase this to throttle down auto inserts
     int64_t min_insert_freq_host = 0; // Minimal amount of lookups between inserts on Host. increase this to throttle down auto inserts
@@ -87,15 +89,16 @@ class HierarchicalEmbeddingLayer : public EmbeddingLayerBase {
   allocator_ptr_t allocator_;
   std::vector<table_ptr_t> tables_;
   int32_t gpu_device_; // gpu device id or -1
+  DataType_t value_type_ = DataType_t::Unknown; // common value type of the typed tables, Unknown if none is typed
 
-  // Either empty (auto-insert disabled) or one handler per table.
+  // One handler per table, except the last table which is never auto-inserted into.
   std::vector<std::shared_ptr<AutoInsertHandler>> auto_insert_handlers_;
 
-  // Handler for table `i`, or null when auto-insert is disabled. Lets modify ops take a
+  // Handler for table `i`, or null for the last table. Lets modify ops take a
   // ScopedModifyLock unconditionally.
   inline const std::shared_ptr<AutoInsertHandler>& handler_at(size_t i) const {
     static const std::shared_ptr<AutoInsertHandler> none;
-    return auto_insert_handlers_.empty() ? none : auto_insert_handlers_.at(i);
+    return (i < auto_insert_handlers_.size()) ? auto_insert_handlers_.at(i) : none;
   }
 };
 

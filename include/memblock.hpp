@@ -48,6 +48,9 @@ protected:
     MemBlockType type_;
 };
 
+// Bytes needed for num_embeddings rows of row_size elements; throws on overflow.
+size_t memblock_size_in_bytes(size_t row_size, size_t num_embeddings, nve::DataType_t dtype);
+
 class LinearMemBlock : public MemBlock {
 public:
     LinearMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, int device_id = -1);

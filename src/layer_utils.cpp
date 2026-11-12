@@ -358,17 +358,8 @@ void pool_gathered_host(context_ptr_t& ctx,
                  "pool_gathered_host supports fp32/fp16 output; same-type output is only accepted "
                  "for Concatenate mode");
 
-  int64_t row_width = 0;
-  if (quant_in) {
-    // row_size is the full quantized row stride: value bytes + trailing scale[/offset].
-    const int64_t meta_bytes = quant_rowwise_meta_bytes(in_dtype);
-    NVE_CHECK_(row_size > meta_bytes, "Quantized row size smaller than its scale/offset metadata");
-    row_width = row_size - meta_bytes;
-  } else {
-    NVE_CHECK_(row_size % static_cast<int64_t>(dtype_size(in_dtype)) == 0,
-               "Table row size not a multiple of the value element size");
-    row_width = row_size / dtype_size(in_dtype);
-  }
+  // row_size is the full stored row stride, including any trailing quant scale[/offset].
+  const int64_t row_width = row_num_elements(in_dtype, row_size);
   // For same-type Concatenate the output holds a full raw row including quantized metadata, so the
   // minimum stride is the full row_size. For all other modes the output holds only the decoded
   // value elements.

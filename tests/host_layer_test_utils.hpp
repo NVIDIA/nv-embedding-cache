@@ -110,6 +110,7 @@ HostLayerHandles<KeyType> make_host_layer(void* emb_table, int64_t row_bytes, in
                                           const std::string& layer_name,
                                           std::vector<uint8_t> default_embedding = {}) {
   nve::LinearHostTableConfig cfg;
+  cfg.key_size = sizeof(KeyType);
   cfg.value_dtype = value_dtype;
   cfg.max_threads = max_threads;
   cfg.max_value_size = row_bytes;

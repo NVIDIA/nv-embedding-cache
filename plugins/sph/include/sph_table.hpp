@@ -18,6 +18,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <nlohmann/json_fwd.hpp>
 #include <plugin/plugin.hpp>
 #include <shared_mutex>
@@ -64,7 +65,7 @@ void to_json(nlohmann::json& json, const SphTableConfig& conf);
  * wrapper pattern (a Table subclass whose engine member is the hash map).
  *
  * Supported: insert, update (write-if-exists), find, clear.
- * Not supported (throw NVE_THROW_NOT_IMPLEMENTED_): erase, update_accumulate.
+ * Not supported (throw NVE_THROW_NOT_IMPLEMENTED_): erase, update_accumulate, size, get_keys.
  * find() supports the in/out hit_mask (keys whose bit is already set are skipped,
  * and a bit is reported for every key resolved here) but ignores value_sizes.
  * The lookup counter reports misses, counted from that mask; it is only produced
@@ -88,6 +89,9 @@ class SphTable final : public Table {
                                          allocator_ptr_t allocator) override;
 
   void clear(context_ptr_t& ctx) override;
+
+  int64_t size(context_ptr_t& ctx) const override;
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
 
   void reset_lookup_counter(context_ptr_t& ctx) override;
   void get_lookup_counter(context_ptr_t& ctx, int64_t* counter) const override;
@@ -132,7 +136,7 @@ class SphTable final : public Table {
  private:
   // Runs defrag() iff auto-defrag is enabled and the table is over threshold.
   void maybe_defrag(context_ptr_t& ctx);
-  // Body of defrag(); caller must already hold table_mutex_ exclusively.
+  // Body of defrag(); caller must already hold modify_mutex_ and table_mutex_ exclusively.
   void defrag_locked(context_ptr_t& ctx);
   // Order `stream` behind every live context's lookup stream. Caller must
   // already hold table_mutex_ exclusively.
@@ -142,7 +146,12 @@ class SphTable final : public Table {
   const SphTableConfig config_;
   int64_t capacity_{0};
   std::unique_ptr<sph::ShardedPerfectHashMap> engine_;
-  // Shared by every regular op, taken exclusively by defrag.
+  // The engine allows find to overlap an insert but never two modifies (they
+  // share scratch pools and readback counters), so modifies are serialized by
+  // modify_mutex_ while table_mutex_ keeps lookups off defrag/clear. Lock order
+  // is always modify_mutex_ first, then table_mutex_.
+  mutable std::mutex modify_mutex_;
+  // Shared by find and modify ops, taken exclusively by defrag and clear.
   mutable std::shared_mutex table_mutex_;
   // Live contexts, so defrag can order itself behind their lookup streams.
   std::shared_ptr<ContextRegistry> contexts_;

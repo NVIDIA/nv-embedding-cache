@@ -527,7 +527,7 @@ template <typename KeyType>
 void test_quant_pooling(DataType_t qtype) {
   const int64_t num_values = 16;
   const int64_t num_rows = 32;
-  const int64_t row_stride = num_values + quant_rowwise_meta_bytes(qtype);
+  const int64_t row_stride = row_size_in_bytes(qtype, num_values);
   const bool uint_quant =
       (qtype == DataType_t::QUint8RowwiseF32 || qtype == DataType_t::QUint8RowwiseF16);
   const bool scale_f16 =
@@ -576,6 +576,7 @@ void test_quant_pooling(DataType_t qtype) {
   }
 
   LinearHostTableConfig cfg;
+  cfg.key_size = sizeof(KeyType);
   cfg.value_dtype = qtype;
   cfg.max_threads = 16;
   cfg.max_value_size = row_stride;
@@ -679,15 +680,6 @@ TEST(HostLayerQuantInt64, pooling_quint8_f16) {
 
 // ------------------- generic dtype/pooling/sparse combinations -----------------
 
-// Row stride in bytes for a value table of the given input dtype.
-inline int64_t pooling_row_stride(DataType_t in_dtype, int64_t num_values) {
-  if (is_quant_rowwise(in_dtype)) {
-    return num_values + quant_rowwise_meta_bytes(in_dtype);
-  }
-  const int64_t elem = (in_dtype == DataType_t::Float16) ? static_cast<int64_t>(sizeof(__half))
-                                                         : static_cast<int64_t>(sizeof(float));
-  return num_values * elem;
-}
 
 // Fill `buf` (size row_stride*num_rows) with rows of the given input dtype and
 // record the effective (stored / dequantized) value of each element in val[r][e].
@@ -773,7 +765,7 @@ void test_pooling_combo(DataType_t in_dtype, DataType_t out_dtype, DataType_t we
 
   const int64_t num_values = 16;
   const int64_t num_rows = 32;
-  const int64_t row_stride = pooling_row_stride(in_dtype, num_values);
+  const int64_t row_stride = row_size_in_bytes(in_dtype, num_values);
 
   int8_t* raw_buf = nullptr;
   ASSERT_EQ(cudaMallocHost(&raw_buf, static_cast<size_t>(row_stride * num_rows)), cudaSuccess);
@@ -784,6 +776,7 @@ void test_pooling_combo(DataType_t in_dtype, DataType_t out_dtype, DataType_t we
   fill_value_table(in_dtype, num_values, num_rows, buf.get(), row_stride, val);
 
   LinearHostTableConfig cfg;
+  cfg.key_size = sizeof(KeyType);
   cfg.value_dtype = in_dtype;
   cfg.max_threads = 16;
   cfg.max_value_size = row_stride;
@@ -949,7 +942,7 @@ void test_pooling_concat_convert(DataType_t in_dtype, DataType_t out_dtype) {
   const bool out_half = (out_dtype == DataType_t::Float16);
   const int64_t num_values = 16;
   const int64_t num_rows = 32;
-  const int64_t row_stride = pooling_row_stride(in_dtype, num_values);
+  const int64_t row_stride = row_size_in_bytes(in_dtype, num_values);
 
   int8_t* raw_buf = nullptr;
   ASSERT_EQ(cudaMallocHost(&raw_buf, static_cast<size_t>(row_stride * num_rows)), cudaSuccess);
@@ -958,6 +951,7 @@ void test_pooling_concat_convert(DataType_t in_dtype, DataType_t out_dtype) {
   fill_value_table(in_dtype, num_values, num_rows, buf.get(), row_stride, val);
 
   LinearHostTableConfig cfg;
+  cfg.key_size = sizeof(KeyType);
   cfg.value_dtype = in_dtype;
   cfg.max_threads = 16;
   cfg.max_value_size = row_stride;
@@ -1042,7 +1036,7 @@ template <typename KeyType>
 void test_weighted_mean_zero_weight_sum(DataType_t in_dtype) {
   const int64_t num_values = 8;
   const int64_t num_rows = 16;
-  const int64_t row_stride = pooling_row_stride(in_dtype, num_values);
+  const int64_t row_stride = row_size_in_bytes(in_dtype, num_values);
 
   int8_t* raw_buf = nullptr;
   ASSERT_EQ(cudaMallocHost(&raw_buf, static_cast<size_t>(row_stride * num_rows)), cudaSuccess);
@@ -1051,6 +1045,7 @@ void test_weighted_mean_zero_weight_sum(DataType_t in_dtype) {
   fill_value_table(in_dtype, num_values, num_rows, buf.get(), row_stride, val);
 
   LinearHostTableConfig cfg;
+  cfg.key_size = sizeof(KeyType);
   cfg.value_dtype = in_dtype;
   cfg.max_threads = 8;
   cfg.max_value_size = row_stride;
@@ -1122,6 +1117,7 @@ void test_disable_threadpool() {
   std::iota(backing.begin(), backing.end(), 0.f);
 
   LinearHostTableConfig tab_cfg;
+  tab_cfg.key_size = sizeof(KeyType);
   tab_cfg.value_dtype = DataType_t::Float32;
   tab_cfg.max_value_size = row_bytes;
   tab_cfg.num_rows = num_rows;
@@ -1219,6 +1215,7 @@ class HostLayerTaskSizeTest : public testing::Test {
 
   void make_layer(int64_t layer_threshold) {
     LinearHostTableConfig cfg;
+    cfg.key_size = sizeof(int64_t);
     cfg.value_dtype = DataType_t::Float32;
     cfg.task_size_threshold = kTableThreshold;
     cfg.max_value_size = kRowBytes;
@@ -1286,6 +1283,7 @@ TEST_F(HostLayerTaskSizeTest, threshold_one_restores_full_fanout) {
 TEST(HostLayerConfigTest, rejects_non_positive_task_size_threshold) {
   float row[4] = {};
   LinearHostTableConfig cfg;
+  cfg.key_size = sizeof(int64_t);
   cfg.value_dtype = DataType_t::Float32;
   cfg.max_value_size = sizeof(row);
   cfg.num_rows = 1;

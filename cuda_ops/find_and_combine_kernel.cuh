@@ -18,6 +18,7 @@
 #pragma once
 
 #include <algorithm>
+#include <type_traits>
 #include <ecache/embedding_cache_combined.h>
 #include <ecache/embedding_cache_combined.cuh>
 #include "kernels_common.cuh"
@@ -26,12 +27,25 @@
 using namespace nve;
 
 // Bit layout for the packed find_and_combine MASK template parameter. The kernel unpacks these and
-// get_mask() packs them; cmake/gen_find_and_combine_instantiations.py enumerates MASK over
-// [0, 16) with this same layout, so all three must stay in sync.
-constexpr uint32_t NVE_FAC_MASK_FIXED_HOTNESS = 1u << 0;
-constexpr uint32_t NVE_FAC_MASK_SUM_POOLING   = 1u << 1;
-constexpr uint32_t NVE_FAC_MASK_IS_WEIGHTED   = 1u << 2;
-constexpr uint32_t NVE_FAC_MASK_LOAD_INDICES  = 1u << 3;
+// the dispatch packs them; cmake/gen_find_and_combine_instantiations.py enumerates MASK with this
+// same layout, so all three must stay in sync. Fixed vs CSR hotness and index loading are always
+// passed as kernel arguments too. With NVE_FAC_SPECIALIZE_FLAGS (set unless the CMake option
+// NVE_OPTIMIZE_BIN_SIZE is ON) they are
+// also MASK bits, so each combination gets its own branch-free kernel; without it MASK only has the
+// pooling bits and the kernel branches on the arguments (4x fewer kernels, smaller library).
+#ifndef NVE_FAC_SPECIALIZE_FLAGS
+#define NVE_FAC_SPECIALIZE_FLAGS 0
+#endif
+constexpr uint32_t NVE_FAC_MASK_SUM_POOLING   = 1u << 0;
+constexpr uint32_t NVE_FAC_MASK_IS_WEIGHTED   = 1u << 1;
+constexpr uint32_t NVE_FAC_MASK_FIXED_HOTNESS = 1u << 2;  // NVE_FAC_SPECIALIZE_FLAGS only
+constexpr uint32_t NVE_FAC_MASK_LOAD_INDICES  = 1u << 3;  // NVE_FAC_SPECIALIZE_FLAGS only
+
+// Unweighted kernels never read the weights, so they are instantiated and launched with a float
+// weight type whatever the caller's weight type is (one kernel instead of one per weight type).
+// Keep in sync with UNWEIGHTED_WEIGHT_TYPE in cmake/gen_find_and_combine_instantiations.py.
+template<typename WEIGHT_TYPE, uint32_t MASK>
+using nve_fac_weight_t = std::conditional_t<(MASK & NVE_FAC_MASK_IS_WEIGHTED) != 0u, WEIGHT_TYPE, float>;
 
 template<DataType_t ELEMENT_TYPE_ID, typename INDEX_TYPE, typename ACC_TYPE, typename WEIGHT_TYPE,
          typename OUTPUT_TYPE, typename INPUT_VEC_TYPE, typename OUT_VEC_TYPE,
@@ -45,19 +59,26 @@ __global__ void find_and_combine(const uint32_t batchSz,
                                const WEIGHT_TYPE* __restrict__ weights,
                                int32_t num_hot,  CacheDataT cache,
                                int32_t rowSizeInElements,
-                               OUTPUT_TYPE* pOutput)
+                               OUTPUT_TYPE* pOutput,
+                               bool is_fixed_hotness_arg,
+                               bool load_indices_arg)
 {
-    constexpr bool FIXED_HOTNESS = (MASK & NVE_FAC_MASK_FIXED_HOTNESS) != 0u;
-    constexpr bool SUM_POOLING   = (MASK & NVE_FAC_MASK_SUM_POOLING)   != 0u;
-    constexpr bool IS_WEIGHTED   = (MASK & NVE_FAC_MASK_IS_WEIGHTED)   != 0u;
-    constexpr bool LOAD_INDICES  = (MASK & NVE_FAC_MASK_LOAD_INDICES)  != 0u;
+    constexpr bool SUM_POOLING = (MASK & NVE_FAC_MASK_SUM_POOLING) != 0u;
+    constexpr bool IS_WEIGHTED = (MASK & NVE_FAC_MASK_IS_WEIGHTED) != 0u;
+    // Compile-time constants in specialized builds, so the branches below fold away.
+    const bool is_fixed_hotness =
+        NVE_FAC_SPECIALIZE_FLAGS ? (MASK & NVE_FAC_MASK_FIXED_HOTNESS) != 0u : is_fixed_hotness_arg;
+    const bool load_indices =
+        NVE_FAC_SPECIALIZE_FLAGS ? (MASK & NVE_FAC_MASK_LOAD_INDICES) != 0u : load_indices_arg;
     using ELEMENT_TYPE = typename QuantizationHelper<ELEMENT_TYPE_ID>::ParamType;
     const int32_t sampleId = blockIdx.x;
     constexpr int32_t SUBWARP_WIDTH = 32;
 
     uint32_t hotness = num_hot;
-    if constexpr (!FIXED_HOTNESS) {
-        hotness = offsets[sampleId + 1] - offsets[sampleId];
+    INDEX_TYPE sampleStart = sampleId * hotness;
+    if (!is_fixed_hotness) {
+        sampleStart = offsets[sampleId];
+        hotness = offsets[sampleId + 1] - sampleStart;
     }
 
     const uint32_t hotnessTid = threadIdx.x;
@@ -67,7 +88,6 @@ __global__ void find_and_combine(const uint32_t batchSz,
 
     constexpr auto vecSizeInElements = sizeof(ELEMENT_VEC_TYPE) / sizeof(ELEMENT_TYPE);
     int32_t rowSizeInVecs = rowSizeInElements / vecSizeInElements;
-    const INDEX_TYPE sampleStart = FIXED_HOTNESS ? sampleId * hotness :  offsets[sampleId];
     const INDEX_TYPE sampleEnd = sampleStart + hotness;
     const INDEX_TYPE* currIdx = indices + sampleStart;
     for (int base_offset = 0; base_offset < rowSizeInVecs; base_offset += SUBWARP_WIDTH * SZ_ACCUM) {
@@ -81,7 +101,9 @@ __global__ void find_and_combine(const uint32_t batchSz,
       for (int i = 0; i < hotness; i += SUBWARP_WIDTH)
       {
           // TODO: should be conditional load
-          INDEX_TYPE laneIdx = ((i + hotnessTid) < hotness) ? (LOAD_INDICES ? __ldcv(currIdx + i + hotnessTid) : (sampleStart + i + hotnessTid)) : 0;
+          INDEX_TYPE laneIdx = ((i + hotnessTid) < hotness)
+              ? (load_indices ? __ldcv(currIdx + i + hotnessTid) : (sampleStart + i + hotnessTid))
+              : 0;
           uint64_t lanePtr = AddressFunctor<INDEX_TYPE, CacheDataT>::get_address(laneIdx, table, 0, cache);
           #pragma unroll 4
           for (int s = 0; s < SUBWARP_WIDTH; s++)
@@ -153,17 +175,49 @@ __global__ void find_and_combine(const uint32_t batchSz,
     }
 }
 
-// Host launch wrapper for one find_and_combine combination. Kept as a plain (non-__global__) host
-// function template so it can be explicitly instantiated in a separate translation unit and linked
-// without relocatable device code: the kernel launch (and hence the kernel's device-code
-// instantiation) stays co-located with this wrapper in whichever TU instantiates it. The dispatch
-// in call_find_and_combine_kernel_types_resolved routes every launch through this wrapper; the generated
-// inst_*.cu files provide the definitions and gpu_table.cu sees only the extern declarations below.
+// Pointer to any find_and_combine instantiation with these parameter types.
+template<typename INDEX_TYPE, typename WEIGHT_TYPE, typename OUTPUT_TYPE, typename CacheDataT>
+using nve_fac_kernel_t = void (*)(uint32_t, const int8_t*, const INDEX_TYPE*, const INDEX_TYPE*,
+                                  const WEIGHT_TYPE*, int32_t, CacheDataT, int32_t, OUTPUT_TYPE*,
+                                  bool, bool);
+
+// Address of one find_and_combine combination. Kept as a plain host function template so it can be
+// explicitly instantiated in a separate translation unit and linked without relocatable device
+// code: taking the kernel's address instantiates its device code in whichever TU instantiates this.
+// The generated inst_*.cu files provide the definitions; the generated find_and_combine_dispatch.cu
+// includes their extern declarations (find_and_combine_kernel_extern.inc) and is the only caller.
+// Hidden: code outside nve-common calls the exported call_find_and_combine_kernel instantiations.
 template<DataType_t ELEMENT_TYPE_ID, typename INDEX_TYPE, typename ACC_TYPE, typename WEIGHT_TYPE,
          typename OUTPUT_TYPE, typename INPUT_VEC_TYPE, typename OUT_VEC_TYPE,
          typename ELEMENT_VEC_TYPE, typename ACC_VEC_TYPE, typename CacheDataT,
          uint32_t SZ_ACCUM, uint32_t MASK>
-void nve_fac_launch(const uint32_t batchSz,
+__attribute__((visibility("hidden")))
+nve_fac_kernel_t<INDEX_TYPE, WEIGHT_TYPE, OUTPUT_TYPE, CacheDataT> nve_fac_kernel()
+{
+    return find_and_combine<ELEMENT_TYPE_ID, INDEX_TYPE, ACC_TYPE, WEIGHT_TYPE, OUTPUT_TYPE,
+                            INPUT_VEC_TYPE, OUT_VEC_TYPE, ELEMENT_VEC_TYPE, ACC_VEC_TYPE,
+                            CacheDataT, SZ_ACCUM, MASK>;
+}
+
+// Type-checks a selected kernel against the dispatch's parameter types, then erases its type for
+// nve_fac_launch. Unweighted kernels take a float weight pointer instead (nve_fac_weight_t).
+template<typename INDEX_TYPE, typename WEIGHT_TYPE, typename OUTPUT_TYPE, typename CacheDataT,
+         uint32_t MASK>
+inline const void* nve_fac_erase(nve_fac_kernel_t<INDEX_TYPE, nve_fac_weight_t<WEIGHT_TYPE, MASK>,
+                                                  OUTPUT_TYPE, CacheDataT> kernel)
+{
+    return reinterpret_cast<const void*>(kernel);
+}
+
+// Launches a find_and_combine kernel by its host address with cudaLaunchKernel (the <<<>>> stub
+// launches through a cached cudaKernel_t instead). `kernel` comes from nve_fac_erase with these
+// parameter types; unweighted kernels take a float weight pointer, which they never read, so the
+// caller's weight pointer is passed to them as is. Out of line so the element-type dispatchers
+// share one copy per parameter-type combination.
+template<typename INDEX_TYPE, typename WEIGHT_TYPE, typename OUTPUT_TYPE, typename CacheDataT>
+__attribute__((noinline, visibility("hidden")))
+void nve_fac_launch(const void* kernel,
+                    uint32_t batchSz,
                     const int8_t* table,
                     const INDEX_TYPE* indices,
                     const INDEX_TYPE* offsets,
@@ -172,43 +226,27 @@ void nve_fac_launch(const uint32_t batchSz,
                     CacheDataT cache,
                     int32_t rowSizeInElements,
                     void* output,
+                    bool is_fixed_hotness,
+                    bool load_indices,
                     cudaStream_t stream)
 {
-    dim3 gridSize(batchSz, 1);
-    dim3 blockSize(32, 1);
-    find_and_combine<ELEMENT_TYPE_ID, INDEX_TYPE, ACC_TYPE, WEIGHT_TYPE, OUTPUT_TYPE,
-                   INPUT_VEC_TYPE, OUT_VEC_TYPE, ELEMENT_VEC_TYPE, ACC_VEC_TYPE, CacheDataT,
-                   SZ_ACCUM, MASK>
-        <<<gridSize, blockSize, 0, stream>>>(batchSz, table, indices, offsets, weights,
-                                             num_hot, cache, rowSizeInElements,
-                                             reinterpret_cast<OUTPUT_TYPE*>(output));
+    OUTPUT_TYPE* pOutput = reinterpret_cast<OUTPUT_TYPE*>(output);
+    void* args[] = {&batchSz, &table, &indices, &offsets, &weights, &num_hot, &cache,
+                    &rowSizeInElements, &pOutput, &is_fixed_hotness, &load_indices};
+    static_assert(std::is_same_v<nve_fac_kernel_t<INDEX_TYPE, WEIGHT_TYPE, OUTPUT_TYPE, CacheDataT>,
+                                 void (*)(decltype(batchSz), decltype(table), decltype(indices),
+                                          decltype(offsets), decltype(weights), decltype(num_hot),
+                                          decltype(cache), decltype(rowSizeInElements),
+                                          decltype(pOutput), decltype(is_fixed_hotness),
+                                          decltype(load_indices))>,
+                  "args[] must match the find_and_combine parameters");
+    // Like the <<<>>> stub, the result is discarded; the cudaGetLastError check after dispatch
+    // reports launch errors.
+    (void)cudaLaunchKernel(kernel, dim3(batchSz, 1), dim3(32, 1), args, 0, stream);
 }
 
-// extern template declarations of nve_fac_launch for every dispatched combination, generated at
-// build time (see cmake/gen_find_and_combine_instantiations.py). Including this before the launcher
-// templates below suppresses implicit instantiation of the launch wrappers (and their kernels) in
-// every TU; the definitions are compiled once, split across the generated inst_*.cu files linked
-// into nve-common.
-//
-// The generated inst_*.cu TUs define NVE_FAC_SKIP_EXTERN_DECLS before including this header: they
-// *provide* the definitions and never call the launcher, so they don't need (and shouldn't pay the
-// parse cost of) the ~tens-of-thousands of extern declarations. Only TUs that *use* the kernel
-// (gpu_table.cu, tests) include them to suppress local instantiation.
-#ifndef NVE_FAC_SKIP_EXTERN_DECLS
-#include "find_and_combine_kernel_extern.inc"
-#endif
-
-inline uint32_t get_mask(SparseType_t hot_type, PoolingType_t pooling_type, bool load_indices) {
+inline uint32_t get_mask(PoolingType_t pooling_type) {
     uint32_t mask = 0;
-    switch (hot_type) {
-      case SparseType_t::Fixed:
-        mask |= NVE_FAC_MASK_FIXED_HOTNESS;
-        break;
-      case SparseType_t::CSR:
-        break;
-      default:
-        NVE_THROW_("Unsupported sparse type ", static_cast<uint32_t>(hot_type));
-    }
     switch (pooling_type) {
       case PoolingType_t::Sum:
         mask |= NVE_FAC_MASK_SUM_POOLING;
@@ -223,9 +261,6 @@ inline uint32_t get_mask(SparseType_t hot_type, PoolingType_t pooling_type, bool
         break;
       default:
         NVE_THROW_("Unsupported pooling type ", static_cast<uint32_t>(pooling_type));
-    }
-    if (load_indices) {
-        mask |= NVE_FAC_MASK_LOAD_INDICES;
     }
     return mask;
 }
@@ -245,13 +280,21 @@ void call_find_and_combine_kernel_types_resolved(const uint32_t batchSz,
                              void* output,
                              cudaStream_t stream)
 {
-    uint32_t mask = get_mask(hot_type, pooling_type, load_indices);
+    // call_find_and_combine_kernel has already rejected sparse types other than Fixed and CSR.
+    const bool is_fixed_hotness = hot_type == SparseType_t::Fixed;
+    uint32_t mask = get_mask(pooling_type);
+    if constexpr (NVE_FAC_SPECIALIZE_FLAGS) {
+        mask |= (is_fixed_hotness ? NVE_FAC_MASK_FIXED_HOTNESS : 0u) |
+                (load_indices ? NVE_FAC_MASK_LOAD_INDICES : 0u);
+    }
 
-#define NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, MASK) \
-    nve_fac_launch<ELEMENT_TYPE_ID, INDEX_TYPE, ACC_TYPE, WEIGHT_TYPE, OUTPUT_TYPE, INPUT_VEC_TYPE, \
-                   OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, CacheDataT, \
-                   (SZ_ACC_RUNTIME), MASK>( \
-        batchSz, table, indices, offsets, weights, num_hot, cache, rowSizeInElements, output, stream)
+    // The dispatch below only selects the kernel; one launch after it serves every combination.
+    const void* kernel = nullptr;
+#define NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, MASK) \
+    kernel = nve_fac_erase<INDEX_TYPE, WEIGHT_TYPE, OUTPUT_TYPE, CacheDataT, MASK>( \
+        nve_fac_kernel<ELEMENT_TYPE_ID, INDEX_TYPE, ACC_TYPE, nve_fac_weight_t<WEIGHT_TYPE, MASK>, \
+                       OUTPUT_TYPE, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, \
+                       CacheDataT, (SZ_ACC_RUNTIME), MASK>())
 
     constexpr int32_t SUBWARP_WIDTH = 32;
 
@@ -263,29 +306,55 @@ void call_find_and_combine_kernel_types_resolved(const uint32_t batchSz,
     // vecSizeInElements * SZ_ACCUM <= 8 (bounded register pressure) and SZ_ACCUM <= 4. The clamped
     // range instantiated per width must match WIDTH_ACCUM in
     // cmake/gen_find_and_combine_instantiations.py.
-#define NVE_FAC_LAUNCH_MASK(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T)                                                                          \
-    do {                                                                                                                                                          \
-        switch (mask) {                                                                                                                                           \
-            case 0b0000: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0000); break;                                            \
-            case 0b0001: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0001); break;                                            \
-            case 0b0010: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0010); break;                                            \
-            case 0b0011: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0011); break;                                            \
-            case 0b0100: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0100); break;                                            \
-            case 0b0101: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0101); break;                                            \
-            case 0b0110: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0110); break;                                            \
-            case 0b0111: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b0111); break;                                            \
-            case 0b1000: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1000); break;                                            \
-            case 0b1001: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1001); break;                                            \
-            case 0b1010: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1010); break;                                            \
-            case 0b1011: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1011); break;                                            \
-            case 0b1100: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1100); break;                                            \
-            case 0b1101: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1101); break;                                            \
-            case 0b1110: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1110); break;                                            \
-            case 0b1111: NVE_FAC_LAUNCH(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T, 0b1111); break;                                            \
-            default:                                                                                                                                               \
-                NVE_THROW_("Unsupported mask ", mask);                                                                                                             \
-        }                                                                                                                                                         \
+#define NVE_FAC_SELECT_MASK(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T)  \
+    do {                                                                                     \
+        switch (mask) {                                                                      \
+          case 0b00: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                    ACC_VEC_T, 0b00); break;                                  \
+          case 0b01: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                    ACC_VEC_T, 0b01); break;                                  \
+          case 0b10: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                    ACC_VEC_T, 0b10); break;                                  \
+          case 0b11: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                    ACC_VEC_T, 0b11); break;                                  \
+          NVE_FAC_SELECT_FLAG_MASKS(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T,  \
+                                    ACC_VEC_T)                                               \
+          default:                                                                           \
+            NVE_THROW_("Unsupported mask ", mask);                                           \
+        }                                                                                    \
     } while (0)
+// Masks with the hotness / index-loading bits exist only in specialized builds.
+#if NVE_FAC_SPECIALIZE_FLAGS
+#define NVE_FAC_SELECT_FLAG_MASKS(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T,    \
+                                  ACC_VEC_T)                                                 \
+          case 0b0100: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b0100); break;                                \
+          case 0b0101: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b0101); break;                                \
+          case 0b0110: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b0110); break;                                \
+          case 0b0111: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b0111); break;                                \
+          case 0b1000: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1000); break;                                \
+          case 0b1001: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1001); break;                                \
+          case 0b1010: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1010); break;                                \
+          case 0b1011: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1011); break;                                \
+          case 0b1100: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1100); break;                                \
+          case 0b1101: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1101); break;                                \
+          case 0b1110: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1110); break;                                \
+          case 0b1111: NVE_FAC_SELECT(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, \
+                                      ACC_VEC_T, 0b1111); break;
+#else
+#define NVE_FAC_SELECT_FLAG_MASKS(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T,    \
+                                  ACC_VEC_T)
+#endif
 
     // Dispatch the runtime-selected SZ_ACCUM. Each vector width only instantiates SZ_ACCUM up to its
     // per-width clamp (min(4, 8 / vecSizeInElements)), so Vec4 switches over {1,2} while Vec2/Vec1
@@ -293,8 +362,8 @@ void call_find_and_combine_kernel_types_resolved(const uint32_t batchSz,
 #define NVE_FAC_DISPATCH_2(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T)   \
     do {                                                                                        \
         switch (SZ_ACC_RUNTIME) {                                                                \
-          case 1: NVE_FAC_LAUNCH_MASK(1, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
-          case 2: NVE_FAC_LAUNCH_MASK(2, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
+          case 1: NVE_FAC_SELECT_MASK(1, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
+          case 2: NVE_FAC_SELECT_MASK(2, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
           default: NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME);                 \
         }                                                                                       \
     } while (0)
@@ -302,17 +371,19 @@ void call_find_and_combine_kernel_types_resolved(const uint32_t batchSz,
 #define NVE_FAC_DISPATCH_4(SZ_ACC_RUNTIME, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T)   \
     do {                                                                                        \
         switch (SZ_ACC_RUNTIME) {                                                                \
-          case 1: NVE_FAC_LAUNCH_MASK(1, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
-          case 2: NVE_FAC_LAUNCH_MASK(2, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
-          case 3: NVE_FAC_LAUNCH_MASK(3, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
-          case 4: NVE_FAC_LAUNCH_MASK(4, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
+          case 1: NVE_FAC_SELECT_MASK(1, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
+          case 2: NVE_FAC_SELECT_MASK(2, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
+          case 3: NVE_FAC_SELECT_MASK(3, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
+          case 4: NVE_FAC_SELECT_MASK(4, INPUT_VEC_TYPE, OUT_VEC_T, ELEMENT_VEC_T, ACC_VEC_T); break; \
           default: NVE_THROW_("Unsupported kernel dimensions ", SZ_ACC_RUNTIME);                 \
         }                                                                                       \
     } while (0)
 
+    const int64_t row_bytes = row_size_in_bytes(ELEMENT_TYPE_ID, rowSizeInElements);
+
     // Smallest SZ_ACCUM covering the row in one pass, clamped per width to min(4, 8 / vecWidth).
     // Keep the clamps in sync with WIDTH_ACCUM in gen_find_and_combine_instantiations.py.
-    if (get_row_size_in_bytes<ELEMENT_TYPE_ID>(rowSizeInElements) % sizeof(typename QuantizationHelper<ELEMENT_TYPE_ID>::Vec4) == 0 && rowSizeInElements % 4 == 0)
+    if (row_bytes % sizeof(typename QuantizationHelper<ELEMENT_TYPE_ID>::Vec4) == 0 && rowSizeInElements % 4 == 0)
     {
         const uint32_t SZ_ACCUM = std::min<uint32_t>(DivRoundUp(rowSizeInElements, SUBWARP_WIDTH * 4), 2u);
         using INPUT_VEC_TYPE = typename QuantizationHelper<ELEMENT_TYPE_ID>::Vec4;
@@ -321,7 +392,7 @@ void call_find_and_combine_kernel_types_resolved(const uint32_t batchSz,
         using OUTPUT_VEC_TYPE = typename VecWidthHelper<OUTPUT_TYPE>::Vec4;
         NVE_FAC_DISPATCH_2(SZ_ACCUM, INPUT_VEC_TYPE, OUTPUT_VEC_TYPE, ELEMENT_VEC_TYPE, ACC_VEC_TYPE);
     }
-    else if (get_row_size_in_bytes<ELEMENT_TYPE_ID>(rowSizeInElements) % sizeof(typename QuantizationHelper<ELEMENT_TYPE_ID>::Vec2) == 0 && rowSizeInElements % 2 == 0)
+    else if (row_bytes % sizeof(typename QuantizationHelper<ELEMENT_TYPE_ID>::Vec2) == 0 && rowSizeInElements % 2 == 0)
     {
       const uint32_t SZ_ACCUM = std::min<uint32_t>(DivRoundUp(rowSizeInElements, SUBWARP_WIDTH * 2), 4u);
       using INPUT_VEC_TYPE = typename QuantizationHelper<ELEMENT_TYPE_ID>::Vec2;
@@ -341,8 +412,12 @@ void call_find_and_combine_kernel_types_resolved(const uint32_t batchSz,
     }
 #undef NVE_FAC_DISPATCH_2
 #undef NVE_FAC_DISPATCH_4
-#undef NVE_FAC_LAUNCH
-#undef NVE_FAC_LAUNCH_MASK
+#undef NVE_FAC_SELECT
+#undef NVE_FAC_SELECT_MASK
+#undef NVE_FAC_SELECT_FLAG_MASKS
+    nve_fac_launch<INDEX_TYPE, WEIGHT_TYPE, OUTPUT_TYPE, CacheDataT>(
+        kernel, batchSz, table, indices, offsets, weights, num_hot, cache, rowSizeInElements,
+        output, is_fixed_hotness, load_indices, stream);
     NVE_CHECK_(cudaGetLastError()); // Check kernel launch didn't generate an error
 }
 
@@ -450,3 +525,9 @@ void call_find_and_combine_kernel(const uint32_t num_keys,
 
 #undef FAC_DISPATCH_OUTPUT
 }
+
+// extern template declarations of call_find_and_combine_kernel for the index/cache types nve-common
+// instantiates (generated, see cmake/gen_find_and_combine_instantiations.py). The definitions live
+// in the generated find_and_combine_dispatch.cu; call_find_and_combine_kernel is the only entry
+// point usable outside nve-common, since the nve_fac_kernel functions it calls are hidden.
+#include "find_and_combine_dispatch_extern.inc"

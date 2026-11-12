@@ -31,7 +31,7 @@
 /* NVE C ABI versions */
 /* Within the same major version, ABI is backwards compatible - otherwise rebuild is needed. */
 #define NVE_C_ABI_VERSION_MAJOR (2)
-#define NVE_C_ABI_VERSION_MINOR (0)
+#define NVE_C_ABI_VERSION_MINOR (1)
 
 #ifdef __cplusplus
 extern "C" {
@@ -222,7 +222,9 @@ typedef struct {
 typedef struct {
   uint64_t header;                 /* Opaque; written by nve_hierarchical_layer_config_init(), do not modify */
   const char*     layer_name;
-  nve_heuristic_t insert_heuristic;  /* NULL uses default heuristic; use nve_heuristic_create_never() to disable */
+  /* NULL uses default heuristic; use nve_heuristic_create_never() to disable.
+   * The last table is never auto-inserted into, whatever the heuristic. */
+  nve_heuristic_t insert_heuristic;
   int64_t         min_insert_freq_gpu;
   int64_t         min_insert_freq_host;
   int64_t         min_insert_size_gpu;
@@ -339,7 +341,8 @@ NVE_C_API nve_status_t nve_configure_default_thread_pool(const char* json_config
  * sampling a uniform random value and comparing against the per-table hitrate
  * threshold.
  * @param out Output handle.
- * @param thresholds Array of per-table thresholds in [0,1]. May be NULL when
+ * @param thresholds Array of per-table thresholds in [0,1]. A negative
+ *        threshold disables auto-insert into that table. May be NULL when
  *        num_thresholds==0; in that case the default threshold (0.75) is used
  *        for every table.
  * @param num_thresholds Length of `thresholds`. Should equal the number of
@@ -444,7 +447,8 @@ NVE_C_API nve_status_t nve_table_destroy(nve_table_t table);
  * @param value_stride Spacing in bytes between successive value slots in
  *        `values`.
  * @param values Output buffer for resolved values, at least n * value_stride
- *        bytes. Pass NULL to use the call as an exists/count check.
+ *        bytes. Pass NULL to use the call as an exists/count check. Slots of
+ *        keys not resolved by this call keep their contents.
  * @param value_sizes Optional output array of n int64_t, filled with the
  *        actual number of bytes written per key. May be NULL.
  */
@@ -579,6 +583,28 @@ NVE_C_API nve_status_t nve_table_reset_lookup_counter(nve_table_t table, nve_con
  * @param counter Output counter value.
  */
 NVE_C_API nve_status_t nve_table_get_lookup_counter(const nve_table_t table, nve_context_t ctx, int64_t* counter);
+
+/**
+ * Get the number of keys stored in the table. For a GPU table this is the
+ * number of cached keys.
+ * @param table Table handle.
+ * @param ctx Execution context.
+ * @param out Output key count.
+ */
+NVE_C_API nve_status_t nve_table_size(const nve_table_t table, nve_context_t ctx, int64_t* out);
+
+/**
+ * Write the stored keys to `keys`. When the table holds more than `capacity`
+ * keys only `capacity` of them are written.
+ * @param table Table handle.
+ * @param ctx Execution context.
+ * @param capacity Maximal number of keys that fit in `keys`.
+ * @param keys Output array of at least `capacity` keys (key type matches the
+ *        table's key type) in host accessible memory.
+ * @param out_num_keys Output number of keys written.
+ */
+NVE_C_API nve_status_t nve_table_get_keys(
+    const nve_table_t table, nve_context_t ctx, int64_t capacity, void* keys, int64_t* out_num_keys);
 
 /* ============================================================================
  * Host Tables (via plugins / JSON config)

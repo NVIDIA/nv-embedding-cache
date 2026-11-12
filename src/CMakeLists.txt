@@ -18,19 +18,20 @@ cmake_minimum_required(VERSION 3.18)
 # Generate the split FindAndCombine kernel instantiations. FAC_GEN_DIR is set in the top-level
 # CMakeLists.txt (and added to the global include path there).
 set(FAC_GEN_SCRIPT ${PROJECT_SOURCE_DIR}/cmake/gen_find_and_combine_instantiations.py)
-# Number of generated .cu translation units the instantiation matrix is split across. This governs
-# compile parallelism (roughly ceil(FAC_NUM_TUS / build cores) waves); each TU also carries a large
-# fixed cost, so the fast regime is a few large TUs (~1-2 waves of the core count), not many small
-# ones. Defaults to the constant at the head of the generator script; override here to retune for a
-# very different core count.
+# Number of generated .cu translation units the instantiation matrix is split across. Each TU pays a
+# fixed header-parse cost, so a few large TUs build fastest; the default keeps each generated TU off
+# the nve-common critical path. Defaults to the constants at the head of the generator script.
 set(FAC_NUM_TUS "" CACHE STRING "Override number of FindAndCombine generated .cu files (blank = script default)")
 if (FAC_NUM_TUS)
-  set(_fac_num_tus_arg --num-tus ${FAC_NUM_TUS})
+  set(_fac_gen_args --num-tus ${FAC_NUM_TUS})
+endif()
+if (NOT NVE_OPTIMIZE_BIN_SIZE)
+  list(APPEND _fac_gen_args --specialize-flags)
 endif()
 
 # Configure-time generation so the generated source list exists for this configure run.
 execute_process(
-  COMMAND ${Python3_EXECUTABLE} ${FAC_GEN_SCRIPT} --out-dir ${FAC_GEN_DIR} ${_fac_num_tus_arg}
+  COMMAND ${Python3_EXECUTABLE} ${FAC_GEN_SCRIPT} --out-dir ${FAC_GEN_DIR} ${_fac_gen_args}
   RESULT_VARIABLE _fac_rc)
 if (NOT _fac_rc EQUAL 0)
   message(FATAL_ERROR "FindAndCombine instantiation generation failed (${_fac_rc})")

@@ -28,6 +28,9 @@
 #include <vector>
 #include <memory>
 #include <limits>
+#include <numeric>
+#include <mutex>
+#include <shared_mutex>
 
 namespace nve {
 
@@ -60,7 +63,11 @@ public:
   LinearHostTable() = delete;
 
   LinearHostTable(const LinearHostTableConfig& config)
-    : base_type(0, config) {}
+    : base_type(0, config) {
+    // Keys are read and written as KeyType, so the configured width must agree with it.
+    NVE_CHECK_(config.key_size == static_cast<int64_t>(sizeof(key_type)),
+               "LinearHostTable key_size (", config.key_size, ") must equal sizeof(key type) (", sizeof(key_type), ")");
+  }
 
   ~LinearHostTable() override = default;
 
@@ -69,7 +76,18 @@ public:
     NVE_LOG_INFO_("Clearing linear host table has no effect");
   }
 
-  int64_t size(context_ptr_t&, bool) const override { return config_.num_rows; }
+  int64_t size(context_ptr_t&) const override { return config_.num_rows; }
+
+  // Every row exists, so the stored keys are [0, num_rows).
+  int64_t get_keys(context_ptr_t& /*ctx*/, const int64_t capacity, void* const keys) const override {
+    NVE_NVTX_SCOPED_FUNCTION_COL1_();
+    NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+    key_type* const typed_keys{static_cast<key_type*>(keys)};
+    const int64_t n{std::min(capacity, config_.num_rows)};
+    std::iota(typed_keys, typed_keys + n, key_type{});
+    return n;
+  }
+
 
   void erase(context_ptr_t& /*ctx*/, int64_t /*num_keys*/, buffer_ptr<const void> /*keys*/) override {
     NVE_NVTX_SCOPED_FUNCTION_COL5_();
@@ -92,6 +110,7 @@ public:
     const auto* typed_keys = reinterpret_cast<const key_type*>(keys_buf);
     const int64_t num_threads{num_threads_for(ctx, num_keys)};
 
+    std::shared_lock<std::shared_mutex> table_lock(table_mutex_);
     const int64_t resolved_hits = cpu_kernel_gather<key_type>(
       ctx->get_thread_pool(),
       static_cast<size_t>(num_keys),
@@ -130,6 +149,7 @@ public:
     const auto* typed_values = reinterpret_cast<const int8_t*>(values_buf);
     const int64_t num_threads{num_threads_for(ctx, num_keys)};
 
+    std::lock_guard<std::shared_mutex> table_lock(table_mutex_);
     NVE_CHECK_(cpu_kernel_update<key_type>(
       ctx->get_thread_pool(),
       static_cast<size_t>(num_keys),
@@ -158,6 +178,7 @@ public:
     NVE_CHECK_(config_.value_dtype == DataType_t::Float32, "Unsupported value type");
     const auto* typed_keys = reinterpret_cast<const key_type*>(keys_buf);
     const int64_t num_threads{num_threads_for(ctx, num_keys)};
+    std::lock_guard<std::shared_mutex> table_lock(table_mutex_);
     cpu_kernel_update_accumulate_dispatch(
       ctx->get_thread_pool(),
       static_cast<size_t>(num_keys),
@@ -187,6 +208,9 @@ protected:
     const int64_t max_threads{std::min(ctx->get_thread_pool()->num_workers(), config_.max_threads)};
     return select_num_tasks(num_keys, max_threads, config_.task_size_threshold);
   }
+
+  // Lookups hold it shared and update / update_accumulate exclusively, so find() never returns a partly written row.
+  mutable std::shared_mutex table_mutex_;
 };
 
 }  // namespace nve

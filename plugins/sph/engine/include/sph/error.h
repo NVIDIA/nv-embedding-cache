@@ -42,6 +42,7 @@
 // SphException marker base, so an embedder can catch all SPH failures with a
 // single `catch (const sph::SphException&)`.
 // ============================================================================
+#include <atomic>
 #include <cstdint>
 #include <new>
 #include <stdexcept>
@@ -49,6 +50,31 @@
 #include <utility>
 
 namespace sph {
+
+// ---- Teardown warnings -----------------------------------------------------
+// Destructors and release paths cannot throw, so when a CUDA/driver release
+// call fails there the engine reports a composed message through this hook
+// instead. No handler is installed by default and the engine prints nothing;
+// an embedder forwards the message to its own logger. The handler must not
+// throw. Installing is a single atomic store, so it may happen at any time.
+using WarningHandler = void (*)(const char* message);
+
+namespace detail {
+inline std::atomic<WarningHandler>& warning_handler() noexcept {
+    static std::atomic<WarningHandler> handler{nullptr};
+    return handler;
+}
+}  // namespace detail
+
+inline void set_warning_handler(WarningHandler handler) noexcept {
+    detail::warning_handler().store(handler, std::memory_order_relaxed);
+}
+
+inline void report_warning(const char* message) noexcept {
+    if (const WarningHandler handler = detail::warning_handler().load(std::memory_order_relaxed)) {
+        handler(message);
+    }
+}
 
 // Marker base shared by every SPH exception. Deliberately NOT derived from
 // std::exception: each concrete type picks the std base that gives it the right

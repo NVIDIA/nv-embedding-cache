@@ -17,6 +17,7 @@
 
 #include "nve_c_api_config.hpp"
 #include <buffer_wrapper.hpp>
+#include <cuda_ops/cuda_common.h>
 #include <json_support.hpp>
 #include <plugin/plugin_loader.hpp>
 
@@ -175,8 +176,23 @@ nve_status_t nve_table_find(
       ? std::make_shared<nve::BufferWrapper<int64_t>>(ctx->ptr, "value_sizes", value_sizes, value_sizes_buffer_size)
       : nullptr;
 
-    table->ptr->find(ctx->ptr, n, std::move(keys_bw), std::move(hit_mask_bw),
-                        value_stride, std::move(values_bw), std::move(value_sizes_bw));
+    // Tables stage outputs at their own location (device when they have one, host otherwise) without copying
+    // the caller's contents in, so pre-stage values/value_sizes there to keep the slots find leaves unresolved.
+    // Afterwards copy every output back to where the caller passed it.
+    ScopedDevice scope_device(table->ptr->get_device_id());
+    const auto table_mem = table->ptr->get_device_id() >= 0 ? cudaMemoryTypeDevice : cudaMemoryTypeUnregistered;
+    const auto lookup_stream = ctx->ptr->get_lookup_stream();
+    const auto hit_mask_mem = hit_mask_bw ? hit_mask_bw->get_last_access() : cudaMemoryTypeUnregistered;
+    const auto values_mem = values_bw ? values_bw->get_last_access() : cudaMemoryTypeUnregistered;
+    const auto value_sizes_mem = value_sizes_bw ? value_sizes_bw->get_last_access() : cudaMemoryTypeUnregistered;
+    if (values_bw) values_bw->access_buffer(table_mem, true /*copy_content*/, lookup_stream);
+    if (value_sizes_bw) value_sizes_bw->access_buffer(table_mem, true /*copy_content*/, lookup_stream);
+
+    table->ptr->find(ctx->ptr, n, std::move(keys_bw), hit_mask_bw, value_stride, values_bw, value_sizes_bw);
+
+    if (hit_mask_bw) hit_mask_bw->access_buffer(hit_mask_mem, true /*copy_content*/, lookup_stream);
+    if (values_bw) values_bw->access_buffer(values_mem, true /*copy_content*/, lookup_stream);
+    if (value_sizes_bw) value_sizes_bw->access_buffer(value_sizes_mem, true /*copy_content*/, lookup_stream);
     return NVE_SUCCESS;
   NVE_C_CATCH
 }
@@ -356,6 +372,36 @@ nve_status_t nve_table_get_lookup_counter(const nve_table_t table, nve_context_t
   }
   NVE_C_TRY
     table->ptr->get_lookup_counter(ctx->ptr, counter);
+    return NVE_SUCCESS;
+  NVE_C_CATCH
+}
+
+nve_status_t nve_table_size(const nve_table_t table, nve_context_t ctx, int64_t* out) {
+  if (!table || !table->ptr || !ctx || !ctx->ptr || !out) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Invalid arguments");
+  }
+  NVE_C_TRY
+    *out = table->ptr->size(ctx->ptr);
+    return NVE_SUCCESS;
+  NVE_C_CATCH
+}
+
+nve_status_t nve_table_get_keys(
+    const nve_table_t table, nve_context_t ctx, int64_t capacity, void* keys, int64_t* out_num_keys) {
+  if (!table || !table->ptr || !ctx || !ctx->ptr || !out_num_keys) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "Invalid arguments");
+  }
+  if (capacity < 0) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "capacity must not be negative");
+  }
+  if (capacity > 0 && !keys) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "keys must not be NULL when capacity > 0");
+  }
+  if (keys && nve::pointer_memory_type(keys) == cudaMemoryTypeDevice) {
+    return nve_set_error(NVE_ERROR_INVALID_ARGUMENT, "keys must be host accessible memory");
+  }
+  NVE_C_TRY
+    *out_num_keys = table->ptr->get_keys(ctx->ptr, capacity, keys);
     return NVE_SUCCESS;
   NVE_C_CATCH
 }

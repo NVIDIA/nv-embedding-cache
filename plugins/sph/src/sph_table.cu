@@ -27,6 +27,7 @@
 #include <json_support.hpp>
 #include <layer_utils.hpp>
 #include <mutex>
+#include <sph/error.h>
 #include <sph/sph_hash_map.h>
 #include <type_traits>
 
@@ -34,6 +35,15 @@ namespace nve {
 namespace plugin {
 
 namespace {
+// Engine teardown failures (SPH_TEARDOWN) surface here; route them to the NVE log.
+void forward_sph_warning(const char* message) noexcept {
+  try {
+    NVE_LOG_WARNING_(message);
+  } catch (...) {
+    // Logging must not escape a destructor path.
+  }
+}
+
 // RAII device switch (the ecache ScopedDevice is not visible to plugins).
 struct ScopedDevice {
   int prev_{0};
@@ -41,7 +51,20 @@ struct ScopedDevice {
     NVE_CHECK_(cudaGetDevice(&prev_));
     NVE_CHECK_(cudaSetDevice(dev));
   }
-  ~ScopedDevice() { cudaSetDevice(prev_); }
+  ~ScopedDevice() {
+    const cudaError_t res = cudaSetDevice(prev_);
+    if (res == cudaSuccess) {
+      return;
+    }
+    // Both the unloading check and the warning format a message, which can throw;
+    // nothing may escape a destructor.
+    try {
+      if (!cuda_runtime_unloading(res, "device restore")) {
+        NVE_LOG_WARNING_("Failed to restore device ", prev_, ": ", cudaGetErrorString(res));
+      }
+    } catch (...) {
+    }
+  }
 };
 
 // Plain execution context that registers itself with the table's registry, so
@@ -166,6 +189,7 @@ context_ptr_t SphTable::create_execution_context(cudaStream_t lookup_stream, cud
 void SphTable::clear(context_ptr_t& ctx) {
   // Exclusive: reset() rebuilds the payload/PTE buffers, so it must not overlap
   // a lookup the way an insert may.
+  std::lock_guard<std::mutex> modify_lock(modify_mutex_);
   std::unique_lock<std::shared_mutex> lock(table_mutex_);
   ScopedDevice scope_device(config_.device_id);
   auto modify_stream = ctx->get_modify_stream();
@@ -187,7 +211,8 @@ void SphTable::clear(context_ptr_t& ctx) {
 // ---- defrag ----------------------------------------------------------------
 
 double SphTable::get_fragmentation() const {
-  std::shared_lock<std::shared_mutex> lock(table_mutex_);
+  // Reads host-side bookkeeping that only modifies mutate.
+  std::lock_guard<std::mutex> modify_lock(modify_mutex_);
   return engine_->get_fragmentation();
 }
 
@@ -201,7 +226,7 @@ void SphTable::drain_lookups(cudaStream_t stream) {
   NVE_CHECK_(sync_event->event_wait_stream(stream), "Failed to queue SPH lookup sync event");
 }
 
-// Caller must hold table_mutex_ exclusively.
+// Caller must hold modify_mutex_ and table_mutex_ exclusively.
 void SphTable::defrag_locked(context_ptr_t& ctx) {
   ScopedDevice scope_device(config_.device_id);
   auto modify_stream = ctx->get_modify_stream();
@@ -220,28 +245,19 @@ void SphTable::defrag_locked(context_ptr_t& ctx) {
 }
 
 void SphTable::defrag(context_ptr_t& ctx) {
+  std::lock_guard<std::mutex> modify_lock(modify_mutex_);
   std::unique_lock<std::shared_mutex> lock(table_mutex_);
   defrag_locked(ctx);
 }
 
+// Caller must hold modify_mutex_ (so the fragmentation read cannot race an
+// insert and no other modify can slip in before the exclusive table lock).
 void SphTable::maybe_defrag(context_ptr_t& ctx) {
-  if (config_.defrag_threshold <= 0.0) 
-  { 
-    return;
-  }
-  else
-  {
-    // Cheap host-side read (committed page counts), so test it under a shared
-    // lock and only pay for the exclusive one when a defrag is actually due.
-    std::shared_lock<std::shared_mutex> lock(table_mutex_);
-    if (engine_->get_fragmentation() <= config_.defrag_threshold) return;
-  }
+  if (config_.defrag_threshold <= 0.0) return;
+  // Cheap host-side read (committed page counts); only pay for the exclusive
+  // table lock when a defrag is actually due.
+  if (engine_->get_fragmentation() <= config_.defrag_threshold) return;
   std::unique_lock<std::shared_mutex> lock(table_mutex_);
-  // Another thread may have defragmented while we were upgrading the lock.
-  if (engine_->get_fragmentation() <= config_.defrag_threshold) 
-  {
-    return;
-  }
   defrag_locked(ctx);
 }
 
@@ -291,6 +307,10 @@ int64_t SphTable::get_invalid_key() const { return config_.invalid_key; }
 DataType_t SphTable::get_value_type() const { return config_.value_dtype; }
 
 void SphTable::erase(context_ptr_t&, int64_t, buffer_ptr<const void>) { NVE_THROW_NOT_IMPLEMENTED_(); }
+
+int64_t SphTable::size(context_ptr_t&) const { NVE_THROW_NOT_IMPLEMENTED_(); }
+
+int64_t SphTable::get_keys(context_ptr_t&, int64_t, void*) const { NVE_THROW_NOT_IMPLEMENTED_(); }
 
 void SphTable::update_accumulate(context_ptr_t&, int64_t, buffer_ptr<const void>, int64_t, int64_t,
                                  buffer_ptr<const void>, DataType_t) {
@@ -343,7 +363,10 @@ void SphTable::insert(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys
   NVE_CHECK_(value_size == config_.row_size_in_bytes, "Unsupported value_size for SPH table");
   if (n <= 0) return;
 
+  // Held across the insert and the possible defrag that follows it.
+  std::lock_guard<std::mutex> modify_lock(modify_mutex_);
   {
+    // Shared: lookups may overlap an insert, only defrag/clear exclude it.
     std::shared_lock<std::shared_mutex> lock(table_mutex_);
     ScopedDevice scope_device(config_.device_id);
     auto modify_stream = ctx->get_modify_stream();
@@ -390,6 +413,7 @@ void SphTable::update(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys
   NVE_CHECK_(value_size == config_.row_size_in_bytes, "Unsupported value_size for SPH table");
   if (n <= 0) return;
 
+  std::lock_guard<std::mutex> modify_lock(modify_mutex_);
   std::shared_lock<std::shared_mutex> lock(table_mutex_);
   ScopedDevice scope_device(config_.device_id);
   auto modify_stream = ctx->get_modify_stream();
@@ -421,6 +445,7 @@ void SphTable::update(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys
 
 SphTableFactory::SphTableFactory(const SphTableFactoryConfig& config) : config_(config) {
   config_.check();
+  sph::set_warning_handler(&forward_sph_warning);
 }
 
 table_ptr_t SphTableFactory::produce(table_id_t id, const nlohmann::json& json) {

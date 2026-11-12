@@ -35,6 +35,9 @@ build, enables `NVE_ORIGIN_RPATH`, and supports these environment variables:
 | `PYNVE_DISABLE_TORCH_BINDINGS` | Unset | Set to exactly `1` to set `NVE_DISABLE_TORCH_BINDINGS=ON`. |
 | `PYNVE_DRIVERLESS_BUILD` | Unset | Set to exactly `1` to enable `NVE_DRIVERLESS_BUILD` and set `NVE_SM_VERSION=100`. |
 | `PYNVE_DISABLE_MPI` | Unset | Set to exactly `1` to set `NVE_DISABLE_MPI=ON`. |
+| `PYNVE_CMAKE_ARGS` | Unset | Extra CMake arguments appended last, e.g. `-DNVE_SM_VERSION="80;90;100" -DNVE_FEATURES="nvhm_plugin;ht_key_64;ht_kernel_8;ht_part_fnv1a"` to pin the architectures and feature set of a redistributable wheel. |
+| `PYNVE_LOCAL_VERSION` | Unset | PEP 440 local version label appended to the package version (`<version>+<label>`), e.g. to tag a CUDA-specific build. `__version_info__` keeps the base version. |
+| `PYNVE_NO_STRIP` | Unset | Set to exactly `1` to package the libraries unstripped. By default, non-in-place builds run `strip --strip-unneeded` on each packaged `.so`, which keeps the exported (dynamic) symbols. |
 
 For example:
 
@@ -89,15 +92,17 @@ An unknown feature causes CMake configuration to fail.
 
 | Variable | Default | Description |
 |---|---|---|
-| `NVE_SM_VERSION` | Auto-detected | CUDA architectures in CMake's numeric format, such as `80`, `100`, or `"80;90;100"`. The value is copied to `CMAKE_CUDA_ARCHITECTURES`. |
+| `NVE_SM_VERSION` | Auto-detected | CUDA architectures in CMake's numeric format, such as `80`, `100`, or `"80;90;100"`. The value is copied to `CMAKE_CUDA_ARCHITECTURES` with PTX pruned (see: `NVE_KEEP_PTX`). |
+| `NVE_KEEP_PTX` | `OFF` | Set to `ON` to embed PTX for every plain-number architecture in `NVE_SM_VERSION`, including single-architecture builds. By default PTX is dropped where no GPU could use it, and a single-architecture build gets none. |
 | `NVE_CACHE_LINE_SIZE` | Auto-detected | Overrides the CPU cache-line size in bytes. CMake uses `getconf LEVEL1_DCACHE_LINESIZE` on non-Windows systems and `64` on Windows. |
 | `NVE_DISABLE_AVX512` | `OFF` | Prevents AVX-512 code generation. AVX2 or AVX is still selected when supported. |
 | `NVE_DISABLE_CUDA_AVX_FLAGS` | `OFF` | Does not pass the selected host AVX flags directly to NVCC. Host C and C++ compilation still uses the selected AVX level. |
-| `FAC_PER_FILE` | Empty (`100`) | Overrides the number of FindAndCombine explicit template instantiations emitted per generated `.cu` file. An empty value uses the generator default of 100. |
+| `NVE_OPTIMIZE_BIN_SIZE` | `OFF` | Set to `ON` for a much smaller `libnve-common.so` (about 15 MB instead of 40 MB for a single architecture, 28 MB instead of 82 MB for `89;90;100;120`). The FindAndCombine pooling kernel then takes fixed-vs-CSR hotness and index loading as kernel arguments (2,880 kernels) instead of compiling a branch-free kernel per combination (11,520 kernels). Expect about 5% slower pooled lookups, and up to about 10% for very small lookups. |
+| `FAC_NUM_TUS` | Empty (`32`, or `8` with `NVE_OPTIMIZE_BIN_SIZE=ON`) | Overrides the number of generated `.cu` files the FindAndCombine explicit template instantiations are split across. An empty value uses the generator default. |
 
 When `NVE_SM_VERSION` is not set, CMake queries the first GPU with `nvidia-smi`.
-If no GPU is available it targets `80;86;89;90;100`; if `nvidia-smi` itself is
-not available it targets `80;86;90;100`.
+If no GPU is available, or `nvidia-smi` itself is not available, it targets
+`89;90;100;120`.
 
 Set `NVE_SM_VERSION`, rather than `CMAKE_CUDA_ARCHITECTURES`, to override the
 target architectures. The top-level build forcibly updates

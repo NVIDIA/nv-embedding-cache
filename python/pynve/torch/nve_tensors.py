@@ -15,6 +15,17 @@
 
 import torch
 
+def _current_stream_handle(device: torch.device) -> int:
+    """Return the CUDA stream handle to pass into the C++ binding, or 0 on CPU.
+
+    NVE's binding identifies execution contexts by stream pointer; on the host-only
+    path (device.type == 'cpu') we use 0 as the sentinel — the underlying layer
+    never touches the CUDA runtime in that case.
+    """
+    if device.type == 'cpu':
+        return 0
+    return torch.cuda.current_stream(device).cuda_stream
+
 # Tensor wrapper class for a Parameter Tensor with caches
 class CachedTable(torch.nn.parameter.Parameter):
     """A Parameter tensor wrapper that supports caching functionality.
@@ -72,5 +83,5 @@ class CachedTable(torch.nn.parameter.Parameter):
             alpha (float, optional): The scaling factor for the addition. Defaults to 1.
         """
         factored = other * alpha
-        #update caches and data
-        self.emb_layer.accumulate(factored._nnz(), factored._indices().data_ptr(), factored._values().data_ptr(), torch.cuda.current_stream(self.device).cuda_stream)
+        # update caches and data (table_id -1 = all tables)
+        self.emb_layer.accumulate(factored._nnz(), factored._indices().data_ptr(), factored._values().data_ptr(), -1, _current_stream_handle(self.device))

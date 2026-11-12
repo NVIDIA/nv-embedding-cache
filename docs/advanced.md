@@ -32,6 +32,10 @@ The embedding layers that use a cache, can choose when it's time to update the c
 
 By default, `LinearUVMEmbeddingLayer` and `HierarchicalEmbeddingLayer` use the `DefaultInsertHeuristic` when no heuristic is provided (i.e. `insert_heuristic = nullptr` in the layer config). 
 
+`DefaultInsertHeuristic` takes one threshold (a target hit rate) per table. A negative threshold (`DefaultInsertHeuristic::NEVER_INSERT_THRESHOLD`) disables auto-insertion into that table only; a threshold of 0 does not, since a table can still receive inserts when lookups miss in it.
+
+A `HierarchicalEmbeddingLayer` never auto-inserts into its last table, whatever the heuristic: that table has no lower tier to fill it from, so an auto-insert would only write the upper tiers' rows back into it.
+
 To disable auto-insertion entirely, use the `NeverInsertHeuristic` class. The application can also derive its own heuristic from the `InsertHeuristic` base class.
 
 See [../include/insert_heuristic.hpp](../include/insert_heuristic.hpp) for more details.

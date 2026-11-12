@@ -14,6 +14,9 @@ scripts/.bash_history
 __pycache__/
 .pytest_cache/
 python/pynve.egg-info/
+# in-place/editable build outputs
+python/pynve/*.so
+python/pynve/_version.py
 .venv*
 
 # misc

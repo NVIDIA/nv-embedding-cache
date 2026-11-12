@@ -32,6 +32,8 @@ from conftest import requires_nvhm
 
 def _custom_remote_plugin_available():
     """True iff libnve-plugin-custom_remote.so can be loaded by the dynamic linker."""
+    # Load the installed libnve-common.so first so the plugin binds to it, not to one on its RUNPATH.
+    import pynve.nve  # noqa: F401
     try:
         ctypes.CDLL("libnve-plugin-custom_remote.so")
         return True

@@ -21,6 +21,7 @@
 #include <common.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 namespace nve {
@@ -160,6 +161,15 @@ constexpr std::make_unsigned_t<T> to_uint(T x) noexcept {
   static_assert(std::is_integral_v<T> && std::is_signed_v<T>);
   NVE_ASSERT_(x >= 0);
   return static_cast<std::make_unsigned_t<T>>(x);
+}
+
+// Multiply sizes, failing instead of silently wrapping on overflow.
+template <typename T>
+T checked_mul(T a, T b, const char* what) {
+  static_assert(std::is_integral_v<T> && std::is_unsigned_v<T> && !std::is_same_v<T, bool>);
+  NVE_CHECK_(b == 0 || a <= std::numeric_limits<T>::max() / b,
+             what, " computation overflows result type");
+  return static_cast<T>(a * b);
 }
 
 /**

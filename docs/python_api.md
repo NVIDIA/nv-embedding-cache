@@ -75,9 +75,41 @@ embedding = nve_layers.NVEmbedding(
 
 `max_modify_size` limits the number of insert/update/accumulate entries handled in one modify operation. Leaving it unset uses the table default.
 
-`default_embedding` (a 1-D tensor of `embedding_size` elements in the layer's dtype) sets the vector returned for keys missing from the table on HostLayer/Hierarchical. It defaults to zeros (note torch.nn.Embedding raises for out-of-range keys instead); pass an empty list (`[]`) to disable the miss fill entirely, leaving missed rows undefined. Other layer types reject a non-empty value.
+`default_embedding` (a 1-D tensor of `embedding_size` elements in the layer's dtype; for a quantized layer, one raw stored row of `row_bytes` uint8/int8 values) sets the vector returned for keys missing from the table on HostLayer/Hierarchical. It defaults to zeros (note torch.nn.Embedding raises for out-of-range keys instead); pass an empty list (`[]`) to disable the miss fill entirely, leaving missed rows undefined. Other layer types reject a non-empty value.
 
 `disable_threadpool` (HostLayer only, default `False`) runs each lookup on the calling thread instead of handing it to the shared NVE thread pool.
+
+## Quantized Storage (Inference)
+
+`data_type` accepts either `torch.float32` / `torch.float16` or one of four rowwise-quantized `nve.DataType_t` storage types. Each stored row holds `embedding_size` 1-byte codes followed by per-row parameters in the precision named by the suffix:
+
+| `data_type` | Stored row | `row_bytes` | `forward()` dtype | Decoded value |
+|---|---|---|---|---|
+| `QInt8RowwiseF32` | int8 codes, fp32 scale | D + 4 | `torch.float32` | `q * scale` |
+| `QInt8RowwiseF16` | int8 codes, fp16 scale | D + 2 | `torch.float16` | `q * scale` |
+| `QUint8RowwiseF32` | uint8 codes, fp32 scale, fp32 offset | D + 8 | `torch.float32` | `q * scale + offset` |
+| `QUint8RowwiseF16` | uint8 codes, fp16 scale, fp16 offset | D + 4 | `torch.float16` | `q * scale + offset` |
+
+`QUint8RowwiseF32` / `QUint8RowwiseF16` match FBGEMM's fused 8-bit rowwise layouts (`FloatToFused8BitRowwiseQuantized`, `FloatToFusedNBitRowwiseQuantizedSBHalf(bit_rate=8)`), so such tables can be passed directly.
+
+```python
+import pynve.nve as nve
+from pynve.torch.nve_dtypes import quantize_rowwise
+
+qtype = nve.DataType_t.QUint8RowwiseF16
+rows = quantize_rowwise(float_weights, qtype)       # uint8 [num_embeddings, row_bytes]
+bag = nve_layers.NVEmbeddingBag(num_embeddings, embedding_size, qtype,
+                                nve_layers.LayerType.LinearUVM, "sum",
+                                gpu_cache_size=gpu_cache_size,
+                                weight_init=rows, optimize_for_training=False)
+out = bag(keys, offsets)                            # torch.float16 [num_bags, embedding_size]
+bag.update(keys, quantize_rowwise(new_values, qtype))
+```
+
+* All layer types accept quantized storage. Lookups and every pooling mode return decoded rows in the type's float precision; storage, caches and the parameter server keep the compact rows.
+* GPULayer, LinearUVM and Hierarchical (through its GPU cache) need an even `embedding_size`; HostLayer accepts any width.
+* `weight_init`, `update`, `insert`, `config["default_embedding"]`, `NVEParameterServer.insert` and `SimpleInitializer(init_tensor=...)` take raw stored rows: a contiguous uint8/int8 tensor whose last dimension is `layer.row_bytes`. Float tensors are rejected rather than quantized implicitly. `quantize_rowwise` is a convenience; rows from any producer that follows the layout above are accepted. `NVEParameterServer.load_from_file` reads uint8 `.npy` files of raw rows.
+* Export metadata records the storage type by name (e.g. `"quint8_rowwise_f16"`); float layers keep writing `"float32"` / `"float16"`.
 
 ## Using a Parameter Server
 To use the parameter server API, users are expected to implement the Table Interface defined in [table.hpp](../include/table.hpp) and provide a Python binding to it. See the [custom remote plugin](../samples/common/custom_remote_plugin/src/custom_remote_table.cpp) and [custom remote PS export sample](../samples/pytorch/export_sample/custom_remote_ps_export.py) for examples.
@@ -158,7 +190,7 @@ There is no need to set the device context as the underlying implementation hand
 
 A sample that shows usage of inferencing with NVEmbedding
 usage:
-``` inference_sample.py --batch-size 1024 --hotness 32 --num-iterations 1000 --cache-size 1024 --data-type float32```
+```inference_sample.py --batch-size 1024 --hotness 32 --num-iterations 1000 --cache-size 1024 --data-type float32```
 
 this will run an inference for a 1000 iterations each of 1024 bags of 32 keys using linearUVM with a cache of size 1024 bytes.
 See [inference_sample.py](../samples/pytorch/inference_sample/inference_sample.py)

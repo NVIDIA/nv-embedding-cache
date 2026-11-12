@@ -84,8 +84,9 @@ enum BindingDtype : int {
 
 int64_t binding_embedding_dim(const std::shared_ptr<NVEmbedBinding<int64_t>>& b);
 
-// Returns a BindingDtype tag for the binding's storage dtype.
-int binding_data_type_int(const std::shared_ptr<NVEmbedBinding<int64_t>>& b);
+// Returns a BindingDtype tag for the binding's lookup output dtype (dequantized
+// float type for rowwise-quantized storage).
+int binding_output_data_type_int(const std::shared_ptr<NVEmbedBinding<int64_t>>& b);
 
 void binding_lookup(const std::shared_ptr<NVEmbedBinding<int64_t>>& b,
                     std::size_t num_keys,

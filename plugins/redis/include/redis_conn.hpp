@@ -72,6 +72,7 @@ class RedisConn final {
   NVE_REDIS_FWD_(hdel)
   NVE_REDIS_FWD_(hlen, const)
   NVE_REDIS_FWD_(hkeys, const)
+  NVE_REDIS_FWD_(hscan, const)
   NVE_REDIS_FWD_(hgetall, const)
   NVE_REDIS_FWD_(hincrby)
 #undef NVE_REDIS_FWD_

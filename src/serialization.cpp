@@ -16,6 +16,8 @@
  */
 
 #include "serialization.hpp"
+#include "bit_ops.hpp"
+#include <algorithm>
 #include <cctype>
 #include <limits>
 #include <regex>
@@ -25,16 +27,24 @@
 
 namespace nve {
 
-// Multiply header-derived sizes with an overflow check so a crafted shape
-// cannot wrap the row/data size computations.
-uint64_t checked_mul(uint64_t a, uint64_t b, const char* what)
-{
-  NVE_CHECK_(b == 0 || a <= std::numeric_limits<uint64_t>::max() / b,
-             "Numpy ", what, " computation overflows uint64");
-  return a * b;
-}
-
 const std::string NumpyTensorFileFormat::NPY_MAGIC_NUMBER("\x93NUMPY");
+
+namespace {
+
+// Supported numpy element types. |u1/|i1 hold raw byte rows, e.g. rowwise-quantized values
+// with trailing scale/offset.
+struct NpyElementType {
+  const char* descr;
+  uint64_t size;
+  DataType_t dtype;
+};
+constexpr NpyElementType NPY_ELEMENT_TYPES[] = {
+  {"<f4", 4, DataType_t::Float32}, {"<f2", 2, DataType_t::Float16}, {"<f8", 8, DataType_t::Float64},
+  {"<i4", 4, DataType_t::Unknown}, {"<i8", 8, DataType_t::Unknown},
+  {"|u1", 1, DataType_t::Unknown}, {"|i1", 1, DataType_t::Unknown},
+};
+
+}  // namespace
 
 InputFileStreamWrapper::InputFileStreamWrapper(const std::string& filename) : filename_(filename) {
   file_.open(filename_, std::ios::binary | std::ios::in);
@@ -109,18 +119,13 @@ void NumpyTensorFileFormat::load_header() {
     std::regex descr_regex("'descr': '([^']+)'");
     std::smatch match;
     NVE_CHECK_(std::regex_search(header_str, match, descr_regex), "Incorrect file format");
-    std::string dtype_str = match[1].str();
-    if (dtype_str == "<f4") {
-      header_.dtype_size_in_bytes = 4;
-    } else if (dtype_str == "<f8") {
-      header_.dtype_size_in_bytes = 8;
-    } else if (dtype_str == "<i4") {
-      header_.dtype_size_in_bytes = 4;
-    } else if (dtype_str == "<i8") {
-      header_.dtype_size_in_bytes = 8;
-    } else {
-      NVE_CHECK_(false, "Unsupported data type");
-    }
+    const std::string dtype_str = match[1].str();
+    const auto* it = std::find_if(std::begin(NPY_ELEMENT_TYPES), std::end(NPY_ELEMENT_TYPES),
+                                  [&](const NpyElementType& t) { return dtype_str == t.descr; });
+    NVE_CHECK_(it != std::end(NPY_ELEMENT_TYPES), "Unsupported data type");
+    header_.descr = dtype_str;
+    header_.dtype_size_in_bytes = it->size;
+    header_.dtype = it->dtype;
   }
 
   {
@@ -171,11 +176,11 @@ NumpyTensorFileFormat::NumpyTensorFileFormat(std::shared_ptr<StreamWrapperBase> 
   vec_size_ = 1;
   for (uint64_t i = 1; i < header_.shape.size(); ++i)
   {
-    vec_size_ = checked_mul(vec_size_, header_.shape[i], "vector size");
+    vec_size_ = checked_mul(vec_size_, header_.shape[i], "Numpy vector size");
   }
-  row_size_in_bytes_ = checked_mul(vec_size_, header_.dtype_size_in_bytes, "row size");
+  row_size_in_bytes_ = checked_mul(vec_size_, header_.dtype_size_in_bytes, "Numpy row size");
   // Fail fast on truncated files instead of hitting EOF mid-insert in load_batch().
-  const uint64_t data_size = checked_mul(header_.shape[0], row_size_in_bytes_, "data size");
+  const uint64_t data_size = checked_mul(header_.shape[0], row_size_in_bytes_, "Numpy data size");
   const uint64_t file_size = stream_->size();
   NVE_CHECK_(file_size >= offset_, "Numpy stream size is smaller than header offset");
   const uint64_t available = file_size - offset_;
@@ -203,6 +208,24 @@ uint64_t NumpyTensorFileFormat::get_num_rows() const {
 
 std::vector<uint64_t> NumpyTensorFileFormat::get_shape() const {
   return header_.shape;
+}
+
+const std::string& NumpyTensorFileFormat::get_descr() const {
+  return header_.descr;
+}
+
+bool NumpyTensorFileFormat::holds_rows_of(DataType_t dtype) const {
+  if (is_quant_rowwise(dtype)) {
+    return header_.dtype_size_in_bytes == 1;  // raw byte rows
+  }
+  switch (dtype) {
+    case DataType_t::Float32:
+    case DataType_t::Float16:
+    case DataType_t::Float64:
+      return header_.dtype == dtype;
+    default:
+      return true;
+  }
 }
 
 uint64_t NumpyTensorFileFormat::get_row_size_in_bytes() const {

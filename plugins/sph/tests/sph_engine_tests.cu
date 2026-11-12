@@ -40,6 +40,7 @@
 
 #include <sph/sph_hash_map.h>
 #include <sph/error.h>
+#include <sph_check.h>  // private support header: SPH_TEARDOWN under test
 
 #include <cuda_runtime.h>
 
@@ -50,6 +51,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -132,10 +134,12 @@ std::int64_t count_non_default(const std::vector<std::uint8_t>& got,
 }
 
 // ---------------------------------------------------------------------------
-// Fixture: one stream per test, device allocations freed wholesale in TearDown.
-// The parameter is the row size in bytes (value_size).
+// Fixture base shared by the engine and validation suites: one stream per test,
+// device allocations tracked and freed wholesale in TearDown, so an ASSERT_*
+// early return never leaks device memory.
 // ---------------------------------------------------------------------------
-class SphEngineTest : public ::testing::TestWithParam<std::int64_t> {
+template <typename GtestBase>
+class SphDeviceFixture : public GtestBase {
 protected:
     void SetUp() override
     {
@@ -151,8 +155,6 @@ protected:
         allocs_.clear();
         if (stream_) EXPECT_CUDA(cudaStreamDestroy(stream_));
     }
-
-    std::int64_t value_size() const { return GetParam(); }
 
     // Returns nullptr on failure (and records a non-fatal failure); callers
     // gate on ASSERT_NE(ptr, nullptr).
@@ -192,12 +194,18 @@ protected:
                                cudaMemcpyDeviceToHost));
     }
 
+    cudaStream_t       stream_{};
+    std::vector<void*> allocs_;
+};
+
+// The parameter is the row size in bytes (value_size).
+class SphEngineTest : public SphDeviceFixture<::testing::TestWithParam<std::int64_t>> {
+protected:
+    std::int64_t value_size() const { return GetParam(); }
+
     // Shared bodies for the checks that are run at several capacities/scales.
     void RunInsertFindRoundtrip(std::int64_t capacity, std::int64_t num_keys);
     void RunBuildFindRoundtrip(std::int64_t capacity, std::int64_t num_keys);
-
-    cudaStream_t       stream_{};
-    std::vector<void*> allocs_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1156,37 +1164,33 @@ INSTANTIATE_TEST_SUITE_P(
 // sph::SphInvalidArgument, in release builds as well as debug — these
 // checks replaced bare asserts that were compiled out under NDEBUG.
 // ===========================================================================
-class SphEngineValidationTest : public ::testing::Test {
+class SphEngineValidationTest : public SphDeviceFixture<::testing::Test> {
 protected:
     void SetUp() override
     {
-        int device_count = 0;
-        if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
-            GTEST_SKIP() << "CUDA device unavailable";
-        ASSERT_CUDA(cudaStreamCreate(&stream_));
+        SphDeviceFixture::SetUp();
+        if (IsSkipped() || HasFatalFailure()) return;
         map_ = std::make_unique<sph::ShardedPerfectHashMap>(kCapacity, kValueSize);
     }
 
     void TearDown() override
     {
-        map_.reset();
-        if (d_scratch_) EXPECT_CUDA(cudaFree(d_scratch_));
-        if (stream_) EXPECT_CUDA(cudaStreamDestroy(stream_));
+        map_.reset();  // before the stream and buffers it may still reference
+        SphDeviceFixture::TearDown();
     }
 
     // One buffer big enough to stand in for keys, values or hashes.
     void* scratch()
     {
-        if (!d_scratch_ && cudaMalloc(&d_scratch_, 4096) != cudaSuccess) d_scratch_ = nullptr;
+        if (!d_scratch_) d_scratch_ = alloc<std::uint8_t>(4096);
         return d_scratch_;
     }
 
     static constexpr std::int64_t kCapacity  = 4096;
     static constexpr std::int64_t kValueSize = 16;
 
-    cudaStream_t                          stream_{};
     std::unique_ptr<sph::ShardedPerfectHashMap> map_;
-    void*                                 d_scratch_ = nullptr;
+    void*                                       d_scratch_ = nullptr;
 };
 
 TEST_F(SphEngineValidationTest, ConstructorRejectsBadGeometry)
@@ -1233,15 +1237,10 @@ TEST_F(SphEngineValidationTest, FingerprintHoldsForTopOfRangeKeysAtMinCapacity)
     for (std::size_t i = 0; i < h_values.size(); ++i)
         h_values[i] = static_cast<std::uint8_t>(i * 7 + 1);
 
-    KeyT*         d_keys   = nullptr;
-    std::uint8_t* d_values = nullptr;
-    std::uint8_t* d_found  = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMalloc(&d_values, h_values.size()));
-    ASSERT_CUDA(cudaMalloc(&d_found, h_values.size()));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
-    ASSERT_CUDA(cudaMemcpy(d_values, h_values.data(), h_values.size(), cudaMemcpyHostToDevice));
+    KeyT*         d_keys   = upload(h_keys);
+    std::uint8_t* d_values = upload(h_values);
+    std::uint8_t* d_found  = alloc<std::uint8_t>(n * kValueSize);
+    ASSERT_TRUE(d_keys != nullptr && d_values != nullptr && d_found != nullptr);
 
     sph::ShardedPerfectHashMap m(1, kValueSize);  // rounded up to the fingerprint floor
     ASSERT_GE(m.get_num_buckets(), sph::min_num_buckets);
@@ -1257,10 +1256,6 @@ TEST_F(SphEngineValidationTest, FingerprintHoldsForTopOfRangeKeysAtMinCapacity)
         EXPECT_EQ(std::memcmp(&got[off], &h_values[off], static_cast<std::size_t>(kValueSize)), 0)
             << "key " << h_keys[static_cast<std::size_t>(i)] << " did not round-trip";
     }
-
-    EXPECT_CUDA(cudaFree(d_keys));
-    EXPECT_CUDA(cudaFree(d_values));
-    EXPECT_CUDA(cudaFree(d_found));
 }
 
 TEST_F(SphEngineValidationTest, InsertRejectsBadArguments)
@@ -1326,13 +1321,9 @@ TEST_F(SphEngineValidationTest, CurrCapacityCountsOnlyKeysThatLanded)
     std::vector<std::uint8_t> h_values(static_cast<std::size_t>(kKeys * kValueSize), 0);
     for (std::int64_t i = 0; i < kKeys; ++i) h_keys[static_cast<std::size_t>(i)] = i + 1;
 
-    KeyT*         d_keys   = nullptr;
-    std::uint8_t* d_values = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMalloc(&d_values, h_values.size()));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
-    ASSERT_CUDA(cudaMemset(d_values, 0, h_values.size()));
+    KeyT*         d_keys   = upload(h_keys);
+    std::uint8_t* d_values = upload(h_values);
+    ASSERT_TRUE(d_keys != nullptr && d_values != nullptr);
 
     sph::ShardedPerfectHashMap m(kKeys * 8, kValueSize);
     ASSERT_EQ(m.get_size(), 0);
@@ -1344,9 +1335,6 @@ TEST_F(SphEngineValidationTest, CurrCapacityCountsOnlyKeysThatLanded)
     // A clean insert does not throw, and every key is accounted for.
     EXPECT_NO_THROW(m.insert(d_keys, reinterpret_cast<const std::int8_t*>(d_values), kKeys, stream_));
     EXPECT_EQ(m.get_size(), kKeys);
-
-    EXPECT_CUDA(cudaFree(d_keys));
-    EXPECT_CUDA(cudaFree(d_values));
 }
 
 // Overfilling makes the pilot search give up on most buckets, so the insert
@@ -1365,12 +1353,9 @@ TEST_F(SphEngineValidationTest, OverfillThrowsWithDroppedKeyBreakdown)
     std::vector<KeyT> h_keys(kKeys);
     for (std::int64_t i = 0; i < kKeys; ++i) h_keys[static_cast<std::size_t>(i)] = i + 1;
 
-    KeyT*         d_keys   = nullptr;
-    std::uint8_t* d_values = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMalloc(&d_values, static_cast<std::size_t>(kKeys * kValueSize)));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
+    KeyT*         d_keys   = upload(h_keys);
+    std::uint8_t* d_values = alloc<std::uint8_t>(kKeys * kValueSize);
+    ASSERT_TRUE(d_keys != nullptr && d_values != nullptr);
     ASSERT_CUDA(cudaMemset(d_values, 0, static_cast<std::size_t>(kKeys * kValueSize)));
 
     sph::ShardedPerfectHashMap m(kSmallCapacity, kValueSize);
@@ -1403,14 +1388,10 @@ TEST_F(SphEngineValidationTest, OverfillThrowsWithDroppedKeyBreakdown)
 
     // The batch partially applied, so the table stays usable.
     ASSERT_CUDA(cudaStreamSynchronize(stream_));
-    std::uint8_t* d_out = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_out, static_cast<std::size_t>(kValueSize)));
+    std::uint8_t* d_out = alloc<std::uint8_t>(kValueSize);
+    ASSERT_TRUE(d_out != nullptr);
     EXPECT_NO_THROW(m.find(d_keys, 1, reinterpret_cast<std::int8_t*>(d_out), stream_));
     ASSERT_CUDA(cudaStreamSynchronize(stream_));
-
-    EXPECT_CUDA(cudaFree(d_out));
-    EXPECT_CUDA(cudaFree(d_keys));
-    EXPECT_CUDA(cudaFree(d_values));
 }
 
 // A bucket receiving more keys than the fused kernel's shared-memory gather can
@@ -1425,12 +1406,9 @@ TEST_F(SphEngineValidationTest, OversizedBucketIsReportedNotTrapped)
     std::vector<KeyT> h_keys(kKeys);
     for (std::int64_t i = 0; i < kKeys; ++i) h_keys[static_cast<std::size_t>(i)] = i + 1;
 
-    KeyT*         d_keys   = nullptr;
-    std::uint8_t* d_values = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMalloc(&d_values, static_cast<std::size_t>(kKeys * kValueSize)));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
+    KeyT*         d_keys   = upload(h_keys);
+    std::uint8_t* d_values = alloc<std::uint8_t>(kKeys * kValueSize);
+    ASSERT_TRUE(d_keys != nullptr && d_values != nullptr);
     ASSERT_CUDA(cudaMemset(d_values, 0, static_cast<std::size_t>(kKeys * kValueSize)));
 
     sph::ShardedPerfectHashMap m(kSmallCapacity, kValueSize);
@@ -1456,8 +1434,6 @@ TEST_F(SphEngineValidationTest, OversizedBucketIsReportedNotTrapped)
     // Surviving to here at all is the assertion that matters: before the stage 1
     // gate this aborted the process with SIGABRT.
     ASSERT_CUDA(cudaStreamSynchronize(stream_));
-    EXPECT_CUDA(cudaFree(d_keys));
-    EXPECT_CUDA(cudaFree(d_values));
 }
 
 // A failed insert must not damage data that was already in the table.
@@ -1481,17 +1457,12 @@ TEST_F(SphEngineValidationTest, FailedInsertPreservesExistingKeys)
     std::vector<KeyT> h_keys(kKeys);
     for (std::int64_t i = 0; i < kKeys; ++i) h_keys[static_cast<std::size_t>(i)] = i + 1;
 
-    KeyT*         d_keys  = nullptr;
-    std::uint8_t* d_first = nullptr;   // 0xAA payload, the data that must survive
-    std::uint8_t* d_again = nullptr;   // 0xBB payload, the doomed re-insert
-    std::uint8_t* d_out   = nullptr;
     const auto    bytes   = static_cast<std::size_t>(kKeys * kValueSize);
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMalloc(&d_first, bytes));
-    ASSERT_CUDA(cudaMalloc(&d_again, bytes));
-    ASSERT_CUDA(cudaMalloc(&d_out, bytes));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
+    KeyT*         d_keys  = upload(h_keys);
+    std::uint8_t* d_first = alloc<std::uint8_t>(kKeys * kValueSize);  // 0xAA payload, the data that must survive
+    std::uint8_t* d_again = alloc<std::uint8_t>(kKeys * kValueSize);  // 0xBB payload, the doomed re-insert
+    std::uint8_t* d_out   = alloc<std::uint8_t>(kKeys * kValueSize);
+    ASSERT_TRUE(d_keys != nullptr && d_first != nullptr && d_again != nullptr && d_out != nullptr);
     ASSERT_CUDA(cudaMemset(d_first, 0xAA, bytes));
     ASSERT_CUDA(cudaMemset(d_again, 0xBB, bytes));
 
@@ -1521,11 +1492,6 @@ TEST_F(SphEngineValidationTest, FailedInsertPreservesExistingKeys)
 
     EXPECT_EQ(count_original(), kKeys)
         << "a failed insert destroyed keys that were already committed";
-
-    EXPECT_CUDA(cudaFree(d_keys));
-    EXPECT_CUDA(cudaFree(d_first));
-    EXPECT_CUDA(cudaFree(d_again));
-    EXPECT_CUDA(cudaFree(d_out));
 }
 
 // ===========================================================================
@@ -1542,8 +1508,8 @@ TEST_F(SphEngineValidationTest, FailedInsertPreservesExistingKeys)
 // ===========================================================================
 namespace {
 
-// One device buffer per role, freed by the guard's destructor. The validation
-// fixture has no allocation helper of its own.
+// Bundles the map with one device buffer per role, all released by the guard's
+// destructor, so the OnExisting tests read as a few named steps.
 struct ExistingKeyHarness {
     static constexpr std::int64_t kValueSize = 16;
 
@@ -1770,10 +1736,8 @@ TEST_F(SphEngineValidationTest, BuildReportsOverfullBucket)
     for (std::int64_t b = 1; b < num_buckets; ++b) h_keys.push_back(num_buckets + b);
     const auto num_keys = static_cast<std::int64_t>(h_keys.size());
 
-    KeyT* d_keys = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
+    KeyT* d_keys = upload(h_keys);
+    ASSERT_TRUE(d_keys != nullptr);
 
     bool threw = false;
     try {
@@ -1797,8 +1761,8 @@ TEST_F(SphEngineValidationTest, BuildReportsOverfullBucket)
     // bucket 0's overflow, and they then built PTEs for keys that do not hash to
     // them. Every one-key bucket must still hold its own key.
     ASSERT_CUDA(cudaStreamSynchronize(stream_));
-    std::int64_t* d_hashes = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_hashes, h_keys.size() * sizeof(std::int64_t)));
+    std::int64_t* d_hashes = alloc<std::int64_t>(num_keys);
+    ASSERT_TRUE(d_hashes != nullptr);
     EXPECT_NO_THROW(m.find_locations(d_keys, num_keys, d_hashes, stream_));
     ASSERT_CUDA(cudaStreamSynchronize(stream_));
 
@@ -1817,9 +1781,6 @@ TEST_F(SphEngineValidationTest, BuildReportsOverfullBucket)
     EXPECT_EQ(lost, 0)
         << lost << " key(s) in unrelated single-key buckets were lost to the overflow;"
         << " first missing key=" << first_lost;
-
-    EXPECT_CUDA(cudaFree(d_hashes));
-    EXPECT_CUDA(cudaFree(d_keys));
 }
 
 // build() does not dedup, and no pilot can separate two copies of a key, so a
@@ -1836,10 +1797,8 @@ TEST_F(SphEngineValidationTest, BuildReportsDuplicateKeys)
     for (std::int64_t i = 0; i < kKeys; ++i) h_keys[static_cast<std::size_t>(i)] = i + 1;
     h_keys[7] = h_keys[6];  // one duplicated key, one doomed bucket
 
-    KeyT* d_keys = nullptr;
-    ASSERT_CUDA(cudaMalloc(&d_keys, h_keys.size() * sizeof(KeyT)));
-    ASSERT_CUDA(cudaMemcpy(d_keys, h_keys.data(), h_keys.size() * sizeof(KeyT),
-                           cudaMemcpyHostToDevice));
+    KeyT* d_keys = upload(h_keys);
+    ASSERT_TRUE(d_keys != nullptr);
 
     bool threw = false;
     try {
@@ -1853,8 +1812,6 @@ TEST_F(SphEngineValidationTest, BuildReportsDuplicateKeys)
         EXPECT_EQ(m.get_size(), r.keys_inserted());
     }
     EXPECT_TRUE(threw) << "a duplicate key should have been reported";
-
-    EXPECT_CUDA(cudaFree(d_keys));
 }
 
 TEST_F(SphEngineValidationTest, ResetClearsCounters)
@@ -1888,6 +1845,123 @@ TEST_F(SphEngineValidationTest, ExceptionsClassifyAtTheCApiBoundary)
         EXPECT_GT(e.line(), 0);
         EXPECT_NE(e.file(), nullptr);
     }
+}
+
+// ===========================================================================
+// SPH_TEARDOWN: the non-throwing check used on destructor and release paths.
+// A destructor cannot throw, so the warning handler is the only signal; these
+// drive the macro with runtime and driver statuses and a real release call.
+// ===========================================================================
+
+// Installs a capturing warning handler for the test's lifetime.
+struct WarningCapture {
+    WarningCapture()
+    {
+        messages().clear();
+        sph::set_warning_handler(+[](const char* message) { messages().push_back(message); });
+    }
+    ~WarningCapture() { sph::set_warning_handler(nullptr); }
+
+    static std::vector<std::string>& messages()
+    {
+        static std::vector<std::string> list;
+        return list;
+    }
+};
+
+// Message part with a side effect: proves parts are only formatted on failure.
+int g_parts_formatted = 0;
+struct CountedPart {};
+std::ostream& operator<<(std::ostream& os, CountedPart)
+{
+    ++g_parts_formatted;
+    return os << "part";
+}
+
+struct ThrowingPart {};
+std::ostream& operator<<(std::ostream&, ThrowingPart) { throw std::runtime_error("formatting failed"); }
+
+TEST(SphTeardown, RuntimeSuccessIsSilentAndSkipsFormatting)
+{
+    WarningCapture capture;
+    g_parts_formatted = 0;
+    EXPECT_TRUE(SPH_TEARDOWN(cudaSuccess, CountedPart{}));
+    EXPECT_EQ(g_parts_formatted, 0);
+    EXPECT_TRUE(WarningCapture::messages().empty());
+}
+
+TEST(SphTeardown, RuntimeFailureReportsComposedMessage)
+{
+    WarningCapture capture;
+    g_parts_formatted = 0;
+    const int line = __LINE__ + 1;
+    EXPECT_FALSE(SPH_TEARDOWN(cudaErrorInvalidValue, "shard ", 7, CountedPart{}));
+    EXPECT_EQ(g_parts_formatted, 1);
+    ASSERT_EQ(WarningCapture::messages().size(), 1u);
+    const std::string& m = WarningCapture::messages().front();
+    EXPECT_NE(m.find("SPH_TEARDOWN(cudaErrorInvalidValue) failed"), std::string::npos) << m;
+    EXPECT_NE(m.find(cudaGetErrorString(cudaErrorInvalidValue)), std::string::npos) << m;
+    EXPECT_NE(m.find("shard 7part"), std::string::npos) << m;
+    EXPECT_NE(m.find(":" + std::to_string(line) + "]"), std::string::npos) << m;
+}
+
+TEST(SphTeardown, RuntimeUnloadingIsSilent)
+{
+    WarningCapture capture;
+    g_parts_formatted = 0;
+    EXPECT_FALSE(SPH_TEARDOWN(cudaErrorCudartUnloading, CountedPart{}));
+    EXPECT_EQ(g_parts_formatted, 0);
+    EXPECT_TRUE(WarningCapture::messages().empty());
+}
+
+TEST(SphTeardown, DriverStatuses)
+{
+    WarningCapture capture;
+    g_parts_formatted = 0;
+    EXPECT_TRUE(SPH_TEARDOWN(CUDA_SUCCESS, CountedPart{}));
+    EXPECT_FALSE(SPH_TEARDOWN(CUDA_ERROR_DEINITIALIZED, CountedPart{}));  // driver already torn down
+    EXPECT_EQ(g_parts_formatted, 0);
+    EXPECT_TRUE(WarningCapture::messages().empty());
+
+    EXPECT_FALSE(SPH_TEARDOWN(CUDA_ERROR_INVALID_VALUE, "handle ", 3));
+    ASSERT_EQ(WarningCapture::messages().size(), 1u);
+    const std::string& m = WarningCapture::messages().front();
+    EXPECT_NE(m.find("SPH_TEARDOWN(CUDA_ERROR_INVALID_VALUE) failed"), std::string::npos) << m;
+    const char* text = nullptr;
+    cuGetErrorString(CUDA_ERROR_INVALID_VALUE, &text);
+    EXPECT_NE(m.find(text ? text : "(unknown driver error)"), std::string::npos) << m;
+    EXPECT_NE(m.find("handle 3"), std::string::npos) << m;
+}
+
+TEST(SphTeardown, FormattingExceptionIsSwallowed)
+{
+    WarningCapture capture;
+    EXPECT_FALSE(SPH_TEARDOWN(cudaErrorInvalidValue, ThrowingPart{}));
+    EXPECT_TRUE(WarningCapture::messages().empty());
+}
+
+TEST(SphTeardown, NoHandlerDropsTheReport)
+{
+    sph::set_warning_handler(nullptr);
+    EXPECT_FALSE(SPH_TEARDOWN(cudaErrorInvalidValue, "nobody listening"));
+    sph::report_warning("also dropped");
+}
+
+// Through a real release call: freeing a host pointer fails with
+// cudaErrorInvalidValue, and the message names the expression.
+TEST_F(SphEngineValidationTest, TeardownReportsFailedRelease)
+{
+    WarningCapture capture;
+    EXPECT_TRUE(SPH_TEARDOWN(cudaFree(nullptr)));  // freeing null is a documented no-op
+    EXPECT_TRUE(WarningCapture::messages().empty());
+
+    int host_object = 0;
+    EXPECT_FALSE(SPH_TEARDOWN(cudaFree(&host_object), "freeing a host pointer"));
+    ASSERT_EQ(WarningCapture::messages().size(), 1u);
+    const std::string& m = WarningCapture::messages().front();
+    EXPECT_NE(m.find("SPH_TEARDOWN(cudaFree(&host_object)) failed"), std::string::npos) << m;
+    EXPECT_NE(m.find("freeing a host pointer"), std::string::npos) << m;
+    (void)cudaGetLastError();  // leave no pending error for the next test
 }
 
 }  // namespace

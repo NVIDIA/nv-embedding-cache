@@ -73,8 +73,8 @@ int64_t binding_embedding_dim(const std::shared_ptr<NVEmbedBinding<int64_t>>& b)
     return b->get_embedding_dim();
 }
 
-int binding_data_type_int(const std::shared_ptr<NVEmbedBinding<int64_t>>& b) {
-    return dtype_to_tag(b->get_data_type());
+int binding_output_data_type_int(const std::shared_ptr<NVEmbedBinding<int64_t>>& b) {
+    return dtype_to_tag(b->get_output_data_type());
 }
 
 void binding_lookup(const std::shared_ptr<NVEmbedBinding<int64_t>>& b,

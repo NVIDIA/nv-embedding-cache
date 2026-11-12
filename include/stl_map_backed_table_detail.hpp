@@ -279,7 +279,7 @@ void STLContainerTable<ConfigType, KeyType, MetaType, PartitionerType>::insert(
 template <typename ConfigType, typename KeyType, typename MetaType,
           typename PartitionerType>
 int64_t STLContainerTable<ConfigType, KeyType, MetaType, PartitionerType>::size(
-    context_ptr_t& ctx, const bool) const {
+    context_ptr_t& ctx) const {
 
   const std::vector<Partition>& __restrict parts{parts_};
   const int64_t num_parts{static_cast<int64_t>(parts.size())};
@@ -298,6 +298,34 @@ int64_t STLContainerTable<ConfigType, KeyType, MetaType, PartitionerType>::size(
 
   ctx->get_thread_pool()->execute_n(0, num_parts, f, config_.workgroups, 1);
   return total_n.load(std::memory_order_relaxed);
+}
+
+template <typename ConfigType, typename KeyType, typename MetaType,
+          typename PartitionerType>
+int64_t STLContainerTable<ConfigType, KeyType, MetaType, PartitionerType>::get_keys(
+    context_ptr_t& ctx, const int64_t capacity, void* const keys_ptr) const {
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  key_type* const __restrict keys{static_cast<key_type*>(keys_ptr)};
+
+  const std::vector<Partition>& __restrict parts{parts_};
+  const int64_t num_parts{static_cast<int64_t>(parts.size())};
+
+  // Each partition claims the next contiguous output range; ranges past `capacity` are dropped.
+  std::atomic_int64_t claimed{0};
+  const auto f{[keys, capacity, &parts, &claimed](const int64_t task_idx) {
+    const Partition& __restrict part{parts[to_uint(task_idx)]};
+    std::shared_lock lock(part.read_write);
+    const map_type& __restrict slot_map{part.slot_map};
+
+    const auto [begin, room]{claim_output_range(claimed, static_cast<int64_t>(slot_map.size()), capacity)};
+    auto it{slot_map.begin()};
+    for (int64_t i{}; i < room; ++i, ++it) {
+      keys[begin + i] = it->first;
+    }
+  }};
+
+  ctx->get_thread_pool()->execute_n(0, num_parts, f, config_.workgroups, 1);
+  return std::min(claimed.load(std::memory_order_relaxed), capacity);
 }
 
 template <typename ConfigType, typename KeyType, typename MetaType,

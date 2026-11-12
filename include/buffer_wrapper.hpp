@@ -39,7 +39,7 @@ class BufferWrapper {
     : ctx_(ctx), name_(std::move(name)), size_(size_in_bytes) {
     NVE_CHECK_(ctx_ != nullptr, "Invalid context");
     NVE_CHECK_(buffer != nullptr, "Invalid buffer");
-    last_access_ = BufferType(buffer);
+    last_access_ = pointer_memory_type(buffer);
     buffers_[last_access_] = buffer;
   }
 
@@ -113,12 +113,6 @@ class BufferWrapper {
   const size_t size_{0};
   cudaMemoryType last_access_{cudaMemoryTypeUnregistered};
   std::unordered_map<cudaMemoryType, T*> buffers_;
-
-  cudaMemoryType BufferType(const void* ptr) {
-    cudaPointerAttributes attr;
-    auto err = cudaPointerGetAttributes(&attr, ptr);
-    return (err == cudaSuccess) ? attr.type : cudaMemoryTypeUnregistered;
-  }
 };
 
 }  // namespace nve

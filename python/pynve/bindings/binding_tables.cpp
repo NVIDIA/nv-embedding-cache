@@ -35,7 +35,7 @@ ParameterServerTable::ParameterServerTable(
   : PyNVETable({}),
     num_rows_(num_rows),
     row_elements_(row_elements),
-    row_bytes_(row_elements * static_cast<uint64_t>(dtype_size(data_type))),
+    row_bytes_(static_cast<uint64_t>(row_size_in_bytes(data_type, static_cast<int64_t>(row_elements)))),
     data_type_(data_type)
 {
     table_id_t table_id =
@@ -135,7 +135,7 @@ ParameterServerTable::ParameterServerTable(
   : PyNVETable({}),
     num_rows_(num_rows),
     row_elements_(row_elements),
-    row_bytes_(row_elements * static_cast<uint64_t>(dtype_size(data_type))),
+    row_bytes_(static_cast<uint64_t>(row_size_in_bytes(data_type, static_cast<int64_t>(row_elements)))),
     data_type_(data_type),
     plugin_name_(std::move(plugin_name)),
     factory_config_(std::move(factory_config)),
@@ -146,8 +146,9 @@ ParameterServerTable::ParameterServerTable(
 
 void ParameterServerTable::init_from_plugin(table_id_t table_id)
 {
+    table_id_ = table_id;
     set_table(create_table_from_plugin(
-        plugin_name_, factory_config_, table_config_, table_id));
+        plugin_name_, factory_config_, table_config_, table_id_));
     // initialize an execution context for the long-lived insert/erase ops
     ctx_ = create_execution_context(0, 0, nullptr, nullptr);
 }
@@ -162,6 +163,7 @@ nlohmann::json ParameterServerTable::export_config() const
         {"row_elements",   row_elements_},
         {"num_rows",       num_rows_},
         {"data_type",      to_string(data_type_)},
+        {"table_id",       table_id_},
     };
 }
 
@@ -202,7 +204,7 @@ void ParameterServerTable::insert_keys_from_filepath(const std::string& keys_pat
                                                      uint64_t batch_size) {
     nve::insert_keys_from_filepath(inner_table(), ctx_,
                                    keys_path, values_path,
-                                   row_bytes_, batch_size);
+                                   row_bytes_, batch_size, data_type_);
 }
 
 void ParameterServerTable::erase_keys(size_t num_keys, uintptr_t keys) {
@@ -214,6 +216,20 @@ void ParameterServerTable::erase_keys(size_t num_keys, uintptr_t keys) {
 
 void ParameterServerTable::clear_keys() {
     clear(ctx_);
+}
+
+size_t ParameterServerTable::num_keys() {
+    return static_cast<size_t>(size(ctx_));
+}
+
+size_t ParameterServerTable::export_keys(size_t capacity, uintptr_t keys) {
+    if (capacity == 0) return 0;
+    NVE_CHECK_(keys != 0, "Invalid Keys tensor");
+    NVE_CHECK_(get_key_size() == static_cast<int64_t>(sizeof(KeyType)), "Exporting keys requires 64-bit table keys");
+    // Tables write keys from the CPU, so reject device buffers.
+    NVE_CHECK_(pointer_memory_type(reinterpret_cast<void*>(keys)) != cudaMemoryTypeDevice,
+               "Keys tensor must be host accessible memory");
+    return static_cast<size_t>(get_keys(ctx_, static_cast<int64_t>(capacity), reinterpret_cast<void*>(keys)));
 }
 
 }  // namespace nve

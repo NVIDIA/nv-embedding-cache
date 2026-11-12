@@ -114,7 +114,9 @@ class LinearFileTable final : public HostTable<LinearFileTableConfig> {
 
   void clear(context_ptr_t& ctx) override;
 
-  int64_t size(context_ptr_t& ctx, bool exact) const override;
+  int64_t size(context_ptr_t& ctx) const override;
+
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
 
   void erase(context_ptr_t& ctx, int64_t n, buffer_ptr<const void> keys) override;
 

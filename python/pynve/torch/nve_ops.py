@@ -14,19 +14,9 @@
 # limitations under the License.
 
 import torch
-from pynve.torch.nve_tensors import CachedTable
+from pynve.torch.nve_tensors import CachedTable, _current_stream_handle
+from pynve.torch.nve_dtypes import nve_type_to_torch_type
 import pynve.nve as nve
-
-
-def _stream_handle(device: torch.device) -> int:
-    """Return the CUDA stream handle for `device`, or 0 on CPU.
-
-    NVE's binding identifies execution contexts by stream pointer; on CPU we use
-    0 as the sentinel — the underlying layer never enters the CUDA runtime.
-    """
-    if device.type == 'cpu':
-        return 0
-    return torch.cuda.current_stream(device).cuda_stream
 
 
 def pooling_type_from_mode(mode: str, weighted: bool) -> "nve.PoolingType_t":
@@ -113,7 +103,7 @@ class NVEmbeddingOpTraining(torch.autograd.Function):
         embed_dim = grad_output.shape[-1]
         unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
         result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
-        stream = _stream_handle(keys.device)
+        stream = _current_stream_handle(keys.device)
         nve_op = weight.emb_layer
         num_unique = nve_op.concat_backprop(
             num_keys, keys_flat.data_ptr(), grad_output.data_ptr(),
@@ -194,7 +184,7 @@ class NVEmbeddingBagOpTraining(torch.autograd.Function):
         embed_dim = grad_output.shape[-1]
         unique_keys = torch.empty(num_keys, dtype=torch.int64, device=keys.device)
         result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=keys.device)
-        stream = _stream_handle(keys.device)
+        stream = _current_stream_handle(keys.device)
         nve_op = weight.emb_layer
 
         weight_dtype = nve.DataType_t.Unknown
@@ -224,15 +214,18 @@ class NVEmbeddingBagOpTraining(torch.autograd.Function):
 #
 # Used as fallback when HAS_TORCH_OPS is False (torch bindings unavailable).
 # Not traceable by torch.export / torch.jit.trace.
+# Output geometry comes from the binding: weight holds raw bytes for quantized layers.
 # ---------------------------------------------------------------------------
 
 class CacheEmbeddingOp(torch.autograd.Function):
     @staticmethod
     def forward(keys: torch.Tensor, weight: CachedTable):
         nve_op = weight.emb_layer
-        result = torch.empty(keys.numel(), weight.shape[-1], dtype=weight.dtype, device=keys.device)
+        result = torch.empty(keys.numel(), nve_op.get_embedding_dim(),
+                             dtype=nve_type_to_torch_type(nve_op.get_output_data_type()),
+                             device=keys.device)
         nve_op.lookup(keys.numel(), keys.data_ptr(), result.data_ptr(),
-                      _stream_handle(keys.device))
+                      _current_stream_handle(keys.device))
         return result
 
     @staticmethod
@@ -252,7 +245,7 @@ class CacheEmbeddingOp(torch.autograd.Function):
         num_unique = nve_op.concat_backprop(
             num_keys, keys_flat.data_ptr(), grad_output.data_ptr(),
             unique_keys.data_ptr(), result.data_ptr(),
-            _stream_handle(keys.device))
+            _current_stream_handle(keys.device))
         unique_keys = unique_keys[:num_unique].reshape((1, -1))
         result = result[:num_unique]
         return None, torch.sparse_coo_tensor(unique_keys, result, weight.shape, device=weight.device)
@@ -264,8 +257,10 @@ class CacheEmbeddingBagOp(torch.autograd.Function):
                 mode: str, per_sample_weights: torch.Tensor):
         nve_op = weight.emb_layer
         device = keys.device
-        result = torch.empty(offsets.numel() - 1, weight.shape[-1], dtype=weight.dtype, device=device)
-        stream = _stream_handle(device)
+        result = torch.empty(offsets.numel() - 1, nve_op.get_embedding_dim(),
+                             dtype=nve_type_to_torch_type(nve_op.get_output_data_type()),
+                             device=device)
+        stream = _current_stream_handle(device)
         if per_sample_weights is not None:
             w_type = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
                      else nve.DataType_t.Float16
@@ -294,7 +289,7 @@ class CacheEmbeddingBagOp(torch.autograd.Function):
         unique_keys = torch.empty(num_keys, dtype=torch.int64, device=weight.device)
         result = torch.empty(num_keys, embed_dim, dtype=grad_output.dtype, device=weight.device)
         nve_op = weight.emb_layer
-        stream = _stream_handle(weight.device)
+        stream = _current_stream_handle(weight.device)
         if per_sample_weights is not None:
             w_type = nve.DataType_t.Float32 if per_sample_weights.dtype == torch.float32 \
                      else nve.DataType_t.Float16

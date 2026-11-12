@@ -29,7 +29,7 @@
 namespace nve {
 
 NVLMemBlock::NVLMemBlock(size_t row_size, size_t num_embeddings, nve::DataType_t dtype, const std::vector<int>& gpu_ids)
-  : NVLMemBlock(row_size * num_embeddings * static_cast<size_t>(dtype_size(dtype)), gpu_ids) {}
+  : NVLMemBlock(memblock_size_in_bytes(row_size, num_embeddings, dtype), gpu_ids) {}
 
 struct GpuAllocationInfo
 {

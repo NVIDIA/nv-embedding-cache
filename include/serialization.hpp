@@ -22,6 +22,7 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
+#include <nve_types.hpp>
 
 namespace nve {
 
@@ -78,6 +79,11 @@ public:
     uint64_t get_num_rows() const override;
     uint64_t get_row_size_in_bytes() const; 
     std::vector<uint64_t> get_shape() const;
+    const std::string& get_descr() const;  // numpy element type, e.g. "<f4"
+    // Whether the element type can hold rows of `dtype`. Types without a numpy
+    // equivalent (e.g. bfloat) and Unknown are checked by row bytes only.
+    bool holds_rows_of(DataType_t dtype) const;
+
     void reset() override;
     ~NumpyTensorFileFormat() override = default;
 
@@ -87,6 +93,8 @@ private:
 
     struct NumpyHeader {
         uint64_t dtype_size_in_bytes;
+        std::string descr;
+        DataType_t dtype;  // Float element type, Unknown for integer/byte elements
         std::vector<uint64_t> shape;
         bool fortran_order;
     };

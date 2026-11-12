@@ -41,6 +41,8 @@ void NvhmMapTableConfig::check() const {
 
   NVE_CHECK_(key_fetch_queue_length == 0 ||
     (key_fetch_queue_length > 0 && key_fetch_queue_length <= 8 && has_single_bit(to_uint(key_fetch_queue_length))));
+  NVE_CHECK_(insert_fetch_queue_length == 0 ||
+    (insert_fetch_queue_length > 0 && insert_fetch_queue_length <= 8 && has_single_bit(to_uint(insert_fetch_queue_length))));
 
   NVE_CHECK_(initial_capacity >= 0);
   NVE_CHECK_(value_alignment > 0 && has_single_bit(to_uint(value_alignment)));
@@ -62,6 +64,7 @@ void from_json(const nlohmann::json& json, NvhmMapTableConfig& conf) {
   NVE_READ_JSON_FIELD_(value_alignment);
 
   NVE_READ_JSON_FIELD_(key_fetch_queue_length);
+  NVE_READ_JSON_FIELD_(insert_fetch_queue_length);
   NVE_READ_JSON_FIELD_(prefetch_values);
 
   NVE_READ_JSON_FIELD_(auto_shrink);
@@ -83,6 +86,7 @@ void to_json(nlohmann::json& json, const NvhmMapTableConfig& conf) {
   NVE_WRITE_JSON_FIELD_(value_alignment);
 
   NVE_WRITE_JSON_FIELD_(key_fetch_queue_length);
+  NVE_WRITE_JSON_FIELD_(insert_fetch_queue_length);
   NVE_WRITE_JSON_FIELD_(prefetch_values);
 
   NVE_WRITE_JSON_FIELD_(auto_shrink);

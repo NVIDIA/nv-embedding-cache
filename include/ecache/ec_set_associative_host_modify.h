@@ -149,6 +149,11 @@ public:
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
+            // Each key hits at most once, so this bounds the entries written below.
+            if (num_keys > context->max_update_sz)
+            {
+                EC_THROW(ECERROR_INVALID_ARGUMENT);
+            }
             context->op = ModifyOpType::MODIFY_INVALIDATE;
             auto curr_tags = this->h_tags_ + table_index * this->num_sets_ * NUM_WAYS;
             context->list->num_entries = 0;
@@ -166,7 +171,6 @@ public:
                     {
                         //hit
                         set_ways[j] = this->config_.sentinel_key;
-                        assert(context->list->num_entries <= context->max_update_sz);
                         context->list->entries[context->list->num_entries++] = {nullptr, nullptr, static_cast<uint32_t>(set), j, this->config_.sentinel_key};
                     }
                 }
@@ -197,6 +201,8 @@ public:
     {
         try 
         {
+            // grab writer lock as clear resets tag storage, counters and the decay clock
+            typename EmbedCacheSA<IndexT, TagT>::WriteLock lock(this->rw_lock_);
             std::fill(this->h_tags_, this->h_tags_ + this->num_sets_ * NUM_WAYS * this->config_.num_tables, this->config_.sentinel_key);
             std::fill(this->h_counters_, this->h_counters_ + this->num_sets_ * NUM_WAYS * this->config_.num_tables, 0);
             // reset lazy-decay clock and per-set timestamps
@@ -391,29 +397,17 @@ public:
         }
     }
 
-    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t& num_out_keys) const override
+    ECError get_keys_stored_in_cache(const LookupContextHandle& /*lookup_context_handle*/, IndexT* out_keys, size_t capacity, size_t& num_keys, cudaStream_t /*stream*/) const override
     {
         try 
         {
-            if (!out_keys || !this->h_tags_)
+            if ((!out_keys && capacity) || !this->h_tags_)
             {
                 EC_THROW(ECERROR_INVALID_ARGUMENT);
             }
-            num_out_keys = 0;
-            for (size_t i = 0; i < this->num_sets_; i++)
-            {
-                for (size_t j = 0; j < NUM_WAYS; j++)
-                {
-                    TagT tag = this->h_tags_[i * NUM_WAYS + j];
-                    if (tag == this->config_.sentinel_key)
-                    {
-                        continue;
-                    }
-                    IndexT key = static_cast<IndexT>(tag * this->num_sets_ + i);
-                    out_keys[num_out_keys++] = key;
-                }
-            }
-            
+            // host tags are the source of truth here and change under the writer lock
+            typename EmbedCacheSA<IndexT, TagT>::ReadLock lock(this->rw_lock_);
+            num_keys = this->collect_keys_from_host_tags(out_keys, capacity);
             return ECERROR_SUCCESS;
         }
         catch(const ECException& e)
@@ -536,6 +530,6 @@ private:
     CounterT* h_counters_; // per table counters
     int64_t* h_set_timestamps_ = nullptr; // per (table, set) lazy-decay timestamp
     int64_t global_ts_ = 0;                // modify-call clock (guarded by rw_lock_)
-    typename EmbedCacheSA<IndexT, TagT>::ReadWriteLock rw_lock_;
+    mutable typename EmbedCacheSA<IndexT, TagT>::ReadWriteLock rw_lock_;
 };
 }

@@ -18,11 +18,22 @@
 #pragma once
 
 #include <host_table.hpp>
+#include <algorithm>
+#include <atomic>
+#include <utility>
 
 namespace nve {
 
 using update_kernel_t = void (*)(void*, const void* const, int64_t, const void*, int64_t);
 
 update_kernel_t pick_cpu_update_kernel(DataType_t value_dtype, DataType_t update_dtype);
+
+// Reserves the next `n` slots of an output buffer that parallel tasks fill. Returns the first slot and how
+// many of the `n` slots fall below `capacity` (<= 0 once the buffer is full).
+inline std::pair<int64_t, int64_t> claim_output_range(std::atomic_int64_t& claimed, const int64_t n,
+                                                      const int64_t capacity) {
+  const int64_t begin{claimed.fetch_add(n, std::memory_order_relaxed)};
+  return {begin, std::min(begin + n, capacity) - begin};
+}
 
 }  // namespace nve

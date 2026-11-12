@@ -74,6 +74,13 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
       gpu_device_ = device;
     }
     NVE_CHECK_(table->get_max_row_size() == tables_.at(0)->get_max_row_size(), "All layer tables must have the same row size");
+    // Equal row sizes can still hold differently encoded rows; untyped (Unknown) tables store the layer's rows as is.
+    const DataType_t table_type = table->get_value_type();
+    if (table_type != DataType_t::Unknown) {
+      NVE_CHECK_(value_type_ == DataType_t::Unknown || table_type == value_type_,
+                 "All layer tables must have the same value type, got ", value_type_, " and ", table_type);
+      value_type_ = table_type;
+    }
   }
   if (config_.default_embedding.size() > 0) {
     NVE_CHECK_(tables_.at(0)->get_max_row_size() == static_cast<int64_t>(config_.default_embedding.size()), "Default embedding row size must match table row size");
@@ -81,25 +88,13 @@ HierarchicalEmbeddingLayer<KeyType>::HierarchicalEmbeddingLayer(
   }
   auto heuristic = config_.insert_heuristic;
   if (!heuristic) {
-    // Build default thresholds: DEFAULT_THRESHOLD for GPU and host tables, 0.0 for the last host table
-    std::vector<float> thresholds;
-    size_t last_host_idx = tables_.size(); // sentinel: no host tables
-    for (size_t i = tables_.size(); i > 0; --i) {
-      if (tables_.at(i - 1)->get_device_id() < 0) {
-        last_host_idx = i - 1;
-        break;
-      }
-    }
-    for (size_t i = 0; i < tables_.size(); i++) {
-      if (i == last_host_idx) {
-        thresholds.push_back(0.0f);
-      } else {
-        thresholds.push_back(DefaultInsertHeuristic::DEFAULT_THRESHOLD);
-      }
-    }
-    heuristic = std::make_shared<DefaultInsertHeuristic>(thresholds);
+    // One threshold per table; the last table's is unused since it gets no auto-insert handler
+    heuristic = std::make_shared<DefaultInsertHeuristic>(
+      std::vector<float>(tables_.size(), DefaultInsertHeuristic::DEFAULT_THRESHOLD));
   }
-  for (size_t i=0; i < tables_.size(); i++) {
+  // The last table is never auto-inserted into: it has no lower tier to fill it from, so an insert
+  // would only write the upper tiers' rows back into it.
+  for (size_t i=0; i + 1 < tables_.size(); i++) {
     auto table = tables_.at(i);
     bool gpu_table = (table->get_device_id() >= 0);
     KeyType invalid_key = static_cast<KeyType>(table->get_invalid_key());
@@ -139,17 +134,13 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   const bool pooling_requested = (pool_params != nullptr);
   if (pooling_requested) {
     validate_pool_params(*pool_params);
-    for (const auto& table : tables_) {
-      NVE_CHECK_(table->get_value_type() == tables_.at(0)->get_value_type(),
-                 "All layer tables must have the same value type for pooling");
-    }
   }
 
   const int64_t row_size = tables_.at(0)->get_max_row_size();
   // check for avoidable concat with no dequant, then use the lookup path to avoid a redundant copy.
   const bool avoidable_concat =
       pooling_requested && pool_params->pooling_type == PoolingType_t::Concatenate &&
-      pool_params->output_type == tables_.at(0)->get_value_type();
+      pool_params->output_type == value_type_;
   const bool do_pool = pooling_requested && !avoidable_concat;
 
   // For pooling/dequant we gather one raw stored row per key into a scratch buffer, then run the
@@ -303,14 +294,14 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   if (do_pool) {
     if (gpu_device_ >= 0) {
       // The gathered raw rows are now device-resident; pool/dequant on the GPU.
-      pool_gathered_device<KeyType>(ctx, *pool_params, tables_.at(0)->get_value_type(),
+      pool_gathered_device<KeyType>(ctx, *pool_params, value_type_,
                                     static_cast<const int8_t*>(d_output), gather_stride, num_keys,
                                     output, output_stride, lookup_stream);
     } else {
       // All tables on host
       auto* gather_host = static_cast<const int8_t*>(
           gather_bw->access_buffer(cudaMemoryTypeUnregistered, /*copy_content=*/true, lookup_stream));
-      pool_gathered_host<KeyType>(ctx, *pool_params, tables_.at(0)->get_value_type(), gather_host,
+      pool_gathered_host<KeyType>(ctx, *pool_params, value_type_, gather_host,
                                   gather_stride, row_size, num_keys, output, output_stride,
                                   ctx->get_thread_pool()->num_workers());
     }
@@ -329,13 +320,11 @@ void HierarchicalEmbeddingLayer<KeyType>::lookup(context_ptr_t& ctx, const int64
   }
 
   // Handle automatic inserts. Use gather_bw as we need the raw unpooled values.
-  if (!auto_insert_handlers_.empty()) {
-    for (size_t i=0; i<table_hits.size(); i++) {
-      auto_insert_handlers_.at(i)->auto_insert(
-        layer_ctx, keys_bw, gather_bw, table_hitrates[i], num_keys, gather_stride,
-        (left_keys > 0) ? hitmask_bw : nullptr // If there are no unbresolved keys then we can skip processing the hitmask
-      );
-    }
+  for (size_t i=0; i<auto_insert_handlers_.size(); i++) {
+    auto_insert_handlers_.at(i)->auto_insert(
+      layer_ctx, keys_bw, gather_bw, table_hitrates[i], num_keys, gather_stride,
+      (left_keys > 0) ? hitmask_bw : nullptr // If there are no unbresolved keys then we can skip processing the hitmask
+    );
   }
 }
 

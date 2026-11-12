@@ -64,6 +64,8 @@ To allocate this sharded buffer:
 
 This requires multiple processes to be launched with `mpirun`/`torchrun`/etc. and [IMEX](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/imexchannels.html) channels setup for NVLink.
 
+> **Note:** Non-root ranks import the root rank's buffer handles with `pidfd_open`/`pidfd_getfd`, so this requires Linux >= 5.6 and ptrace access to the root rank. Same-user ranks get this automatically when `/proc/sys/kernel/yama/ptrace_scope` is 0 or 1; otherwise (scope 2) `CAP_SYS_PTRACE` is needed. In containers, the seccomp profile must also allow these syscalls (e.g. Docker's default profile only allows them with `--cap-add SYS_PTRACE`).
+
 > **Note:** The linear layer is unaware of any of these considerations. The lookup kernel only sees a pointer in virtual memory and the CUDA runtime is responsible for directing accesses to the correct location. This means every layer handles its own lookups independently—there are no cooperative operations (e.g., [NCCL](https://developer.nvidia.com/nccl)).
 
 For a working example of multi-GPU sharding, see `benchmarks/multi_gpu_bench.py`. More details in [benchmarks.md](benchmarks.md#multi-gpu-benchmark)

@@ -32,7 +32,7 @@ namespace nve {
 // versa); the final Cast<DequantVecType, OutVecType> converts the dequantized value to OUTPUT_TYPE.
 //
 // A quantized row is laid out as [ q[row_size_in_elements] ][ scale ][ offset? ] where q is
-// DTYPE's storage type and scale/offset are ParamType, matching get_row_size_in_bytes<DTYPE>().
+// DTYPE's storage type and scale/offset are ParamType, matching row_size_in_bytes(DTYPE, ...).
 //
 // Each warp (SUBWARP_WIDTH lanes) resolves SUBWARP_WIDTH row addresses (one per lane), then walks
 // s = 0..SUBWARP_WIDTH-1 broadcasting lane s's address to the whole warp so the warp cooperatively
@@ -140,7 +140,7 @@ cudaError_t call_find_and_dequant_resolved(const IndexT* d_keys, const size_t le
     dim3 blockDims(blockX, blockY);
 
     using ParamType = typename QuantizationHelper<DTYPE>::ParamType;
-    const uint32_t row_size_in_bytes = get_row_size_in_bytes<DTYPE>(row_size_in_elements);
+    const int64_t row_bytes = row_size_in_bytes(DTYPE, row_size_in_elements);
 
     #define NVE_FAD_DISPATCH(INPUT_VEC_TYPE, DEQUANT_VEC_TYPE, OUT_VEC_TYPE) \
         do { \
@@ -156,11 +156,11 @@ cudaError_t call_find_and_dequant_resolved(const IndexT* d_keys, const size_t le
             } \
         } while (0)
 
-    if (row_size_in_bytes % sizeof(typename QuantizationHelper<DTYPE>::Vec4) == 0 && row_size_in_elements % 4 == 0)
+    if (row_bytes % sizeof(typename QuantizationHelper<DTYPE>::Vec4) == 0 && row_size_in_elements % 4 == 0)
     {
         NVE_FAD_DISPATCH(typename QuantizationHelper<DTYPE>::Vec4, typename VecWidthHelper<ParamType>::Vec4, typename VecWidthHelper<OUTPUT_TYPE>::Vec4);
     }
-    else if (row_size_in_bytes % sizeof(typename QuantizationHelper<DTYPE>::Vec2) == 0 && row_size_in_elements % 2 == 0)
+    else if (row_bytes % sizeof(typename QuantizationHelper<DTYPE>::Vec2) == 0 && row_size_in_elements % 2 == 0)
     {
         NVE_FAD_DISPATCH(typename QuantizationHelper<DTYPE>::Vec2, typename VecWidthHelper<ParamType>::Vec2, typename VecWidthHelper<OUTPUT_TYPE>::Vec2);
     }

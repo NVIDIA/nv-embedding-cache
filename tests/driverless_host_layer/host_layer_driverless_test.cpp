@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <vector>
@@ -295,6 +296,76 @@ TEST(DriverlessHostLayer, HostMemBlockSerializationRoundTrip) {
           << "key=" << keys[k] << " elem=" << e;
     }
   }
+}
+
+TEST(QuantRowGeometry, RowSizeInBytes) {
+  for (const DataType_t dt : {DataType_t::Float32, DataType_t::Float16, DataType_t::BFloat,
+                              DataType_t::E4M3, DataType_t::E5M2, DataType_t::Float64}) {
+    EXPECT_EQ(row_size_in_bytes(dt, 10), 10 * dtype_size(dt)) << dt;
+  }
+  // 1-byte codes + scale [+ offset] in the type's F32/F16 precision.
+  EXPECT_EQ(row_size_in_bytes(DataType_t::QInt8RowwiseF32, 10), 10 + 4);
+  EXPECT_EQ(row_size_in_bytes(DataType_t::QInt8RowwiseF16, 10), 10 + 2);
+  EXPECT_EQ(row_size_in_bytes(DataType_t::QUint8RowwiseF32, 10), 10 + 8);
+  EXPECT_EQ(row_size_in_bytes(DataType_t::QUint8RowwiseF16, 10), 10 + 4);
+  // Corrupt sizes (e.g. from hand-edited metadata) throw instead of wrapping.
+  constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+  EXPECT_THROW(row_size_in_bytes(DataType_t::Float32, -1), std::exception);
+  EXPECT_THROW(row_size_in_bytes(DataType_t::Float64, kMax / 4), std::exception);
+  EXPECT_THROW(row_size_in_bytes(DataType_t::QUint8RowwiseF32, kMax - 4), std::exception);
+}
+
+TEST(QuantRowGeometry, RowNumElements) {
+  for (const DataType_t dt : {DataType_t::Float32, DataType_t::Float16, DataType_t::Float64,
+                              DataType_t::QInt8RowwiseF32, DataType_t::QInt8RowwiseF16,
+                              DataType_t::QUint8RowwiseF32, DataType_t::QUint8RowwiseF16}) {
+    EXPECT_EQ(row_num_elements(dt, row_size_in_bytes(dt, 10)), 10) << dt;
+  }
+  // Rows with no values beyond metadata, or a partial element, throw.
+  EXPECT_THROW(row_num_elements(DataType_t::Float32, 0), std::exception);
+  EXPECT_THROW(row_num_elements(DataType_t::Float32, 6), std::exception);
+  EXPECT_THROW(row_num_elements(DataType_t::QUint8RowwiseF32, 8), std::exception);
+}
+
+TEST(QuantRowGeometry, HostMemBlockHoldsFullQuantRows) {
+  for (const DataType_t dt : {DataType_t::QInt8RowwiseF32, DataType_t::QInt8RowwiseF16,
+                              DataType_t::QUint8RowwiseF32, DataType_t::QUint8RowwiseF16}) {
+    const auto row_bytes = static_cast<size_t>(row_size_in_bytes(dt, kElems));
+    EXPECT_EQ(memblock_size_in_bytes(kElems, kNumRows, dt), kNumRows * row_bytes) << dt;
+    HostMemBlock block(kElems, kNumRows, dt);
+    EXPECT_EQ(block.get_size_in_bytes(), kNumRows * row_bytes) << dt;
+  }
+}
+
+// Quantized tables serialize as raw bytes (col = stored row bytes, element size 1), keeping
+// the trailing scale/offset of every row.
+TEST(QuantRowGeometry, RawRowSerializationRoundTrip) {
+  constexpr auto dt = DataType_t::QUint8RowwiseF32;
+  const auto row_bytes = static_cast<uint64_t>(row_size_in_bytes(dt, kElems));
+  auto src_block = std::make_shared<HostMemBlock>(kElems, kNumRows, dt);
+  auto* src = static_cast<uint8_t*>(src_block->get_ptr());
+  for (size_t i = 0; i < src_block->get_size_in_bytes(); ++i) src[i] = static_cast<uint8_t>(i * 7 + 3);
+
+  const auto make_wrapper = [row_bytes](const std::shared_ptr<HostMemBlock>& block) {
+    TensorWrapper t;
+    t.data = block->get_ptr();
+    t.row = static_cast<uint64_t>(kNumRows);
+    t.col = row_bytes;
+    t.element_size_in_bytes = 1;
+    return t;
+  };
+
+  constexpr uint64_t kLayerId = 7;
+  MemoryStream stream;
+  TensorFileFormat fmt;
+  fmt.write_table_file_header(stream);
+  fmt.write_tensor_to_stream(stream, kLayerId, make_wrapper(src_block));
+
+  auto dst_block = std::make_shared<HostMemBlock>(kElems, kNumRows, dt);
+  TensorWrapper dst = make_wrapper(dst_block);
+  stream.seek(0);
+  fmt.load_tensor_from_stream(stream, kLayerId, dst);
+  EXPECT_EQ(std::memcmp(src_block->get_ptr(), dst_block->get_ptr(), src_block->get_size_in_bytes()), 0);
 }
 
 }  // namespace

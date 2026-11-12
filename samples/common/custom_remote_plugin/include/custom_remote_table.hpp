@@ -37,7 +37,8 @@ class CustomRemoteTable final : public HostTableLike {
   CustomRemoteTable(table_id_t id, int64_t row_size);
 
   const HostTableConfig& config() const override { return config_; }
-  int64_t size(context_ptr_t& ctx, bool exact) const override;
+  int64_t size(context_ptr_t& ctx) const override;
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
 
   void clear(context_ptr_t& ctx) override;
 

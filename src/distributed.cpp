@@ -23,6 +23,7 @@
 #include <cuda_support.hpp>
 #include <cuda_driver_support.hpp>
 #include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -32,6 +33,15 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <filesystem>
+
+// Older glibc (e.g. manylinux_2_28's 2.28) lacks these numbers. Syscalls added
+// since Linux 5.1 share one number on all architectures except alpha.
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_getfd
+#define SYS_pidfd_getfd 438
+#endif
 
 #define ERRNO_CHECK(_expr_) \
 do { \
@@ -200,12 +210,29 @@ void CUDADistributedBuffer::init_single_host(uint64_t size, BufferLocation locat
   // Map FD's in all non root procs
   if (!root_proc) {
     int root_pidfd = pidfd_open(root_pid, 0);
-    NVE_CHECK_(root_pidfd != -1);
+    if (root_pidfd == -1) {
+      const int error = errno;
+      NVE_THROW_("pidfd_open() failed",
+                 error == ENOSYS ? ", requires Linux >= 5.3 or the syscall is blocked by seccomp" : "",
+                 ", error: ", error, ": ", std::strerror(error));
+    }
     for (size_t i=0 ; i<world_size; i++) {
       if (all_devices_[i] >= 0) {
         int local_fd = pidfd_getfd(root_pidfd, shareable_handles[i], 0);
-        const int error = errno;
-        NVE_CHECK_(local_fd != -1, "pidfd_getfd() failed, make sure SYS_PTRACE is available!", " error: ", error, ": ", std::strerror(error));
+        if (local_fd == -1) {
+          const int error = errno;
+          // Release the fds imported so far so the root's allocations aren't kept alive
+          for (size_t j=0 ; j<i ; j++) {
+            if (all_devices_[j] >= 0) {
+              close(shareable_handles[j]);
+            }
+          }
+          close(root_pidfd);
+          NVE_THROW_("pidfd_getfd() failed, ",
+                     error == ENOSYS ? "requires Linux >= 5.6 or the syscall is blocked by seccomp"
+                                     : "make sure SYS_PTRACE is available (or ptrace_scope permits it) and not blocked by seccomp",
+                     ", error: ", error, ": ", std::strerror(error));
+        }
         shareable_handles[i] = local_fd;
       }
     }

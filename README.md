@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-26.10.0-green.svg)](version.txt)
+[![Version](https://img.shields.io/badge/version-26.11.0-green.svg)](version.txt)
 
 NV Embedding Cache is a domain-specific SDK for high performance recommender systems embedding lookup.
 We accelerate embedding lookups with a combination of SW caches in GPU/Host memory and customized CUDA kernels.
@@ -68,7 +68,8 @@ docs
 ├── overview.md     # SDK Overview            <-- Start Here!
 ├── plugins.md      # Plugin documentation
 ├── python_api.md   # Python bindings documentation
-└── samples.md      # Samples listing and description
+├── samples.md      # Samples listing and description
+└── versioning.md   # Versioning, upgrade and rollback
 ```
 A good place to start is: [docs/overview.md](docs/overview.md).
 

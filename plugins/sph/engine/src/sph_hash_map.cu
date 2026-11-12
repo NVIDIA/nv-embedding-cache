@@ -78,11 +78,11 @@ ShardedPerfectHashMap::ShardedPerfectHashMap(int64_t initial_capacity, int64_t v
 }
 
 ShardedPerfectHashMap::~ShardedPerfectHashMap() {
-    if (aux_stream_)         cudaStreamDestroy(aux_stream_);
-    if (alloc_done_event_)   cudaEventDestroy(alloc_done_event_);
-    if (d_failure_counters_) cudaFree(d_failure_counters_);
-    if (h_failure_counters_) cudaFreeHost(h_failure_counters_);
-    if (d_default_value_)    cudaFree(d_default_value_);
+    if (aux_stream_)         SPH_TEARDOWN(cudaStreamDestroy(aux_stream_));
+    if (alloc_done_event_)   SPH_TEARDOWN(cudaEventDestroy(alloc_done_event_));
+    if (d_failure_counters_) SPH_TEARDOWN(cudaFree(d_failure_counters_));
+    if (h_failure_counters_) SPH_TEARDOWN(cudaFreeHost(h_failure_counters_));
+    if (d_default_value_)    SPH_TEARDOWN(cudaFree(d_default_value_));
 }
 
 // Out-of-line accessors: these dereference d_value_payload_ / d_bucket_offsets_,

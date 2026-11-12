@@ -25,11 +25,16 @@ DefaultInsertHeuristic::DefaultInsertHeuristic(const std::vector<float> threshol
     dis_(0.0, 1.0) {}
 
 bool DefaultInsertHeuristic::insert_needed(const float hitrate, const size_t table_id) {
+    NVE_CHECK_(table_id < thresholds_.size(), "Invalid table index");
+    const float threshold = thresholds_.at(table_id);
+    if (threshold < 0) {
+        return false;  // Negative threshold: never insert into this table
+    }
+
     auto warmup_chance = (1 - hitrate);
     auto steadystate_chance = (warmup_chance * warmup_chance * warmup_chance);
 
-    NVE_CHECK_(table_id < thresholds_.size(), "Invalid table index");
-    return (hitrate < thresholds_.at(static_cast<size_t>(table_id))) ? 
+    return (hitrate < threshold) ?
             (dis_(gen_) < warmup_chance) :
             (dis_(gen_) < steadystate_chance);
 }

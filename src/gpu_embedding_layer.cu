@@ -42,18 +42,6 @@ namespace nve {
 
 namespace {
 
-int64_t gpu_quant_value_count(const GPUEmbeddingLayerConfig& config) {
-  const int64_t metadata_bytes = quant_rowwise_meta_bytes(config.value_dtype);
-  NVE_CHECK_(config.embedding_width_in_bytes > metadata_bytes,
-             "Quantized GPU embedding rows must contain values in addition to metadata");
-  return (config.embedding_width_in_bytes - metadata_bytes) / dtype_size(config.value_dtype);
-}
-
-int64_t gpu_quant_output_stride(const GPUEmbeddingLayerConfig& config) {
-  return gpu_quant_value_count(config) *
-         dtype_size(quant_rowwise_output_dtype(config.value_dtype));
-}
-
 void validate_quant_pool_types_and_stride(
     const GPUEmbeddingLayerConfig& config,
     const EmbeddingLayerBase::PoolingParams& pool_params,
@@ -61,7 +49,8 @@ void validate_quant_pool_types_and_stride(
   const DataType_t required_output_type = quant_rowwise_output_dtype(config.value_dtype);
   NVE_CHECK_ARG_(pool_params.output_type == required_output_type,
                  "Quantized GPU embedding output type must match the quantization metadata precision");
-  NVE_CHECK_ARG_(output_stride == gpu_quant_output_stride(config),
+  const int64_t value_count = row_num_elements(config.value_dtype, config.embedding_width_in_bytes);
+  NVE_CHECK_ARG_(output_stride == value_count * dtype_size(required_output_type),
                  "Invalid dequantized output stride for quantized GPU embedding table");
 
   if (pool_params.pooling_type == PoolingType_t::Concatenate) {
@@ -312,7 +301,8 @@ GPUEmbeddingLayer<KeyType>::GPUEmbeddingLayer(const GPUEmbeddingLayerConfig& con
     if (is_quant_rowwise(config_.value_dtype)) {
       NVE_CHECK_(config_.embedding_width_in_bytes % sizeof(__half) == 0,
                  "Quantized GPU embedding row width must be even");
-      (void)gpu_quant_value_count(config_);
+      NVE_CHECK_(config_.embedding_width_in_bytes > quant_rowwise_meta_bytes(config_.value_dtype),
+                 "Quantized GPU embedding rows must contain values in addition to metadata");
     }
     NVE_CHECK_(static_cast<uint64_t>(config_.num_embeddings) <=
                    static_cast<uint64_t>(std::numeric_limits<KeyType>::max()),

@@ -775,19 +775,22 @@ public:
     virtual ECError clear_cache(cudaStream_t stream) = 0;
 
     /**
-    * \brief Return the keys (duplication included) that are stored in the cache, this is useful in debugging and might cause device sync
+    * \brief Count the keys stored in the cache and return up to `capacity` of them.
     * 
-    * Return the keys (duplication included) that stored in the cache, in the user allocated buffer out_keys, the number of keys is returned in num_out_keys.
-    * The buffer should be allocated with size of sizeof(IndexT)*get_max_num_embedding_vectors_in_cache()
+    * num_keys receives the number of keys stored in the cache; the first min(num_keys, capacity) of them are written
+    * to the user allocated buffer out_keys (may be nullptr when capacity is 0). A buffer of
+    * sizeof(IndexT)*get_max_num_embedding_vectors_in_cache() always fits all keys.
     * The data is true for the moment on call, if there are any modify calls in flight results are undefined and it is up to the user to sync
     * 
     * @param lookup_context_handle - handle to the lookup context to use
     * @param out_keys - output user allocated buffer to populate with the stored keys 
-    * @param num_out_keys - output return the number of keys populated in out_keys array
+    * @param capacity - number of keys that fit in out_keys
+    * @param num_keys - output, the number of keys stored in the cache (can exceed capacity)
+    * @param stream - stream used to snapshot device resident tags (synchronized before returning)
     *
     * @return EC_SUCCESS on success, Might return other values based on implementation
     */
-    virtual ECError get_keys_stored_in_cache(const LookupContextHandle& lookup_context_handle, IndexT* out_keys, size_t& num_out_keys) const = 0;
+    virtual ECError get_keys_stored_in_cache(const LookupContextHandle& lookup_context_handle, IndexT* out_keys, size_t capacity, size_t& num_keys, cudaStream_t stream) const = 0;
 
     /**
      * \brief RAII scope for a custom flow.

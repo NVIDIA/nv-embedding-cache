@@ -204,6 +204,24 @@ def test_host_layer_cpu_default_embedding_wrong_size_rejected():
         )
 
 
+def test_float_weight_init_is_cast_and_checked():
+    num_embeddings, embed_size = 16, 4
+    init = torch.randn(num_embeddings, embed_size, dtype=torch.float64)
+    devices = [torch.device("cpu")] + ([torch.device("cuda")] if torch.cuda.is_available() else [])
+    for device in devices:
+        layer_types = [nve_layers.LayerType.HostLayer]
+        if device.type == "cuda":
+            layer_types += [nve_layers.LayerType.GPULayer]
+        for layer_type in layer_types:
+            layer = make_layer(num_embeddings, embed_size, torch.float32, layer_type, device,
+                               weight_init=init)
+            keys = torch.tensor([0, 7, 15], dtype=torch.int64, device=device)
+            torch.testing.assert_close(layer(keys).cpu(), init[keys.cpu()].float())
+            with pytest.raises(ValueError, match="weight_init must hold exactly"):
+                make_layer(num_embeddings, embed_size, torch.float32, layer_type, device,
+                           weight_init=init[:-1])
+
+
 def test_host_layer_cpu_default_embedding_export_load():
     # default_embedding round-trips through save_nve/load_nve_layers config json.
     num_embeddings = 16
@@ -622,3 +640,26 @@ def test_host_layer_clean_interpreter_exit():
     res = subprocess.run([sys.executable, "-c", script],
                          capture_output=True, text=True, timeout=300)
     assert res.returncode == 0, f"exit code {res.returncode}\n{res.stderr}"
+
+
+@pytest.mark.parametrize("qtype", [nve.DataType_t.QInt8RowwiseF16, nve.DataType_t.QUint8RowwiseF32],
+                         ids=["qint8_f16", "quint8_f32"])
+def test_rowwise_host_cpu(qtype):
+    """Quantized HostLayer on device=cpu through the CPU custom ops."""
+    from pynve.torch.nve_dtypes import quantize_rowwise, dequantize_rowwise
+    num_embeddings, embed_size = 64, 6
+    raw = quantize_rowwise(torch.randn(num_embeddings, embed_size) + 1.0, qtype)
+    keys = torch.tensor([0, 5, 5, 63], dtype=torch.int64)
+    offsets = torch.tensor([0, 1, 4], dtype=torch.int64)
+    rows = dequantize_rowwise(raw[keys], qtype)
+
+    emb = make_layer(num_embeddings, embed_size, qtype, nve_layers.LayerType.HostLayer,
+                     torch.device("cpu"), weight_init=raw)
+    out = emb(keys)
+    assert out.device.type == "cpu" and out.dtype == rows.dtype
+    torch.testing.assert_close(out, rows, rtol=1e-3, atol=1e-3)
+
+    bag = make_layer(num_embeddings, embed_size, qtype, nve_layers.LayerType.HostLayer,
+                     torch.device("cpu"), weight_init=raw, bag_mode="mean")
+    expected = torch.stack([rows[:1].float().mean(0), rows[1:].float().mean(0)]).to(rows.dtype)
+    torch.testing.assert_close(bag(keys, offsets), expected, rtol=1e-3, atol=1e-3)

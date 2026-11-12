@@ -76,6 +76,16 @@ TEST(DefaultInsertHeuristic, DefaultInsert) {
   }
 }
 
+TEST(DefaultInsertHeuristic, NegativeThresholdNeverInserts) {
+  nve::DefaultInsertHeuristic heuristic(
+      std::vector<float>{nve::DefaultInsertHeuristic::NEVER_INSERT_THRESHOLD, 0.0f});
+  for (uint32_t i = 0; i < 1000; i++) {
+    // A hit rate of 0 always inserts with a threshold of 0, and never with a negative threshold
+    EXPECT_FALSE(heuristic.insert_needed(0.0f, 0));
+    EXPECT_TRUE(heuristic.insert_needed(0.0f, 1));
+  }
+}
+
 TEST(FSMInsertHeuristic, FSMInsertOnlyWarmup) {
   uint32_t num_warmup = 35;
   uint32_t num_steady = 0;

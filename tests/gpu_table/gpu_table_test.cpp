@@ -21,11 +21,13 @@
 #include <cmath>
 #include <common.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <thread>
 #include <cuda_support.hpp>
 #include <gpu_table.hpp>
 #include <default_allocator.hpp>
+#include <numeric>
 #include <random>
 #include <tuple>
 #include <vector>
@@ -214,6 +216,60 @@ class GpuTableTest : public testing::TestWithParam<GpuTableTestParams> {
     // validate results
     EXPECT_FALSE(found);
   }
+  // size()/get_keys() report the cached keys into host accessible buffers.
+  void test_size_and_get_keys() {
+    const auto& params = GetParam();
+    const size_t data_elements = static_cast<size_t>(params.row_size_bytes) / sizeof(float);
+    std::vector<float> h_data(data_elements, 1.0f);
+    const std::vector<KeyType> keys{GT_TEST_KEY, GT_TEST_KEY + 1, GT_TEST_KEY + 2};
+
+    EXPECT_EQ(tb_->size(ctx_), 0);
+    for (const KeyType key : keys) {
+      insert(key, h_data.data(), params.row_size_bytes);
+    }
+    EXPECT_EQ(tb_->size(ctx_), static_cast<int64_t>(keys.size()));
+
+    // Host output buffer, larger than needed: slots past the written keys keep their contents.
+    const KeyType untouched = static_cast<KeyType>(-7);
+    std::vector<KeyType> h_keys(keys.size() + 2, untouched);
+    EXPECT_EQ(tb_->get_keys(ctx_, static_cast<int64_t>(h_keys.size()), h_keys.data()),
+              static_cast<int64_t>(keys.size()));
+    std::vector<KeyType> got(h_keys.begin(), h_keys.begin() + static_cast<std::ptrdiff_t>(keys.size()));
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, keys);
+    EXPECT_EQ(h_keys.back(), untouched);
+    EXPECT_THROW(tb_->get_keys(ctx_, -1, h_keys.data()), nve::Exception);
+
+    // Host output buffer smaller than the key count: filled to capacity with distinct stored keys.
+    KeyType small[2];
+    EXPECT_EQ(tb_->get_keys(ctx_, 2, small), 2);
+    EXPECT_NE(small[0], small[1]);
+    for (const KeyType key : small) {
+      EXPECT_NE(std::find(keys.begin(), keys.end(), key), keys.end()) << key;
+    }
+
+    // Managed output buffer: written in place.
+    KeyType* managed = nullptr;
+    NVE_CHECK_(cudaMallocManaged(&managed, keys.size() * sizeof(KeyType)));
+    EXPECT_EQ(tb_->get_keys(ctx_, static_cast<int64_t>(keys.size()), managed), static_cast<int64_t>(keys.size()));
+    std::vector<KeyType> managed_got(managed, managed + keys.size());
+    std::sort(managed_got.begin(), managed_got.end());
+    EXPECT_EQ(managed_got, keys);
+    NVE_CHECK_(cudaFree(managed));
+
+    // Device output buffer: rejected, since keys are written from the CPU.
+    KeyType* device = nullptr;
+    NVE_CHECK_(cudaMalloc(&device, keys.size() * sizeof(KeyType)));
+    EXPECT_THROW(tb_->get_keys(ctx_, static_cast<int64_t>(keys.size()), device), nve::Exception);
+    NVE_CHECK_(cudaFree(device));
+
+    erase(keys[0]);
+    NVE_CHECK_(cudaDeviceSynchronize());
+    EXPECT_EQ(tb_->size(ctx_), static_cast<int64_t>(keys.size()) - 1);
+    clear();
+    EXPECT_EQ(tb_->size(ctx_), 0);
+  }
+
   void test_combine() {
     const auto& params = GetParam();
     if (!params.allocate_uvm_table) {
@@ -441,6 +497,7 @@ TEST_FORMAT(missing_key, test_missing_key);
 TEST_FORMAT(negative_key, test_negative_key);
 TEST_FORMAT(negative_key_hits, test_negative_key_hits);
 TEST_FORMAT(erase, test_erase);
+TEST_FORMAT(size_and_get_keys, test_size_and_get_keys);
 TEST_FORMAT(find, test_find_uvm);
 TEST_FORMAT(combine, test_combine);
 #undef TEST_FORMAT
@@ -559,6 +616,63 @@ TEST(GpuTableInvalidKey, ValidKeysSurviveBatchWithSentinel) {
   allocator->device_free(d_keys);
   allocator->device_free(d_values);
   allocator->device_free(d_hitmask);
+}
+
+// With CPU-side modify, get_keys() on another context must see all keys or none while clear() runs.
+TEST(GpuTableGetKeys, ConsistentDuringClear) {
+  using KeyType = int64_t;
+  constexpr int64_t row_size = 1l << 7;
+  constexpr int64_t num_keys = 1l << 16;
+  constexpr int iterations = 20;
+
+  GPUTableConfig cfg;
+  cfg.device_id = GT_TEST_DEVICE;
+  cfg.cache_size = 1l << 28;  // large enough that clear() and the key scan overlap
+  cfg.row_size_in_bytes = row_size;
+  cfg.uvm_table = nullptr;
+  cfg.modify_on_gpu = false;
+  GpuTable<KeyType> tab(cfg);
+  auto ctx = tab.create_execution_context(0, 0, nullptr, nullptr);
+  auto reader_ctx = tab.create_execution_context(0, 0, nullptr, nullptr);
+
+  std::vector<KeyType> keys(static_cast<size_t>(num_keys));
+  std::iota(keys.begin(), keys.end(), KeyType{0});
+  auto allocator = GetDefaultAllocator();
+  void* d_values = nullptr;
+  NVE_CHECK_(allocator->device_allocate(&d_values, static_cast<size_t>(row_size * num_keys)));
+  NVE_CHECK_(cudaMemset(d_values, 0, static_cast<size_t>(row_size * num_keys)));
+
+  for (int it = 0; it < iterations; it++) {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", keys.data(), sizeof(KeyType) * keys.size());
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "values", d_values, static_cast<size_t>(row_size * num_keys));
+    tab.insert(ctx, num_keys, std::move(keys_bw), row_size, row_size, std::move(values_bw));
+    const int64_t stored = tab.size(ctx);
+    ASSERT_GT(stored, 0);
+
+    std::atomic<bool> done{false};
+    std::atomic<int> reads{0};
+    std::vector<int64_t> partial;
+    std::thread reader([&] {
+      std::vector<KeyType> out(static_cast<size_t>(num_keys));
+      do {
+        const int64_t n = tab.get_keys(reader_ctx, num_keys, out.data());
+        if (n != 0 && n != stored) partial.push_back(n);
+        reads++;
+      } while (!done.load());
+    });
+    // Clear only once the reader is looping, so a scan is likely in flight.
+    while (reads.load() == 0) {
+      std::this_thread::yield();
+    }
+    tab.clear(ctx);
+    done = true;
+    reader.join();
+    ASSERT_TRUE(partial.empty()) << "get_keys saw " << partial.front() << " of " << stored << " keys mid-clear";
+    EXPECT_EQ(tab.size(ctx), 0);
+  }
+  allocator->device_free(d_values);
 }
 
 // With a non-default sentinel, -1 becomes a regular key and must round-trip.
@@ -984,5 +1098,110 @@ TEST(GpuTableQuant, FindAndCombineQInt8F32_Int64) {
 TEST(GpuTableQuant, FindAndCombineQUint8F32_Int64) {
   RunFindAndCombineQuant<int64_t>(DataType_t::QUint8RowwiseF32);
 }
+
+// Erasing more cached keys than max_modify_size must invalidate all of them
+// without overflowing the modify context. Params: (modify_on_gpu, num_keys);
+// num_keys that is not a multiple of max_modify_size exercises a short final chunk.
+class GpuTableLargeErase : public testing::TestWithParam<std::tuple<bool, int64_t>> {};
+
+TEST_P(GpuTableLargeErase, EraseMoreThanMaxModifySize) {
+  using KeyType = int64_t;
+  constexpr int64_t row_size = 64;
+  constexpr int64_t max_modify_size = 256;
+  const auto params = GetParam();
+  const auto modify_on_gpu = std::get<0>(params);
+  const auto num_keys = std::get<1>(params);
+  ASSERT_GT(num_keys, max_modify_size);
+  const size_t n = static_cast<size_t>(num_keys);
+  const size_t hit_mask_bytes =
+    to_uint(ceil_div(num_keys, bitmask64::num_bits)) * sizeof(bitmask64_t);
+
+  GPUTableConfig cfg;
+  cfg.device_id = GT_TEST_DEVICE;
+  cfg.cache_size = 64l << 20;  // large enough to hold every key without eviction
+  cfg.row_size_in_bytes = row_size;
+  cfg.uvm_table = nullptr;
+  cfg.max_modify_size = max_modify_size;
+  cfg.modify_on_gpu = modify_on_gpu;
+  GpuTable<KeyType> tab(cfg);
+  auto ctx = tab.create_execution_context(0, 0, nullptr, nullptr);
+
+  std::vector<KeyType> keys(n);
+  for (int64_t i = 0; i < num_keys; ++i) {
+    keys[static_cast<size_t>(i)] = i * 7919 + 13;
+  }
+
+  auto allocator = GetDefaultAllocator();
+  void* d_keys = nullptr;
+  void* d_values = nullptr;
+  void* d_hitmask = nullptr;
+  NVE_CHECK_(allocator->device_allocate(&d_keys, sizeof(KeyType) * n));
+  NVE_CHECK_(allocator->device_allocate(&d_values, static_cast<size_t>(row_size) * n));
+  NVE_CHECK_(allocator->device_allocate(&d_hitmask, hit_mask_bytes));
+  NVE_CHECK_(cudaMemcpy(d_keys, keys.data(), sizeof(KeyType) * n, cudaMemcpyDefault));
+  NVE_CHECK_(cudaMemset(d_values, 0, static_cast<size_t>(row_size) * n));
+
+  // Insert is capped at max_modify_size keys per call.
+  for (int64_t start = 0; start < num_keys; start += max_modify_size) {
+    const int64_t count = std::min(max_modify_size, num_keys - start);
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", static_cast<KeyType*>(d_keys) + start,
+      sizeof(KeyType) * static_cast<size_t>(count));
+    auto values_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "values", static_cast<int8_t*>(d_values) + start * row_size,
+      static_cast<size_t>(row_size * count));
+    tab.insert(ctx, count, std::move(keys_bw), row_size, row_size, std::move(values_bw));
+    ctx->wait();
+  }
+  NVE_CHECK_(cudaDeviceSynchronize());
+
+  // Returns the hit mask of a find over all keys.
+  auto find_hits = [&]() {
+    NVE_CHECK_(cudaMemset(d_hitmask, 0, hit_mask_bytes));
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", d_keys, sizeof(KeyType) * n);
+    auto hit_mask_bw = std::make_shared<BufferWrapper<bitmask64_t>>(
+      ctx, "hit_mask", static_cast<bitmask64_t*>(d_hitmask), hit_mask_bytes);
+    auto values_bw = std::make_shared<BufferWrapper<void>>(
+      ctx, "values", d_values, static_cast<size_t>(row_size) * n);
+    tab.find(ctx, num_keys, std::move(keys_bw), std::move(hit_mask_bw), row_size,
+             std::move(values_bw), nullptr);
+    ctx->wait();
+    NVE_CHECK_(cudaDeviceSynchronize());
+    std::vector<bitmask64_t> h_hitmask(hit_mask_bytes / sizeof(bitmask64_t));
+    NVE_CHECK_(cudaMemcpy(h_hitmask.data(), d_hitmask, hit_mask_bytes, cudaMemcpyDefault));
+    return h_hitmask;
+  };
+  auto is_hit = [](const std::vector<bitmask64_t>& mask, int64_t i) {
+    return ((mask[static_cast<size_t>(i / 64)] >> (i % 64)) & 1u) != 0;
+  };
+
+  const auto before = find_hits();
+  for (int64_t i = 0; i < num_keys; ++i) {
+    ASSERT_TRUE(is_hit(before, i)) << "key " << i << " not cached before erase";
+  }
+
+  {
+    auto keys_bw = std::make_shared<BufferWrapper<const void>>(
+      ctx, "keys", d_keys, sizeof(KeyType) * n);
+    tab.erase(ctx, num_keys, std::move(keys_bw));
+    ctx->wait();
+  }
+  NVE_CHECK_(cudaDeviceSynchronize());
+
+  const auto after = find_hits();
+  for (int64_t i = 0; i < num_keys; ++i) {
+    EXPECT_FALSE(is_hit(after, i)) << "key " << i << " still cached after erase";
+  }
+
+  ctx.reset();
+  allocator->device_free(d_keys);
+  allocator->device_free(d_values);
+  allocator->device_free(d_hitmask);
+}
+
+// 4096 = 16 full chunks; 4000 = 15 full chunks + a final chunk of 160.
+INSTANTIATE_TEST_SUITE_P(ModifyOnGpu, GpuTableLargeErase,
+                         testing::Combine(testing::Bool(), testing::Values(int64_t{4096}, int64_t{4000})));
 
 }  // namespace nve

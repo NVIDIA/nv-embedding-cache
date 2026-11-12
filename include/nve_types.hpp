@@ -188,6 +188,30 @@ inline int64_t quant_rowwise_meta_bytes(const DataType_t dtype) {
   return quant_rowwise_meta_count(dtype) * quant_rowwise_scale_bytes(dtype);
 }
 
+// Stored bytes for one row of num_elements values, including rowwise-quant metadata.
+// Throws instead of wrapping on negative or overflowing sizes.
+inline int64_t row_size_in_bytes(const DataType_t dtype, const int64_t num_elements) {
+  NVE_CHECK_(num_elements >= 0, "Row element count must be non-negative, got ", num_elements);
+  const uint64_t value_bytes = checked_mul(static_cast<uint64_t>(num_elements),
+                                           static_cast<uint64_t>(dtype_size(dtype)), "Row size");
+  const int64_t meta_bytes = is_quant_rowwise(dtype) ? quant_rowwise_meta_bytes(dtype) : 0;
+  NVE_CHECK_(value_bytes <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max() - meta_bytes),
+             "Row size computation overflows result type");
+  return static_cast<int64_t>(value_bytes) + meta_bytes;
+}
+
+// Inverse of row_size_in_bytes(): value elements in a stored row, excluding rowwise-quant metadata.
+// Throws if the row holds no values or is not a whole number of elements.
+inline int64_t row_num_elements(const DataType_t dtype, const int64_t row_bytes) {
+  const int64_t meta_bytes = is_quant_rowwise(dtype) ? quant_rowwise_meta_bytes(dtype) : 0;
+  NVE_CHECK_(row_bytes > meta_bytes, "Row size ", row_bytes, " holds no values beyond its ",
+             meta_bytes, " metadata bytes");
+  const int64_t value_bytes = row_bytes - meta_bytes;
+  NVE_CHECK_(value_bytes % dtype_size(dtype) == 0, "Row size ", row_bytes,
+             " is not a whole number of value elements");
+  return value_bytes / dtype_size(dtype);
+}
+
 static constexpr const char* to_string(const DataType_t dtype) { return to_string(dtype_id(dtype)); }
 
 static inline std::ostream& operator<<(std::ostream& o, const DataType_t dtype) {

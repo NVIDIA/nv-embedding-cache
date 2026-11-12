@@ -315,7 +315,7 @@ protected:
     {
         std::vector<IndexT> outKeys(m_pCache->get_max_num_embedding_vectors_in_cache());
         size_t nKeys = 0;
-        m_pCache->get_keys_stored_in_cache(m_hLookup[0], outKeys.data(), nKeys);
+        m_pCache->get_keys_stored_in_cache(m_hLookup[0], outKeys.data(), outKeys.size(), nKeys, 0);
         std::set<IndexT> cacheKeys(outKeys.begin(), outKeys.begin() + nKeys);
         size_t missingCount = 0;
         for (auto key : keys)
@@ -332,7 +332,7 @@ protected:
     {
         std::vector<IndexT> outKeys(m_pCache->get_max_num_embedding_vectors_in_cache());
         size_t nKeys = 0;
-        m_pCache->get_keys_stored_in_cache(m_hLookup[0], outKeys.data(), nKeys);
+        m_pCache->get_keys_stored_in_cache(m_hLookup[0], outKeys.data(), outKeys.size(), nKeys, 0);
         std::set<IndexT> cacheKeys(outKeys.begin(), outKeys.begin() + nKeys);
         EXPECT_EQ(keys, cacheKeys);
         EXPECT_EQ(nKeys, keys.size());

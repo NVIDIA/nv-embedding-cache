@@ -134,6 +134,10 @@ typedef struct nve_ext_table_ops_s {
 
   /* calling thread's error text for its last op that returned != NVE_SUCCESS */
   const char* (*last_error)(void* self);
+
+  nve_status_t (*size)(void* self, nve_ext_context_t ctx, int64_t* out_size);
+  nve_status_t (*get_keys)(void* self, nve_ext_context_t ctx, int64_t capacity, void* keys,
+                           int64_t* out_num_keys);
 } nve_ext_table_ops_t;
 
 typedef struct nve_ext_table_s { /* what produce() fills in */
@@ -218,7 +222,7 @@ NVE_C_API void nve_plugin_set_nve_services(const nve_ext_nve_services_t* service
 #endif
 
 /* ============================================================================
- * Published ABI 1.0 layout (compile-time enforced)
+ * Published ABI layout (compile-time enforced)
  * ============================================================================ */
 
 NVE_ABI_STATIC_ASSERT(sizeof(void*) == 8, "NVE plugin ABI requires 64-bit pointers");
@@ -227,7 +231,7 @@ NVE_ABI_STATIC_ASSERT(sizeof(nve_data_type_t) == 4, "nve_data_type_t must be 32-
 NVE_ABI_STATIC_ASSERT(sizeof(nve_buffer_location_t) == 4,
                       "nve_buffer_location_t must be 32-bit");
 
-NVE_ABI_STATIC_ASSERT(sizeof(nve_ext_table_ops_t) == 144, "unexpected table ops layout");
+NVE_ABI_STATIC_ASSERT(sizeof(nve_ext_table_ops_t) == 160, "unexpected table ops layout");
 NVE_ABI_STATIC_ASSERT(alignof(nve_ext_table_ops_t) == 8, "unexpected table ops alignment");
 NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, struct_size) == 0, "table ops layout");
 NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, destroy) == 8, "table ops layout");
@@ -252,6 +256,8 @@ NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, update_accumulate) == 112,
 NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, erase) == 120, "table ops layout");
 NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, clear) == 128, "table ops layout");
 NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, last_error) == 136, "table ops layout");
+NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, size) == 144, "table ops layout");
+NVE_ABI_STATIC_ASSERT(offsetof(nve_ext_table_ops_t, get_keys) == 152, "table ops layout");
 
 NVE_ABI_STATIC_ASSERT(sizeof(nve_ext_table_t) == 16, "unexpected table handle layout");
 NVE_ABI_STATIC_ASSERT(alignof(nve_ext_table_t) == 8, "unexpected table handle alignment");

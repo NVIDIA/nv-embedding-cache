@@ -19,7 +19,8 @@ from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 import subprocess
 import os
-from glob import glob
+import shlex
+import shutil
 import distutils.command.build
 
 # Environment variables:
@@ -29,10 +30,12 @@ import distutils.command.build
 # - PYNVE_DISABLE_TORCH_BINDINGS: Set to '1' to skip the PyTorch custom op bindings
 # - PYNVE_DRIVERLESS_BUILD: Set to '1' to build without the CUDA driver (libcuda)
 # - PYNVE_DISABLE_MPI: Set to '1' to build without OpenMPI
+# - PYNVE_CMAKE_ARGS: Extra CMake arguments, e.g. '-DNVE_SM_VERSION="80;90;100" -DNVE_FEATURES=nvhm_plugin'
+# - PYNVE_LOCAL_VERSION: PEP 440 local version label appended to the package version, e.g. "cu130"
+# - PYNVE_NO_STRIP: Set to '1' to keep the symbol tables of the packaged libraries (stripped by default)
 _build_dir = os.environ.get('PYNVE_BUILD_DIR', 'build')
 
-
-def get_version():
+def get_base_version():
     """Read version from version.txt file."""
     version_file = "version.txt"
     try:
@@ -40,6 +43,12 @@ def get_version():
             return f.read().strip()
     except FileNotFoundError:
         return "0.0.0"  # Fallback version
+
+def get_version():
+    """Package version: the base version plus the optional PYNVE_LOCAL_VERSION label."""
+    local_version = os.environ.get('PYNVE_LOCAL_VERSION')
+    return f"{get_base_version()}+{local_version}" if local_version else get_base_version()
+
 class BuildCommand(distutils.command.build.build):
     def initialize_options(self):
         distutils.command.build.build.initialize_options(self)
@@ -88,6 +97,14 @@ class CMakeBuild(build_ext):
             if os.environ.get('PYNVE_DISABLE_MPI') == '1':
                 cmake_args.append('-DNVE_DISABLE_MPI=ON')
 
+            # Extra CMake arguments, e.g. the target architectures or feature set of a
+            # redistributable wheel. Appended last so they take precedence.
+            cmake_args.extend(shlex.split(os.environ.get('PYNVE_CMAKE_ARGS', '')))
+
+            # Every .so in <build>/lib is packaged: start from an empty dir so libraries left by an
+            # earlier build in this dir (other features, tests) never reach the wheel. Object files
+            # are kept, so a rebuild only re-links.
+            shutil.rmtree(os.path.join(_build_dir, 'lib'), ignore_errors=True)
             subprocess.check_call(cmake_args)
             build_threads = min(os.cpu_count(), 32)
             subprocess.check_call(['cmake', '--build', _build_dir, f'-j{build_threads}'])
@@ -98,18 +115,41 @@ class CMakeBuild(build_ext):
     
         # Copy binaries
         self.copy_binaries()
-        
-        # Manually remove unneeded .so
-        for filename in glob(f'{_build_dir}/lib.linux-*/*.so', recursive=True):
-            subprocess.check_call(['rm', filename])
+
+    def build_extension(self, ext):
+        # CMake already built the modules. The 'pynve' extension has no sources and
+        # only marks the wheel as platform-specific; linking it would run the linker
+        # with no input files, which gcc rejects outside conda toolchains.
+        pass
+
+    def strip_binary(self, path):
+        # Drop the static symbol table (.symtab/.strtab): unused at runtime; exported (dynamic) symbols
+        # are kept. In-place builds keep it for development.
+        if self.inplace or os.environ.get('PYNVE_NO_STRIP') == '1':
+            return
+        strip = shutil.which('strip')
+        if strip is None:
+            self.warn(f"'strip' not found, packaging {path} unstripped")
+            return
+        subprocess.check_call([strip, '--strip-unneeded', path])
 
     def copy_binaries(self):
         # Specify the source and destination directories
         src_dir = f"{_build_dir}/lib"
-        dest_dir = f"{self.build_lib}/pynve"
+        if self.inplace:
+            # In-place/editable builds import pynve from the source tree
+            dest_dir = self.get_finalized_command('build_py').get_package_dir('pynve')
+        else:
+            dest_dir = f"{self.build_lib}/pynve"
 
         # Create destination directory if it doesn't exist
         os.makedirs(dest_dir, exist_ok=True)
+
+        # Remove libraries staged by an earlier build, so the package holds only this build's. This
+        # also forces copy_file to copy, instead of keeping a copy an earlier build stripped (or not).
+        for filename in os.listdir(dest_dir):
+            if filename.endswith('.so'):
+                os.remove(os.path.join(dest_dir, filename))
 
         # Copy binary files
         for filename in os.listdir(src_dir):
@@ -117,13 +157,14 @@ class CMakeBuild(build_ext):
                 src_file = os.path.join(src_dir, filename)
                 dest_file = os.path.join(dest_dir, filename)
                 self.copy_file(src_file, dest_file)
+                self.strip_binary(dest_file)
 
         # Generate _version.py from version.txt
         version = get_version()
         version_dest = os.path.join(dest_dir, "_version.py")
         version_content = f"""# Generated from version.txt
 __version__ = "{version}"
-__version_info__ = tuple(int(x) for x in "{version}".split('.'))
+__version_info__ = tuple(int(x) for x in "{get_base_version()}".split('.'))
 """
         with open(version_dest, 'w') as f:
             f.write(version_content)
@@ -133,7 +174,9 @@ setup(
         version=get_version(),
         package_dir={"": "python"},
         packages=['pynve', 'pynve.torch'],
-        ext_modules=[Extension('pynve', sources=[])],
+        # optional: build_extension() never produces this file, so in-place/editable
+        # builds must not try to copy it into the source tree.
+        ext_modules=[Extension('pynve', sources=[], optional=True)],
         cmdclass={
             'build_ext': CMakeBuild,
             'build': BuildCommand,

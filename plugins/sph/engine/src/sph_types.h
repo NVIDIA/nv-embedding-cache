@@ -180,7 +180,7 @@ public:
             unmap_shard(s);
         }
         if (va_ptr_) {
-            cuMemAddressFree(va_ptr_, va_size_);
+            SPH_TEARDOWN(cuMemAddressFree(va_ptr_, va_size_), "releasing ", va_size_, " bytes of VA");
         }
     }
 
@@ -281,15 +281,16 @@ private:
         return ceil_div(size, granularity_) * granularity_;
     }
 
-    // Reached from the destructor, so it must not throw: the raw driver calls
-    // are deliberate, there is nothing to recover during teardown.
+    // Reached from the destructor (and from release_shard() during normal
+    // operation), so it must not throw: failures are logged, not raised.
     void unmap_shard(int64_t shard_idx) {
         size_t committed_bytes = align_up(shard_committed_pages_[shard_idx] * page_size_ * slot_size_);
         if (committed_bytes > 0) {
-            cuMemUnmap(va_ptr_ + shard_idx * shard_va_size_, committed_bytes);
+            SPH_TEARDOWN(cuMemUnmap(va_ptr_ + shard_idx * shard_va_size_, committed_bytes),
+                         "unmapping shard ", shard_idx);
         }
-        for (auto& [handle, size] : shard_handles_[shard_idx]) {
-            cuMemRelease(handle);
+        for (const auto& entry : shard_handles_[shard_idx]) {
+            SPH_TEARDOWN(cuMemRelease(entry.handle), "releasing ", entry.size, " bytes of shard ", shard_idx);
         }
         shard_handles_[shard_idx].clear();
         shard_committed_pages_[shard_idx] = 0;

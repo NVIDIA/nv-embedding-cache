@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
         // so the custom op dispatches correctly.
         std::cout << "Loading NVE layers from " << save_dir << std::endl;
         auto rd = std::make_shared<nve::ResourceDirectory>();
-        nve::LayerDirectory dir(save_dir, *loader, device_index, rd);
+        nve::LayerDirectory dir(save_dir, *loader, device_index, std::move(rd));
         std::cout << "  Loaded " << dir.size() << " layer(s)" << std::endl;
 
         // ---- Step 3: Run inference ----

@@ -77,6 +77,17 @@ inline bool cuda_runtime_unloading(const cudaError_t result, const char* skipped
   return true;
 }
 
+// Memory type of `ptr`, or cudaMemoryTypeUnregistered if the runtime cannot tell.
+// A failed query is cleared so it doesn't surface in a later cudaGetLastError.
+inline cudaMemoryType pointer_memory_type(const void* ptr) {
+  cudaPointerAttributes attr;
+  if (cudaPointerGetAttributes(&attr, ptr) != cudaSuccess) {
+    cudaGetLastError();
+    return cudaMemoryTypeUnregistered;
+  }
+  return attr.type;
+}
+
 /**
  * Thrown if a CUDA runtime API call fails. Don't use this directly. Use the `NVE_THROW_` and
  * `NVE_CHECK_` macros instead.

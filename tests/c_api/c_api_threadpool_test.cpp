@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 #include <nve_c_api.h>
 
+#include "c_api_ptr.hpp"
 #include "test_utils.hpp"
 
 // ---------------------------------------------------------------------------------
@@ -88,17 +89,16 @@ TEST(ThreadPool, ConfigureDefaultPoolAfterUseIsRejected) {
   nve_table_factory_t factory = nullptr;
   ASSERT_EQ(NVE_SUCCESS,
             nve_create_table_factory(&factory, "libnve-plugin-stl-map.so", "{}"));
+  nve::TableFactoryPtr factory_owner(factory);
   nve_table_t table = nullptr;
   ASSERT_EQ(NVE_SUCCESS, nve_table_factory_produce(factory, 0, "{}", &table));
+  nve::TablePtr table_owner(table);
   nve_context_t ctx = nullptr;
   // thread_pool=NULL materializes (and thereafter locks) the process-wide default pool.
   ASSERT_EQ(NVE_SUCCESS,
             nve_table_create_execution_context(table, &ctx, nullptr, nullptr, nullptr, nullptr));
+  nve::ContextPtr ctx_owner(ctx);
 
   EXPECT_NE(NVE_SUCCESS,
            nve_configure_default_thread_pool("{\"name\": \"simple\", \"num_workers\": 2}"));
-
-  nve_context_destroy(ctx);
-  nve_table_destroy(table);
-  nve_table_factory_destroy(factory);
 }

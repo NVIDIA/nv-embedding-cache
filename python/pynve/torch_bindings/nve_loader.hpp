@@ -39,6 +39,7 @@
 
 #include "python/pynve/bindings/binding_layers.hpp"
 #include "python/pynve/torch_bindings/nve_registry.hpp"
+#include "include/bit_ops.hpp"
 #include "include/execution_context.hpp"
 #include "include/memblock.hpp"
 #include "include/serialization.hpp"
@@ -62,15 +63,18 @@ inline std::string marker_fqn(const std::string& module_path) {
                                : module_path + ".marker_tensor";
 }
 
-// Accepts "float32"/"float16" (v2) and "torch.float32"/"torch.float16" (v1).
+// Accepts NVE dtype names ("float32", "float16", "qint8_rowwise_f32", ...) and the
+// torch spellings "torch.float32"/"torch.float16" (v1).
 inline DataType_t parse_dtype(const std::string& s) {
     constexpr std::string_view torch_prefix = "torch.";
     std::string_view name = s;
     if (name.substr(0, torch_prefix.size()) == torch_prefix) name.remove_prefix(torch_prefix.size());
-    for (const DataType_t dt : {DataType_t::Float32, DataType_t::Float16}) {
-        if (name == to_string(dt)) return dt;
+    // Names come from the DataType_t JSON table; NVEmbedBinding rejects unsupported types.
+    try {
+        return nlohmann::json(std::string(name)).get<DataType_t>();
+    } catch (const std::exception&) {
+        NVE_THROW_("nve_loader: unsupported dtype: ", s);
     }
-    NVE_THROW_("nve_loader: unsupported dtype: ", s);
 }
 
 // Build the per-layer EmbedLayerConfig from a metadata layer entry. Uses the
@@ -304,6 +308,14 @@ private:
                              std::move(layer), marker};
     }
 
+    // True when storage_ref names a PS resource (already built or described in metadata).
+    // resource_dir_ lookups remap internally, so they take the original key; eff is for metadata.
+    bool is_ps_ref(const std::string& key, const nlohmann::json& ps_resources) const {
+        if (key.empty()) return false;
+        const std::string eff = resource_dir_->remap(key);
+        return resource_dir_->find_ps(key) != nullptr || ps_resources.contains(eff);
+    }
+
     // Build a PS from the resources section, consulting/updating resource_dir_.
     table_ptr_t get_or_build_ps(
             const std::string& key,
@@ -312,7 +324,7 @@ private:
             DataType_t nve_dtype,
             const std::string& dtype_str) {
         const std::string eff = resource_dir_->remap(key);
-        auto existing = resource_dir_->find_ps(eff);
+        auto existing = resource_dir_->find_ps(key);
         if (existing) return existing;
 
         auto ps_it = ps_resources.find(eff);
@@ -320,13 +332,29 @@ private:
                    "nve_loader: storage_ref '" + eff +
                    "' not found in resources.remote_ps");
         const nlohmann::json& ps_cfg = *ps_it;
+        table_ptr_t remote = build_ps(ps_cfg, ps_cfg, layer_name, nve_dtype, dtype_str);
+
+        resource_dir_->insert_ps(key, remote);
+        return remote;
+    }
+
+    // Create a PS table from its config and insert the keys/values files named by
+    // the "remote_ps_data" entry of `data_owner` (if any).
+    table_ptr_t build_ps(
+            const nlohmann::json& ps_cfg,
+            const nlohmann::json& data_owner,
+            const std::string& layer_name,
+            DataType_t nve_dtype,
+            const std::string& dtype_str) const {
         NVE_CHECK_(ps_cfg.value("remote_ps_type", "") == "plugin",
                    "nve_loader: only remote_ps_type=='plugin' is supported");
 
+        // Exports made before table_id was recorded use the default id.
         table_ptr_t remote = create_table_from_plugin(
             ps_cfg.at("plugin_name").get<std::string>(),
             ps_cfg.value("factory_config", nlohmann::json::object()),
-            ps_cfg.value("table_config",   nlohmann::json::object()));
+            ps_cfg.value("table_config",   nlohmann::json::object()),
+            ps_cfg.value("table_id",       DEFAULT_PLUGIN_TABLE_ID));
 
         const DataType_t ps_dtype = remote->get_value_type();
         NVE_CHECK_(ps_dtype == nve_dtype,
@@ -335,21 +363,18 @@ private:
                    " but remote PS data_type=" + to_string(ps_dtype) +
                    " — they must match");
 
-        auto data_it = ps_cfg.find("remote_ps_data");
-        if (data_it != ps_cfg.end() && data_it->is_object()) {
-            const uint64_t row_bytes =
-                ps_cfg.at("row_elements").get<uint64_t>() *
-                static_cast<uint64_t>(dtype_size(ps_dtype));
+        auto data_it = data_owner.find("remote_ps_data");
+        if (data_it != data_owner.end() && data_it->is_object()) {
+            const auto row_bytes = static_cast<uint64_t>(row_size_in_bytes(
+                ps_dtype, ps_cfg.at("row_elements").get<int64_t>()));
             auto ctx = remote->create_execution_context(0, 0, nullptr, nullptr);
             insert_keys_from_filepath(
                 remote, ctx,
                 data_it->at("keys").get<std::string>(),
                 data_it->at("values").get<std::string>(),
-                row_bytes, /*batch_size=*/1ull << 20);
+                row_bytes, /*batch_size=*/1ull << 20, ps_dtype);
             ctx->wait();
         }
-
-        resource_dir_->insert_ps(eff, remote);
         return remote;
     }
 
@@ -364,7 +389,7 @@ private:
             bool device_resident,
             const TopologyMap& topology) {
         const std::string eff = resource_dir_->remap(key);
-        auto existing = resource_dir_->find_memblock(eff);
+        auto existing = resource_dir_->find_memblock(key);
         if (existing) return {existing, false};
 
         auto mb_it = mb_resources.find(eff);
@@ -397,7 +422,7 @@ private:
                                  dev, device_resident);
         }
 
-        resource_dir_->insert_memblock(eff, mb);
+        resource_dir_->insert_memblock(key, mb);
         return {mb, true};
     }
 
@@ -455,34 +480,8 @@ private:
                 NVE_CHECK_(ps_it != entry.end(),
                            "nve_loader: Hierarchical layer is missing 'remote_ps_config'");
                 const nlohmann::json& ps_cfg = *ps_it;
-                NVE_CHECK_(ps_cfg.value("remote_ps_type", "") == "plugin",
-                           "nve_loader: only remote_ps_type=='plugin' is supported");
-
-                table_ptr_t remote = create_table_from_plugin(
-                    ps_cfg.at("plugin_name").get<std::string>(),
-                    ps_cfg.value("factory_config", nlohmann::json::object()),
-                    ps_cfg.value("table_config",   nlohmann::json::object()));
-
-                const DataType_t ps_dtype = remote->get_value_type();
-                NVE_CHECK_(ps_dtype == nve_dtype,
-                           "nve_loader: layer '" + module_path +
-                           "' has data_type=" + dtype_str +
-                           " but remote PS data_type=" + to_string(ps_dtype) +
-                           " — they must match");
-
-                auto data_it = entry.find("remote_ps_data");
-                if (data_it != entry.end() && data_it->is_object()) {
-                    const uint64_t row_bytes =
-                        ps_cfg.at("row_elements").get<uint64_t>() *
-                        static_cast<uint64_t>(dtype_size(ps_dtype));
-                    auto ctx = remote->create_execution_context(0, 0, nullptr, nullptr);
-                    insert_keys_from_filepath(
-                        remote, ctx,
-                        data_it->at("keys").get<std::string>(),
-                        data_it->at("values").get<std::string>(),
-                        row_bytes, /*batch_size=*/1ull << 20);
-                    ctx->wait();
-                }
+                // v1 keeps remote_ps_data on the layer entry.
+                table_ptr_t remote = build_ps(ps_cfg, entry, module_path, nve_dtype, dtype_str);
 
                 size_t host_cache     = entry.value("host_cache_size", size_t{0});
                 uint64_t ps_num_rows  = ps_cfg.value("num_rows", uint64_t{0});
@@ -526,7 +525,13 @@ private:
 
             std::shared_ptr<NVEmbedBinding<int64_t>> layer;
 
-            if (layer_type == "LinearUVM" || layer_type == "GPULayer" ||
+            if (layer_type == "HostLayer" && is_ps_ref(storage_ref, ps_resources)) {
+                // Table-backed HostLayer: data is restored by the PS, there is no weight file.
+                table_ptr_t table = get_or_build_ps(
+                    storage_ref, ps_resources, module_path, nve_dtype, dtype_str);
+                layer = std::make_shared<HostEmbedding<int64_t>>(
+                    emb_size, nve_dtype, table, device_index, cfg);
+            } else if (layer_type == "LinearUVM" || layer_type == "GPULayer" ||
                 layer_type == "HostLayer") {
                 const bool device_resident = (layer_type == "GPULayer");
 

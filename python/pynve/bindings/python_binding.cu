@@ -150,6 +150,7 @@ PYBIND11_MODULE(nve, m) {
     py::class_<NVEmbedBinding<IndexT>, std::shared_ptr<NVEmbedBinding<IndexT>>> (m, "NVEmbedBinding")
         .def("get_embedding_dim", &NVEmbedBinding<IndexT>::get_embedding_dim)
         .def("get_data_type", &NVEmbedBinding<IndexT>::get_data_type)
+        .def("get_output_data_type", &NVEmbedBinding<IndexT>::get_output_data_type)
         .def(py::init<int, size_t, nve::DataType_t, EmbedLayerConfig>())
         .def("lookup", &NVEmbedBinding<IndexT>::lookup, py::call_guard<py::gil_scoped_release>())
         .def("lookup_with_pooling", &NVEmbedBinding<IndexT>::lookup_with_pooling, py::call_guard<py::gil_scoped_release>())
@@ -175,6 +176,7 @@ PYBIND11_MODULE(nve, m) {
 
     py::class_<HostEmbedding<IndexT>, NVEmbedBinding<IndexT>, std::shared_ptr<HostEmbedding<IndexT>>> (m, "HostEmbedding")
         .def(py::init<size_t, size_t, nve::DataType_t, std::shared_ptr<MemBlock>, int, EmbedLayerConfig>())
+        .def(py::init<size_t, nve::DataType_t, table_ptr_t, int, EmbedLayerConfig>())
         .def("load_tensor_from_stream", &HostEmbedding<IndexT>::load_tensor_from_stream)
         .def("write_tensor_to_stream", &HostEmbedding<IndexT>::write_tensor_to_stream);
 
@@ -229,7 +231,22 @@ PYBIND11_MODULE(nve, m) {
         .value("E4M3", DataType_t::E4M3)
         .value("E5M2", DataType_t::E5M2)
         .value("Float64", DataType_t::Float64)
+        .value("QInt8RowwiseF32", DataType_t::QInt8RowwiseF32)
+        .value("QInt8RowwiseF16", DataType_t::QInt8RowwiseF16)
+        .value("QUint8RowwiseF32", DataType_t::QUint8RowwiseF32)
+        .value("QUint8RowwiseF16", DataType_t::QUint8RowwiseF16)
         .export_values();
+
+    m.def("is_quant_rowwise", &nve::is_quant_rowwise, py::arg("dtype"));
+    m.def("quant_rowwise_output_dtype", &nve::quant_rowwise_output_dtype, py::arg("dtype"));
+    m.def("quant_rowwise_meta_count", &nve::quant_rowwise_meta_count, py::arg("dtype"),
+          "Trailing per-row parameters: 1 (scale) for QInt8, 2 (scale, offset) for QUint8.");
+    m.def("row_size_in_bytes", &nve::row_size_in_bytes, py::arg("dtype"), py::arg("num_elements"),
+          "Stored bytes for one row of num_elements values, including rowwise-quant metadata.");
+    m.def("dtype_to_string", [](DataType_t dtype) { return std::string(to_string(dtype)); },
+          py::arg("dtype"), "Canonical NVE name of a dtype, e.g. 'float32' or 'qint8_rowwise_f32'.");
+    m.def("dtype_from_string", [](const std::string& name) { return nlohmann::json(name).get<DataType_t>(); },
+          py::arg("name"), "Inverse of dtype_to_string.");
 
     py::enum_<MemBlockType>(m, "MemBlockType")
         .value("Linear", MemBlockType::LINEAR)
@@ -351,10 +368,12 @@ PYBIND11_MODULE(nve, m) {
             py::arg("factory_config_json") = std::string("{}"),
             py::arg("table_config_json") = std::string("{}"),
             py::arg("num_rows") = 0,
-            py::arg("table_id") = table_id_t{1000})
+            py::arg("table_id") = nve::DEFAULT_PLUGIN_TABLE_ID)
         .def("insert_keys", &ParameterServerTable::insert_keys)
         .def("erase_keys", &ParameterServerTable::erase_keys)
         .def("clear_keys", &ParameterServerTable::clear_keys)
+        .def("num_keys", &ParameterServerTable::num_keys)
+        .def("export_keys", &ParameterServerTable::export_keys)
         .def("insert_keys_from_filepath", &ParameterServerTable::insert_keys_from_filepath)
         .def("export_config_json",
             [](const ParameterServerTable& self) -> std::string {

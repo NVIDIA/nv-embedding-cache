@@ -94,9 +94,8 @@ public:
     }
 
     ~SphDeduper() {
-        // No SPH_CHECK here: it throws on failure, and throwing from a
-        // destructor calls std::terminate. Nothing to recover during teardown.
-        cudaFree(m_d_num_runs_out);
+        // SPH_CHECK would throw from a destructor; SPH_TEARDOWN logs instead.
+        SPH_TEARDOWN(cudaFree(m_d_num_runs_out));
     }
 
     // end_bit: cap for cub::DeviceRadixSort. Defaults to full key width but

@@ -103,6 +103,18 @@ class GpuTable : public Table {
   void clear(context_ptr_t& ctx) override;
 
   /**
+   * Number of keys currently held in the GPU cache (rows only reachable through `uvm_table` are not counted).
+   *
+   * @param ctx An execution context for this database.
+   * @note The context's modify stream is synchronized first; modify ops in flight on other contexts must be
+   * completed by the caller.
+   */
+  int64_t size(context_ptr_t& ctx) const override;
+
+  // Writes the keys held in the GPU cache (same synchronization rules as `size()`).
+  int64_t get_keys(context_ptr_t& ctx, int64_t capacity, void* keys) const override;
+
+  /**
    * Erase a set of entries from the database.
    *
    * @param ctx An execution context for this database.
@@ -305,6 +317,9 @@ class GpuTable : public Table {
   virtual DataType_t get_value_type() const override;
 
  private:
+  // Counts the cached keys and writes the first `capacity` of them to the host buffer `out_keys`.
+  int64_t scan_keys(context_ptr_t& ctx, int64_t capacity, KeyType* out_keys) const;
+
   const GPUTableConfig config_;
 
   allocator_ptr_t allocator_;

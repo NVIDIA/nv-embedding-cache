@@ -43,8 +43,17 @@ CustomRemoteTable::CustomRemoteTable(table_id_t id, int64_t row_size)
   config_.value_dtype    = DataType_t::Float32;
 }
 
-int64_t CustomRemoteTable::size(context_ptr_t& /*ctx*/, bool /*exact*/) const {
+int64_t CustomRemoteTable::size(context_ptr_t& /*ctx*/) const {
   return static_cast<int64_t>(store_.size());
+}
+
+/* -- get_keys -------------------------------------------------------------- */
+int64_t CustomRemoteTable::get_keys(context_ptr_t& /*ctx*/, int64_t capacity, void* keys) const {
+  NVE_CHECK_(capacity >= 0, "capacity must not be negative");
+  auto* out = static_cast<int64_t*>(keys);
+  int64_t n = 0;
+  for (auto it = store_.begin(); it != store_.end() && n < capacity; ++it) out[n++] = it->first;
+  return n;
 }
 
 /* -- find ------------------------------------------------------------------ */

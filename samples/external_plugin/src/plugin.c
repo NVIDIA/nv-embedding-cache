@@ -357,6 +357,35 @@ static nve_status_t my_clear(void* self, nve_ext_context_t ctx) {
   return NVE_SUCCESS;
 }
 
+/* ABI 3.0 additions: key count and key enumeration. */
+static nve_status_t my_size(void* self, nve_ext_context_t ctx, int64_t* out_size) {
+  (void)ctx;
+  my_table_t* t = (my_table_t*)self;
+  if (out_size == NULL) return set_error(NVE_ERROR_INVALID_ARGUMENT, "out_size is null");
+  int64_t n = 0;
+  for (int64_t b = 0; b < t->num_buckets; ++b) {
+    for (entry_t* e = t->buckets[b]; e != NULL; e = e->next) ++n;
+  }
+  *out_size = n;
+  return NVE_SUCCESS;
+}
+
+static nve_status_t my_get_keys(void* self, nve_ext_context_t ctx, int64_t capacity, void* keys,
+                                int64_t* out_num_keys) {
+  (void)ctx;
+  my_table_t* t = (my_table_t*)self;
+  if (capacity < 0 || (capacity > 0 && keys == NULL) || out_num_keys == NULL) {
+    return set_error(NVE_ERROR_INVALID_ARGUMENT, "invalid get_keys args");
+  }
+  int64_t* k = (int64_t*)keys;
+  int64_t n = 0;
+  for (int64_t b = 0; b < t->num_buckets && n < capacity; ++b) {
+    for (entry_t* e = t->buckets[b]; e != NULL && n < capacity; e = e->next) k[n++] = e->key;
+  }
+  *out_num_keys = n;
+  return NVE_SUCCESS;
+}
+
 static const nve_ext_table_ops_t kOps = {
     sizeof(nve_ext_table_ops_t),
     my_destroy,
@@ -376,6 +405,8 @@ static const nve_ext_table_ops_t kOps = {
     my_erase,
     my_clear,
     my_last_error,
+    my_size,
+    my_get_keys,
 };
 
 /* ============================================================================

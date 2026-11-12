@@ -16,14 +16,15 @@
  */
 
 #include <gtest/gtest.h>
-
 #include <cuda_runtime.h>
-
+#include "cuda_ptr.hpp"
 #include <algorithm>
 #include <buffer_wrapper.hpp>
 #include <cstdint>
 #include <cstring>
 #include <default_allocator.hpp>
+#include <exception>
+#include <thread>
 #include <json_support.hpp>
 #include <sph_table.hpp>
 #include <vector>
@@ -534,4 +535,91 @@ TEST(sph_plugin, unsupported_ops_throw) {
   EXPECT_ANY_THROW(table->erase(ctx, 1, nullptr));
   EXPECT_ANY_THROW(
       table->update_accumulate(ctx, 1, nullptr, 16, 16, nullptr, DataType_t::Float32));
+  EXPECT_THROW(table->size(ctx), NotImplementedError);
+  int64_t key{};
+  EXPECT_THROW(table->get_keys(ctx, 1, &key), NotImplementedError);
+}
+
+// The Table contract allows several execution contexts to be in use at once,
+// while the engine forbids two modifies from overlapping (they share scratch
+// pools and readback counters). SphTable has to serialize them: concurrent
+// inserts from two contexts on disjoint key ranges must all land intact.
+TEST(sph_plugin, concurrent_inserts_are_serialized) {
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "CUDA device unavailable";
+  }
+
+  constexpr int kThreads = 4;
+  constexpr int64_t kBatch = 16 * 1024;
+  constexpr int64_t kBatchesPerThread = 8;
+  constexpr int64_t kPerThread = kBatch * kBatchesPerThread;
+  constexpr int64_t row = 16;
+
+  SphTableConfig conf{};
+  conf.initial_capacity = 2 * kThreads * kPerThread;
+  conf.row_size_in_bytes = row;
+  conf.value_dtype = DataType_t::Float32;
+  conf.defrag_threshold = 1.05;  // let auto-defrag kick in under contention too
+
+  SphTableFactory factory{SphTableFactoryConfig{}};
+  table_ptr_t table = factory.produce(/*id=*/5, static_cast<nlohmann::json>(conf));
+  auto allocator = GetDefaultAllocator();
+
+  // Exceptions must not escape a std::thread (that is std::terminate); collect
+  // them and report on the test thread after joining.
+  std::vector<std::exception_ptr> worker_errors(kThreads);
+  std::vector<std::thread> workers;
+  for (int t = 0; t < kThreads; ++t) {
+    workers.emplace_back([&, t]() {
+     try {
+      // Owning handles (cuda_ptr.hpp) release on unwind. Declaration order
+      // matters: buffers and ctx are torn down before the stream.
+      cudaStream_t raw_stream = nullptr;
+      NVE_CHECK_(cudaStreamCreateWithFlags(&raw_stream, cudaStreamNonBlocking));
+      StreamPtr stream(raw_stream);
+      auto ctx = table->create_execution_context(stream.get(), stream.get(), nullptr, nullptr);
+      void* raw_keys = nullptr;
+      void* raw_vals = nullptr;
+      NVE_CHECK_(cudaMalloc(&raw_keys, sizeof(int64_t) * to_uint(kBatch)));
+      DevicePtr<void> d_keys(raw_keys);
+      NVE_CHECK_(cudaMalloc(&raw_vals, to_uint(kBatch) * to_uint(row)));
+      DevicePtr<void> d_vals(raw_vals);
+      for (int64_t b = 0; b < kBatchesPerThread; ++b) {
+        insert_batch(table, ctx, /*first_key=*/1 + t * kPerThread + b * kBatch, kBatch, row, d_keys.get(),
+                     d_vals.get());
+      }
+      NVE_CHECK_(cudaStreamSynchronize(stream.get()));
+     } catch (...) {
+      worker_errors[to_uint(t)] = std::current_exception();
+     }
+    });
+  }
+  for (auto& w : workers) w.join();
+  for (int t = 0; t < kThreads; ++t) {
+    if (!worker_errors[to_uint(t)]) continue;
+    try {
+      std::rethrow_exception(worker_errors[to_uint(t)]);
+    } catch (const std::exception& e) {
+      ADD_FAILURE() << "worker " << t << " threw: " << e.what();
+    } catch (...) {
+      ADD_FAILURE() << "worker " << t << " threw a non-std exception";
+    }
+  }
+  if (::testing::Test::HasFailure()) return;
+
+  auto ctx = table->create_execution_context(0, 0, nullptr, nullptr);
+  void* d_keys = nullptr;
+  void* d_out = nullptr;
+  NVE_CHECK_(allocator->device_allocate(&d_keys, sizeof(int64_t) * to_uint(kBatch)));
+  NVE_CHECK_(allocator->device_allocate(&d_out, to_uint(kBatch) * to_uint(row)));
+  int64_t bad = 0;
+  for (int t = 0; t < kThreads; ++t) {
+    for (int64_t b = 0; b < kBatchesPerThread; ++b) {
+      bad += count_bad_rows(table, ctx, /*first_key=*/1 + t * kPerThread + b * kBatch, kBatch, row, d_keys, d_out);
+    }
+  }
+  EXPECT_EQ(bad, 0) << bad << " / " << kThreads * kPerThread << " keys lost or corrupted by concurrent inserts";
+  allocator->device_free(d_keys);
+  allocator->device_free(d_out);
 }

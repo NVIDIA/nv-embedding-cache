@@ -128,6 +128,15 @@ int main() {
                            found.data(), NULL));
   CHECK(found[0] == 1001.0f);
 
+  /* size + get_keys enumerate the stored keys (ABI 3.0) */
+  int64_t num_keys = 0;
+  CHECK_NVE(nve_table_size(table, ctx, &num_keys));
+  CHECK(num_keys == kNumKeys);
+  std::vector<int64_t> stored(static_cast<size_t>(num_keys));
+  int64_t num_written = 0;
+  CHECK_NVE(nve_table_get_keys(table, ctx, num_keys, stored.data(), &num_written));
+  CHECK(num_written == kNumKeys);
+
   /* erase + clear */
   CHECK_NVE(nve_table_erase(table, ctx, 1, keys.data()));
   std::fill(hit_mask.begin(), hit_mask.end(), 0);

@@ -154,7 +154,7 @@ static const nve_ext_table_ops_t kOps = { sizeof(nve_ext_table_ops_t),
   my_destroy, my_pref_loc, my_device_id, my_max_row, my_key_size,
   my_invalid_key, my_dtype, my_counter_hits, my_reset_counter, my_get_counter,
   my_find, my_insert, my_update, my_update_accum, my_erase, my_clear,
-  my_last_error };
+  my_last_error, my_size, my_get_keys };
 
 NVE_DEFINE_EXTERNAL_PLUGIN("My External Plugin", "My Company")
 ```
