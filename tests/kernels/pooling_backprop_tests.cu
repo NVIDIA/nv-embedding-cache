@@ -221,7 +221,8 @@ class PoolingBackPropRefTest : public EmbeddingCacheRefTest<T> {
             indices,
             T::FIXED_HOTNESS_FLAG ? nullptr : offsets_->pd,
             grads_in_->pd,
-            weights_->pd,
+            // Unweighted pooling gets no weights, as from the Python bindings
+            is_weighted_pooling(T::POOLING_TYPE) ? weights_->pd : nullptr,
             grads_out_->pd,
             unique_keys_->pd,
             this->batch_,
