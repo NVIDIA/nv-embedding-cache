@@ -38,18 +38,28 @@ __global__ void compute_normalized_weights(const  DataType* __restrict__ input_w
         return;
     }
 
-    // compute sum of weights
     IndexType offset = FIXED_HOTNESS ? bag_id * hotness : csr_offsets[bag_id];
     IndexType count = FIXED_HOTNESS ? hotness : csr_offsets[bag_id + 1] - csr_offsets[bag_id];
+    if (count == 0) {
+        // empty bag: no keys to normalize
+        return;
+    }
+
+    // unweighted Mean passes no weights: every key weighs 1 / count, no reduction needed
+    if (input_weights == nullptr) {
+        const DataType normalized_weight = DataType(1) / static_cast<DataType>(count);
+        for (uint32_t w = threadIdx.x; w < count; w += warpSize) {
+            output_weights[offset + w] = normalized_weight;
+        }
+        return;
+    }
+
+    // compute sum of weights
     DataType acc = 0;
 
-    // Unweighted Mean passes no weights: every key then weighs 1.
     for (IndexType w = 0; w < count; w += warpSize) {
         auto thread_idx = w + threadIdx.x;
-        DataType curr_sum = DataType(0);
-        if (thread_idx < count) {
-            curr_sum = input_weights ? input_weights[offset + thread_idx] : DataType(1);
-        }
+        DataType curr_sum = (thread_idx < count) ? input_weights[offset + thread_idx] : DataType(0);
         uint32_t idx_mask = 1;
         // warp reduction on weights
         for (uint32_t i = 0; i < 5; i++) {
@@ -63,8 +73,7 @@ __global__ void compute_normalized_weights(const  DataType* __restrict__ input_w
     // normalize weights by the sum
     for (uint32_t w = threadIdx.x; w < count; w += warpSize) {
         if (w < count) {
-            const DataType weight = input_weights ? input_weights[offset + w] : DataType(1);
-            output_weights[offset + w] = weight / acc;
+            output_weights[offset + w] = input_weights[offset + w] / acc;
         }
     }
 }
@@ -271,7 +280,7 @@ public:
 
             bool normalize_weigts = (pooling_type == nve::PoolingType_t::Mean) || (pooling_type == nve::PoolingType_t::WeightedMean);
             if (normalize_weigts) {
-                // weights is null for unweighted Mean; the kernel then divides by the bag size
+                // weights is null for unweighted Mean; the kernel then writes 1 / bag size per key
                 compute_normalized_weights<IndexT, DataT, FIXED_HOTNESS><<<grid_size, block_size, 0, stream>>>(
                     weights, hotness, offsets, reinterpret_cast<DataT*>(d_normalized_weights_), batch);
                 NVE_CHECK_(cudaGetLastError()); // Check kernel launch didn't generate an error
