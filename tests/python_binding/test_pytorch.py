@@ -997,9 +997,10 @@ def test_pytorch_bag_mean_backward(layer_type):
     num_embeddings, embed_size = 100, 8
     ref = torch.nn.EmbeddingBag(num_embeddings, embed_size, mode="mean", sparse=True,
                                 include_last_offset=True, device="cuda")
-    cache = {"gpu_cache_size": 1024 * 1024} if layer_type == nve_layers.LayerType.LinearUVM else {}
-    bag = nve_layers.NVEmbeddingBag(num_embeddings, embed_size, torch.float32, layer_type, mode="mean",
-                                    weight_init=ref.weight, **cache)
+    gpu_cache_size = 1024 * 1024 if layer_type == nve_layers.LayerType.LinearUVM else 0
+    bag = make_layer(num_embeddings, embed_size, torch.float32, layer_type, torch.device("cuda"),
+                     weight_init=ref.weight, gpu_cache_size=gpu_cache_size, bag_mode="mean",
+                     optimize_for_training=True)
     keys = torch.tensor([1, 2, 2, 3, 4, 5, 6], dtype=torch.int64, device="cuda")
     offsets = torch.tensor([0, 2, 7], dtype=torch.int64, device="cuda")
     grad = torch.randn(2, embed_size, device="cuda")

@@ -51,11 +51,11 @@ requires_nvhm = pytest.mark.skipif(
 
 def make_layer(num_embeddings, embedding_size, dtype, layer_type, device, *,
                storage=None, weight_init=None, gpu_cache_size=0, host_cache_size=0,
-               bag_mode=None, config=None):
-    """Inference (optimize_for_training=False) layer of any LayerType.
+               bag_mode=None, config=None, optimize_for_training=False):
+    """Layer of any LayerType, for inference unless optimize_for_training=True.
 
     bag_mode selects an NVEmbeddingBag with that pooling mode (forward(keys, offsets));
-    None gives an NVEmbedding (forward(keys)).
+    None gives an NVEmbedding (forward(keys)). Backward needs optimize_for_training=True.
     """
     import pynve.torch.nve_layers as nve_layers
 
@@ -70,7 +70,7 @@ def make_layer(num_embeddings, embedding_size, dtype, layer_type, device, *,
         weight_init=weight_init,
         gpu_cache_size=gpu_cache_size,
         host_cache_size=host_cache_size,
-        optimize_for_training=False,
+        optimize_for_training=optimize_for_training,
         device=device,
         config=config,
         **extra,
