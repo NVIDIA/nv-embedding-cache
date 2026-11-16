@@ -38,9 +38,23 @@ __global__ void compute_normalized_weights(const  DataType* __restrict__ input_w
         return;
     }
 
-    // compute sum of weights
     IndexType offset = FIXED_HOTNESS ? bag_id * hotness : csr_offsets[bag_id];
     IndexType count = FIXED_HOTNESS ? hotness : csr_offsets[bag_id + 1] - csr_offsets[bag_id];
+    if (count == 0) {
+        // empty bag: no keys to normalize
+        return;
+    }
+
+    // unweighted Mean passes no weights: every key weighs 1 / count, no reduction needed
+    if (input_weights == nullptr) {
+        const DataType normalized_weight = DataType(1) / static_cast<DataType>(count);
+        for (uint32_t w = threadIdx.x; w < count; w += warpSize) {
+            output_weights[offset + w] = normalized_weight;
+        }
+        return;
+    }
+
+    // compute sum of weights
     DataType acc = 0;
 
     for (IndexType w = 0; w < count; w += warpSize) {
@@ -266,7 +280,7 @@ public:
 
             bool normalize_weigts = (pooling_type == nve::PoolingType_t::Mean) || (pooling_type == nve::PoolingType_t::WeightedMean);
             if (normalize_weigts) {
-                // TODO: need to init weights to all 1 for non weighted
+                // weights is null for unweighted Mean; the kernel then writes 1 / bag size per key
                 compute_normalized_weights<IndexT, DataT, FIXED_HOTNESS><<<grid_size, block_size, 0, stream>>>(
                     weights, hotness, offsets, reinterpret_cast<DataT*>(d_normalized_weights_), batch);
                 NVE_CHECK_(cudaGetLastError()); // Check kernel launch didn't generate an error
