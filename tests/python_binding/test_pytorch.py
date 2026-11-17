@@ -1116,6 +1116,76 @@ def test_pytorch_bag_mean_backward(layer_type):
     assert torch.allclose(bag.weight.grad.to_dense(), ref.weight.grad.to_dense())
 
 
+@pytest.mark.parametrize("layer_type", LINEAR_LAYERS, ids=["gpu", "uvm"])
+@pytest.mark.parametrize("training", [False, True], ids=["inference", "training"])
+@pytest.mark.parametrize("default_mode", ["sum", "mean", "concat"])
+@pytest.mark.skipif(not nve_layers.HAS_TORCH_OPS, reason="torch custom ops not built")
+def test_pytorch_bag_mode_override(layer_type, training, default_mode):
+    weight = torch.arange(100 * 8, dtype=torch.float32, device="cuda").reshape(100, 8) / 128
+    ref_weight = weight.clone().requires_grad_(training)
+    bag = make_layer(100, 8, weight.dtype, layer_type, torch.device("cuda"),
+                     weight_init=weight, gpu_cache_size=1024 * 1024,
+                     bag_mode=default_mode, optimize_for_training=training)
+    keys = torch.tensor([1, 2, 2, 3, 4, 5, 6], device="cuda")
+    offsets = torch.tensor([0, 2, 2, 7], device="cuda")
+    cached_weight = bag.weight
+
+    # Keep all graphs alive across mode switches to verify backward saves each mode.
+    outputs, expected_outputs = [], []
+    for override in ["concat", "mean", "sum", "concat", None]:
+        mode = default_mode if override is None else override
+        if mode == "concat":
+            out = bag(keys, mode_override=override)
+            expected = torch.nn.functional.embedding(keys, ref_weight, sparse=True)
+        else:
+            out = bag(keys, offsets, mode_override=override)
+            expected = torch.nn.functional.embedding_bag(
+                keys, ref_weight, offsets, mode=mode, sparse=True, include_last_offset=True)
+        torch.testing.assert_close(out, expected)
+        assert bag.mode == default_mode
+        assert bag.weight is cached_weight
+        outputs.append(out)
+        expected_outputs.append(expected)
+
+    sample_weights = torch.arange(1, 8, dtype=weight.dtype, device="cuda") / 8
+    for mode in ["sum", "mean"]:
+        out = bag(keys, offsets, per_sample_weights=sample_weights, mode_override=mode)
+        expected = torch.nn.functional.embedding_bag(
+            keys, ref_weight, offsets, mode="sum", sparse=True,
+            include_last_offset=True, per_sample_weights=sample_weights)
+        if mode == "mean":
+            # NVE weighted mean normalizes by each bag's sum of weights.
+            weight_sums = torch.stack([sample_weights[:2].sum(),
+                                       sample_weights[2:2].sum(), sample_weights[2:].sum()])
+            expected = expected / weight_sums.clamp_min(1e-8).unsqueeze(1)
+        torch.testing.assert_close(out, expected)
+        outputs.append(out)
+        expected_outputs.append(expected)
+    if training:
+        sum(output.square().sum() for output in outputs).backward()
+        sum(output.square().sum() for output in expected_outputs).backward()
+        torch.testing.assert_close(bag.weight.grad.to_dense(), ref_weight.grad.to_dense())
+
+
+@pytest.mark.parametrize("default_mode", ["sum", "mean", "concat"])
+def test_pytorch_bag_mode_override_validation(default_mode):
+    bag = make_layer(100, 8, torch.float32, nve_layers.LayerType.GPULayer,
+                     torch.device("cuda"), weight_init=torch.ones(100, 8), bag_mode=default_mode)
+    keys = torch.tensor([1, 2], device="cuda")
+    offsets = torch.tensor([0, 2], device="cuda")
+    for mode in ["max", "", "SUM"]:
+        with pytest.raises(ValueError, match="Unsupported pooling mode"):
+            bag(keys, offsets, mode_override=mode)
+    for mode in ["sum", "mean"]:
+        with pytest.raises(ValueError, match="offsets are required"):
+            bag(keys, mode_override=mode)
+    weights = torch.ones(2, device="cuda")
+    for args in [(offsets,), (None, weights), (offsets, weights)]:
+        with pytest.raises(ValueError, match="not supported in 'concat' mode"):
+            bag(keys, *args, mode_override="concat")
+    assert bag.mode == default_mode
+
+
 if __name__ == "__main__":
     #main(sys.argv[1:])
     test_pytorch_load_from_binary_file()

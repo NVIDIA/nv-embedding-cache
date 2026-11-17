@@ -127,6 +127,19 @@ def test_rowwise_quantize_fp16_scale_underflow(qtype, device):
     assert torch.all(actual[1:, 1] < 0)
 
 
+def _pooling_reference(rows, offsets, mode, weights, dtype):
+    bags = []
+    for b in range(offsets.numel() - 1):
+        lo, hi = int(offsets[b]), int(offsets[b + 1])
+        w = weights[lo:hi, None] if weights is not None else torch.ones(hi - lo, 1)
+        acc = (rows[lo:hi] * w).sum(0)
+        if mode == "mean":
+            denom = float(w.sum())
+            acc = acc / denom if denom != 0 else torch.zeros_like(acc)
+        bags.append(acc)
+    return torch.stack(bags).to(dtype)
+
+
 # --------------------------------------------------------------------------- lookups
 
 @pytest.mark.parametrize("qtype", QTYPES, ids=QIDS)
@@ -155,30 +168,49 @@ def test_rowwise_bag_pooling(layer_type, device, host_cache, qtype, mode):
     keys = torch.tensor([1, 2, 2, 9, 40, 40, 40, 200], dtype=torch.int64, device=device)
     offsets = torch.tensor([0, 3, 3, 5, 8], dtype=torch.int64, device=device)
     rows = dequantize_rowwise(raw[keys.cpu()], qtype).float()
-    out = layer(keys, offsets)
     if mode == "concat":
+        out = layer(keys)
         torch.testing.assert_close(out.cpu(), rows.to(out.dtype), **_tol(qtype))
         return
 
-    def reference(weights):
-        bags = []
-        for b in range(offsets.numel() - 1):
-            lo, hi = int(offsets[b]), int(offsets[b + 1])
-            w = weights[lo:hi, None] if weights is not None else torch.ones(hi - lo, 1)
-            acc = (rows[lo:hi] * w).sum(0)
-            if mode == "mean":
-                denom = float(w.sum())
-                acc = acc / denom if denom != 0 else torch.zeros_like(acc)
-            bags.append(acc)
-        return torch.stack(bags).to(out.dtype)
-
+    out = layer(keys, offsets)
     assert out.shape == (offsets.numel() - 1, DIM)
-    torch.testing.assert_close(out.cpu(), reference(None), **_tol(qtype))
+    torch.testing.assert_close(out.cpu(), _pooling_reference(rows, offsets, mode, None, out.dtype), **_tol(qtype))
     for wdtype in (torch.float32, torch.float16):
         # The last bag's weights sum to zero, which yields a zero row for weighted mean.
         w = torch.tensor([0.5, 1.0, 2.0, 0.25, 1.0, -1.0, 0.5, -0.5], dtype=wdtype)
         out_w = layer(keys, offsets, w.to(device))
-        torch.testing.assert_close(out_w.cpu(), reference(w.float()), **_tol(qtype))
+        torch.testing.assert_close(out_w.cpu(), _pooling_reference(rows, offsets, mode, w.float(), out_w.dtype), **_tol(qtype))
+
+
+@pytest.mark.skipif(not nve_layers.HAS_TORCH_OPS, reason="torch custom ops not built")
+@pytest.mark.parametrize("qtype", QTYPES, ids=QIDS)
+@pytest.mark.parametrize("default_mode", ["sum", "mean", "concat"])
+@pytest.mark.parametrize("layer_type,device,host_cache", LAYER_CONFIGS)
+def test_rowwise_bag_mode_override(layer_type, device, host_cache, qtype, default_mode):
+    raw = _make_raw(qtype)
+    layer = _build(layer_type, device, host_cache, qtype, raw, bag_mode=default_mode)
+    keys = torch.tensor([1, 2, 2, 9, 40, 40, 40, 200], dtype=torch.int64, device=device)
+    offsets = torch.tensor([0, 3, 3, 5, 8], dtype=torch.int64, device=device)
+    rows = dequantize_rowwise(raw[keys.cpu()], qtype).float()
+    cached_weight = layer.weight
+    for _ in range(2):  # cold lookups followed by cache hits
+        for override in ["concat", "mean", "sum", None]:
+            mode = default_mode if override is None else override
+            if mode == "concat":
+                out = layer(keys, mode_override=override)
+                torch.testing.assert_close(out.cpu(), rows.to(out.dtype), **_tol(qtype))
+            else:
+                for wdtype in [None, torch.float32, torch.float16]:
+                    weights = None if wdtype is None else torch.tensor(
+                        [0.5, 1.0, 2.0, 0.25, 1.0, -1.0, 0.5, -0.5], dtype=wdtype)
+                    out = layer(keys, offsets, None if weights is None else weights.to(device),
+                                mode_override=override)
+                    expected = _pooling_reference(rows, offsets, mode, weights, out.dtype)
+                    torch.testing.assert_close(out.cpu(), expected, **_tol(qtype))
+            assert layer.mode == default_mode
+            assert layer.weight is cached_weight
+            assert not out.requires_grad  # quantized storage supports inference only
 
 
 # --------------------------------------------------------------------------- writes and misses
@@ -479,6 +511,33 @@ def test_rowwise_binding_rejects_unsupported_dtype():
 
 
 # --------------------------------------------------------------------------- dispatch
+
+@pytest.mark.parametrize("qtype", QTYPES, ids=QIDS)
+@pytest.mark.parametrize("default_mode", ["sum", "mean", "concat"])
+def test_rowwise_bag_mode_override_fallback(monkeypatch, qtype, default_mode):
+    raw = _make_raw(qtype)
+    bag = _build(LT.HostLayer, "cpu", 0, qtype, raw, bag_mode=default_mode)
+    monkeypatch.setattr(nve_layers, "HAS_TORCH_OPS", False)
+    keys = torch.tensor([1, 2, 2, 9, 40], dtype=torch.int64)
+    offsets = torch.tensor([0, 2, 2, 5], dtype=torch.int64)
+    rows = dequantize_rowwise(raw[keys], qtype).float()
+    cached_weight = bag.weight
+
+    for override in ["concat", "sum", "mean", None]:
+        mode = default_mode if override is None else override
+        kwargs = {} if override is None else {"mode_override": override}
+        if mode == "concat":
+            out = bag(keys, **kwargs)
+            torch.testing.assert_close(out, rows.to(out.dtype), **_tol(qtype))
+        else:
+            for weights in [None, torch.tensor([0.5, 1.0, 2.0, 0.25, 1.0])]:
+                out = bag(keys, offsets, per_sample_weights=weights, **kwargs)
+                expected = _pooling_reference(rows, offsets, mode, weights, out.dtype)
+                torch.testing.assert_close(out, expected, **_tol(qtype))
+        assert bag.mode == default_mode
+        assert bag.weight is cached_weight
+        assert not out.requires_grad
+
 
 @pytest.mark.parametrize("qtype", [nve.DataType_t.QInt8RowwiseF32, nve.DataType_t.QUint8RowwiseF16],
                          ids=["qint8_f32", "quint8_f16"])

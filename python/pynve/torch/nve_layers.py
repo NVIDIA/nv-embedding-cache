@@ -565,29 +565,45 @@ class NVEmbeddingBag(NVEmbeddingBase):
         super().__init__(num_embeddings, embedding_size, data_type, layer_type, gpu_cache_size=gpu_cache_size, host_cache_size=host_cache_size, storage=storage, weight_init=weight_init, optimize_for_training=optimize_for_training, device=device, id=id, config=config)
         self.mode = mode
 
-    def forward(self, input: torch.Tensor, offsets: torch.Tensor, per_sample_weights: Optional[torch.Tensor] = None):
+    def forward(self, input: torch.Tensor, offsets: Optional[torch.Tensor] = None,
+                per_sample_weights: Optional[torch.Tensor] = None, mode_override: Optional[str] = None):
         """Performs embedding bag lookup and reduction for the input indices.
 
         Args:
             input (torch.Tensor): Input indices to lookup in the embedding table
-            offsets (torch.Tensor): Offsets into input tensor defining the boundaries of sequences.
+            offsets (Optional[torch.Tensor]): Offsets into input tensor defining the boundaries of sequences.
                 Uses torch's include_last_offset=True convention: num_bags + 1 entries, with
                 offsets[0] == 0 and a trailing sentinel offsets[-1] == input.numel().
-            per_sample_weights (Optional[torch.Tensor], optional): Weights for each embedding entry. Defaults to None.
+                Required for 'sum'/'mean'; must be None for 'concat'.
+            per_sample_weights (Optional[torch.Tensor], optional): Weights for each embedding entry. Must be None
+                for 'concat'. Defaults to None.
+            mode_override (Optional[str], optional): Overrides the layer's mode ('sum', 'mean' or 'concat') for this
+                call only, so one layer, and its cache, can serve several poolings. Defaults to None (the
+                layer's mode).
 
         Returns:
             torch.Tensor: Reduced embedding vectors for each sequence. For 'concat' mode, returns
                          concatenated embeddings. For other modes ('sum', 'mean'), returns
                          the reduced embeddings according to the specified mode.
         """
+        mode = self.mode if mode_override is None else mode_override
+        if mode == "concat":
+            if offsets is not None or per_sample_weights is not None:
+                raise ValueError("offsets and per_sample_weights are not supported in 'concat' mode")
+        else:
+            # Also rejects unsupported modes.
+            pooling_type = int(nve_ops.pooling_type_from_mode(
+                mode, weighted=per_sample_weights is not None))
+            if offsets is None:
+                raise ValueError(f"offsets are required for mode {mode!r}")
         _check_forward_inputs(input, offsets, per_sample_weights)
         if not HAS_TORCH_OPS:
-            if self.mode == "concat":
+            if mode == "concat":
                 return nve_ops.CacheEmbeddingOp.apply(input, self.weight)
             else:
                 return nve_ops.CacheEmbeddingBagOp.apply(
-                    input, self.weight, offsets, self.mode, per_sample_weights)
-        elif self.mode == "concat":
+                    input, self.weight, offsets, mode, per_sample_weights)
+        elif mode == "concat":
             if self.optimize_for_training:
                 return nve_ops.NVEmbeddingOpTraining.apply(
                     self.marker_tensor, input, self.weight,
@@ -597,8 +613,6 @@ class NVEmbeddingBag(NVEmbeddingBase):
                     self.marker_tensor, input,
                     self.embedding_size, self.dtype_tag)
         else:
-            pooling_type = int(nve_ops.pooling_type_from_mode(
-                self.mode, weighted=per_sample_weights is not None))
             if self.optimize_for_training:
                 return nve_ops.NVEmbeddingBagOpTraining.apply(
                     self.marker_tensor, input, self.weight, offsets,
